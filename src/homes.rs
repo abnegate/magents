@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 #[derive(Clone, Debug)]
@@ -20,10 +20,11 @@ impl Homes {
         let grok = env_path("GROK_HOME").unwrap_or_else(|| home.join(".grok"));
         let codex = env_path("CODEX_HOME").unwrap_or_else(|| home.join(".codex"));
         let cursor = env_path("CURSOR_HOME").unwrap_or_else(|| home.join(".cursor"));
-        let cursor_app = home
-            .join("Library")
-            .join("Application Support")
-            .join("Cursor");
+        let cursor_app = env_path("CURSOR_APP_SUPPORT").unwrap_or_else(|| {
+            home.join("Library")
+                .join("Application Support")
+                .join("Cursor")
+        });
         let opencode = env_path("OPENCODE_DATA")
             .or_else(|| env_path("XDG_DATA_HOME").map(|path| path.join("opencode")))
             .unwrap_or_else(|| home.join(".local").join("share").join("opencode"));
@@ -51,6 +52,20 @@ impl Homes {
 
     pub fn mailbox_dir(&self) -> PathBuf {
         self.magents.join("mailbox")
+    }
+
+    pub fn isolated(root: impl AsRef<Path>) -> Self {
+        let root = root.as_ref();
+        Self {
+            claude: root.join("claude"),
+            grok: root.join("grok"),
+            codex: root.join("codex"),
+            cursor: root.join("cursor"),
+            cursor_app: root.join("cursor-app"),
+            opencode: root.join("opencode"),
+            magents: root.join("magents"),
+            claude_desktop: root.join("claude-desktop"),
+        }
     }
 }
 

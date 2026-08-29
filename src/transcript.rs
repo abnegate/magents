@@ -226,14 +226,17 @@ fn read_opencode_sqlite(path: &Path, session_id: &str) -> Result<Vec<Turn>> {
 }
 
 fn read_opencode_json_tree(path: &Path, session_id: &str) -> Result<Vec<Turn>> {
-    let messages = path
+    let Some(storage) = path
         .parent()
         .and_then(|parent| parent.parent())
-        .map(|storage| storage.join("message").join(session_id))
-        .filter(|dir| dir.is_dir());
-    let Some(messages) = messages else {
+        .and_then(|parent| parent.parent())
+    else {
         return Ok(Vec::new());
     };
+    let messages = storage.join("message").join(session_id);
+    if !messages.is_dir() {
+        return Ok(Vec::new());
+    }
     let mut files: Vec<_> = std::fs::read_dir(&messages)
         .map_err(|source| Error::Io {
             path: messages.clone(),
@@ -256,14 +259,7 @@ fn read_opencode_json_tree(path: &Path, session_id: &str) -> Result<Vec<Turn>> {
             .and_then(Value::as_str)
             .unwrap_or("assistant")
             .to_string();
-        let parts_dir = file
-            .parent()
-            .and_then(|parent| parent.parent())
-            .map(|storage| {
-                storage
-                    .join("part")
-                    .join(file.file_stem().unwrap_or_default())
-            });
+        let parts_dir = file.file_stem().map(|stem| storage.join("part").join(stem));
         let mut text = String::new();
         let mut tools = Vec::new();
         if let Some(parts_dir) = parts_dir.filter(|dir| dir.is_dir())

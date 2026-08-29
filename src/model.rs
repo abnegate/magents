@@ -35,6 +35,21 @@ impl Agent {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::Agent;
+
+    #[test]
+    fn parses_all_harness_aliases() {
+        assert_eq!(Agent::parse("claude-code"), Some(Agent::Claude));
+        assert_eq!(Agent::parse("codex"), Some(Agent::Codex));
+        assert_eq!(Agent::parse("cursor-agent"), Some(Agent::Cursor));
+        assert_eq!(Agent::parse("grok-code"), Some(Agent::Grok));
+        assert_eq!(Agent::parse("open-code"), Some(Agent::OpenCode));
+        assert_eq!(Agent::parse("nope"), None);
+    }
+}
+
 impl std::fmt::Display for Agent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())

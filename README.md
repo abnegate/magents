@@ -114,6 +114,14 @@ Codex Desktop threads are often `history_mode=paginated`; `codex exec resume` re
 
 Live Claude sessions come from `~/.claude/sessions/<pid>.json`. Live Grok sessions come from `~/.grok/active_sessions.json`. Codex threads come from `~/.codex/state_*.sqlite` plus rollout JSONL. Cursor agent chats come from `~/.cursor/projects/*/agent-transcripts` (titles from Cursor's composer store). OpenCode sessions come from `~/.local/share/opencode/opencode.db`.
 
+## Tests
+
+```bash
+cargo test
+```
+
+That covers parser units, isolated-home integration (list / read / search / mailbox for every harness, Claude UDS inject against a fake socket, OpenCode `run --session` argv), and CLI end-to-end (`list`, `get`, `read`, `search`, `send`, `inbox`, `install`).
+
 ## Requirements
 
 - Rust 1.88+

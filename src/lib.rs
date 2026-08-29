@@ -12,3 +12,6 @@ pub mod transcript;
 pub use error::Error;
 pub use homes::Homes;
 pub use model::{Agent, Session, Turn};
+
+#[cfg(test)]
+mod handoff_tests;

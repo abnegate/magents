@@ -70,7 +70,8 @@ pub fn deliver_live(homes: &Homes, session: &Session, message: &str) -> Result<V
 }
 
 fn send_opencode_run(session: &Session, message: &str) -> Result<()> {
-    let mut command = Command::new("opencode");
+    let program = std::env::var("MAGENTS_OPENCODE_BIN").unwrap_or_else(|_| "opencode".into());
+    let mut command = Command::new(program);
     command.arg("run").arg("--session").arg(&session.session_id);
     if let Some(cwd) = &session.cwd {
         command.arg("--dir").arg(cwd);
