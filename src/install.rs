@@ -1,11 +1,18 @@
 use crate::error::{Error, Result};
+use serde_json::{Map, Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SKILL: &str = include_str!("../skills/magents.md");
 
-pub fn install(claude: bool, grok: bool, codex: bool) -> Result<Vec<String>> {
+pub fn install(
+    claude: bool,
+    grok: bool,
+    codex: bool,
+    cursor: bool,
+    opencode: bool,
+) -> Result<Vec<String>> {
     let exe = std::env::current_exe().map_err(|source| Error::Io {
         path: PathBuf::from("magents"),
         source,
@@ -35,6 +42,29 @@ pub fn install(claude: bool, grok: bool, codex: bool) -> Result<Vec<String>> {
     }
     if codex {
         notes.push(install_codex(&exe)?);
+    }
+    if cursor {
+        notes.push(install_cursor(&exe)?);
+        notes.push(write_skill(
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(".cursor")
+                .join("skills")
+                .join("magents")
+                .join("SKILL.md"),
+        )?);
+    }
+    if opencode {
+        notes.push(install_opencode(&exe)?);
+        notes.push(write_skill(
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(".config")
+                .join("opencode")
+                .join("skills")
+                .join("magents")
+                .join("SKILL.md"),
+        )?);
     }
     Ok(notes)
 }
@@ -81,6 +111,90 @@ fn install_codex(exe: &Path) -> Result<String> {
             "mcp",
         ],
     )
+}
+
+fn install_cursor(exe: &Path) -> Result<String> {
+    let path = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".cursor")
+        .join("mcp.json");
+    let mut root = read_json_object(&path)?;
+    let servers = root
+        .entry("mcpServers")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| Error::msg("cursor mcp.json mcpServers must be an object"))?;
+    servers.insert(
+        "magents".into(),
+        json!({
+            "command": exe.to_str().unwrap_or("magents"),
+            "args": ["mcp"],
+        }),
+    );
+    write_json(&path, &Value::Object(root))?;
+    Ok(format!("wrote {}", path.display()))
+}
+
+fn install_opencode(exe: &Path) -> Result<String> {
+    let path = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".config")
+        .join("opencode")
+        .join("opencode.json");
+    let mut root = read_json_object(&path)?;
+    if !root.contains_key("$schema") {
+        root.insert("$schema".into(), json!("https://opencode.ai/config.json"));
+    }
+    let mcp = root
+        .entry("mcp")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| Error::msg("opencode.json mcp must be an object"))?;
+    mcp.insert(
+        "magents".into(),
+        json!({
+            "type": "local",
+            "command": [exe.to_str().unwrap_or("magents"), "mcp"],
+            "enabled": true,
+        }),
+    );
+    write_json(&path, &Value::Object(root))?;
+    Ok(format!("wrote {}", path.display()))
+}
+
+fn read_json_object(path: &Path) -> Result<Map<String, Value>> {
+    if !path.is_file() {
+        return Ok(Map::new());
+    }
+    let raw = fs::read_to_string(path).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if raw.trim().is_empty() {
+        return Ok(Map::new());
+    }
+    let value: Value = serde_json::from_str(&raw)?;
+    match value {
+        Value::Object(map) => Ok(map),
+        _ => Err(Error::msg(format!(
+            "{} is not a JSON object",
+            path.display()
+        ))),
+    }
+}
+
+fn write_json(path: &Path, value: &Value) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| Error::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let raw = serde_json::to_string_pretty(value)?;
+    fs::write(path, format!("{raw}\n")).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 fn write_skill(path: PathBuf) -> Result<String> {

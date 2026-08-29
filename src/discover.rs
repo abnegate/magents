@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::homes::{Homes, pid_alive};
+use crate::homes::{Homes, named_process_alive, pid_alive};
 use crate::model::{Agent, Session};
 use chrono::{DateTime, TimeZone, Utc};
 use regex::Regex;
@@ -43,6 +43,12 @@ pub fn list_sessions(homes: &Homes, filter: &ListFilter) -> Result<Vec<Session>>
     }
     if filter.agent.is_none() || filter.agent == Some(Agent::Codex) {
         sessions.extend(discover_codex(homes)?);
+    }
+    if filter.agent.is_none() || filter.agent == Some(Agent::Cursor) {
+        sessions.extend(discover_cursor(homes)?);
+    }
+    if filter.agent.is_none() || filter.agent == Some(Agent::OpenCode) {
+        sessions.extend(discover_opencode(homes)?);
     }
     let needle = filter
         .query
@@ -531,6 +537,352 @@ fn newest_state_db(codex_home: &Path) -> Option<PathBuf> {
     best.map(|(_, path)| path)
 }
 
+fn discover_cursor(homes: &Homes) -> Result<Vec<Session>> {
+    let headers = cursor_headers(homes);
+    let workspaces = cursor_workspaces(homes);
+    let live_app = named_process_alive("Cursor");
+    let projects = homes.cursor.join("projects");
+    if !projects.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut sessions = Vec::new();
+    for project in fs::read_dir(&projects).map_err(|source| Error::Io {
+        path: projects.clone(),
+        source,
+    })? {
+        let project = project.map_err(|source| Error::Io {
+            path: projects.clone(),
+            source,
+        })?;
+        let transcripts = project.path().join("agent-transcripts");
+        if !transcripts.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(&transcripts).map_err(|source| Error::Io {
+            path: transcripts.clone(),
+            source,
+        })? {
+            let entry = entry.map_err(|source| Error::Io {
+                path: transcripts.clone(),
+                source,
+            })?;
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let Some(session_id) = dir.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if session_id == "subagents" {
+                continue;
+            }
+            let jsonl = dir.join(format!("{session_id}.jsonl"));
+            if !jsonl.is_file() {
+                continue;
+            }
+            let header = headers.get(session_id);
+            if header.is_some_and(|header| header.subagent) {
+                continue;
+            }
+            let cwd = header
+                .and_then(|header| header.workspace_id.as_deref())
+                .and_then(|id| workspaces.get(id).cloned());
+            let modified = jsonl
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .map(DateTime::<Utc>::from);
+            let last_activity_at = header
+                .and_then(|header| header.last_activity_at)
+                .or(modified);
+            sessions.push(Session {
+                agent: Agent::Cursor,
+                session_id: session_id.to_string(),
+                desktop_id: None,
+                name: None,
+                title: header
+                    .and_then(|header| header.title.clone())
+                    .or_else(|| cursor_title_from_transcript(&jsonl)),
+                cwd,
+                branch: None,
+                live: live_app && recently_active(last_activity_at),
+                archived: header.is_some_and(|header| header.archived),
+                pid: None,
+                model: None,
+                last_activity_at,
+                transcript_path: Some(jsonl),
+                messaging_socket: None,
+                origin: Some("cursor".into()),
+                tmux: None,
+            });
+        }
+    }
+    Ok(sessions)
+}
+
+struct CursorHeader {
+    title: Option<String>,
+    archived: bool,
+    subagent: bool,
+    workspace_id: Option<String>,
+    last_activity_at: Option<DateTime<Utc>>,
+}
+
+fn cursor_headers(homes: &Homes) -> HashMap<String, CursorHeader> {
+    let db = homes
+        .cursor_app
+        .join("User")
+        .join("globalStorage")
+        .join("state.vscdb");
+    let Ok(connection) =
+        Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return HashMap::new();
+    };
+    let Ok(mut statement) = connection.prepare(
+        "SELECT composerId, workspaceId, lastUpdatedAt, isArchived, isSubagent, value
+         FROM composerHeaders",
+    ) else {
+        return HashMap::new();
+    };
+    let Ok(rows) = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, i64>(3).unwrap_or(0),
+            row.get::<_, i64>(4).unwrap_or(0),
+            row.get::<_, Option<String>>(5)?,
+        ))
+    }) else {
+        return HashMap::new();
+    };
+    let mut headers = HashMap::new();
+    for row in rows.flatten() {
+        let (id, workspace_id, updated, archived, subagent, value) = row;
+        let parsed = value
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
+        let title = parsed
+            .as_ref()
+            .and_then(|value| value.get("name").and_then(Value::as_str))
+            .filter(|name| !name.is_empty())
+            .map(ToOwned::to_owned);
+        let workspace_id = parsed
+            .as_ref()
+            .and_then(|value| {
+                value
+                    .pointer("/workspaceIdentifier/id")
+                    .and_then(Value::as_str)
+            })
+            .map(ToOwned::to_owned)
+            .or(workspace_id);
+        headers.insert(
+            id,
+            CursorHeader {
+                title,
+                archived: archived != 0,
+                subagent: subagent != 0,
+                workspace_id,
+                last_activity_at: millis(updated),
+            },
+        );
+    }
+    headers
+}
+
+fn cursor_workspaces(homes: &Homes) -> HashMap<String, String> {
+    let root = homes.cursor_app.join("User").join("workspaceStorage");
+    let mut map = HashMap::new();
+    let Ok(entries) = fs::read_dir(&root) else {
+        return map;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path().join("workspace.json");
+        let Ok(value) = read_json(&path) else {
+            continue;
+        };
+        if let Some(cwd) = value
+            .get("folder")
+            .and_then(Value::as_str)
+            .and_then(file_uri_path)
+            && let Some(id) = entry.file_name().to_str()
+        {
+            map.insert(id.to_string(), cwd);
+        }
+    }
+    map
+}
+
+fn cursor_title_from_transcript(path: &Path) -> Option<String> {
+    let raw = fs::read_to_string(path).ok()?;
+    let line = raw.lines().next()?;
+    let value: Value = serde_json::from_str(line).ok()?;
+    let text = value.pointer("/message/content").and_then(|content| {
+        content.as_array().and_then(|items| {
+            items
+                .iter()
+                .find_map(|item| item.get("text").and_then(Value::as_str))
+        })
+    })?;
+    let text = cursor_user_text(text);
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.chars().take(80).collect())
+    }
+}
+
+pub fn cursor_user_text(text: &str) -> String {
+    if let Some(start) = text.find("<user_query>") {
+        let rest = &text[start + "<user_query>".len()..];
+        let body = rest.split("</user_query>").next().unwrap_or(rest);
+        return body.split_whitespace().collect::<Vec<_>>().join(" ");
+    }
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn discover_opencode(homes: &Homes) -> Result<Vec<Session>> {
+    let db = homes.opencode.join("opencode.db");
+    if db.is_file() {
+        return discover_opencode_sqlite(homes, &db);
+    }
+    discover_opencode_json(homes)
+}
+
+fn discover_opencode_sqlite(homes: &Homes, db: &Path) -> Result<Vec<Session>> {
+    let connection = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut statement = connection.prepare(
+        "SELECT id, parent_id, directory, title, time_updated, time_archived
+         FROM session",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<i64>>(4)?,
+            row.get::<_, Option<i64>>(5)?,
+        ))
+    })?;
+    let live_app = named_process_alive("opencode");
+    let mut sessions = Vec::new();
+    for row in rows {
+        let (id, parent_id, directory, title, updated, archived_at) = row?;
+        if parent_id.is_some() {
+            continue;
+        }
+        let last_activity_at = millis(updated);
+        sessions.push(Session {
+            agent: Agent::OpenCode,
+            session_id: id,
+            desktop_id: None,
+            name: None,
+            title: title.filter(|value| !value.is_empty()),
+            cwd: directory.filter(|value| !value.is_empty()),
+            branch: None,
+            live: live_app && recently_active(last_activity_at),
+            archived: archived_at.is_some(),
+            pid: None,
+            model: None,
+            last_activity_at,
+            transcript_path: Some(homes.opencode.join("opencode.db")),
+            messaging_socket: None,
+            origin: Some("opencode".into()),
+            tmux: None,
+        });
+    }
+    Ok(sessions)
+}
+
+fn discover_opencode_json(homes: &Homes) -> Result<Vec<Session>> {
+    let root = homes.opencode.join("storage").join("session");
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let live_app = named_process_alive("opencode");
+    let mut sessions = Vec::new();
+    for entry in WalkDir::new(&root).into_iter().flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(value) = read_json(path) else {
+            continue;
+        };
+        if value
+            .get("parentID")
+            .or_else(|| value.get("parent_id"))
+            .is_some()
+        {
+            continue;
+        }
+        let Some(id) = value.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let updated = value.pointer("/time/updated").and_then(Value::as_i64);
+        let last_activity_at = millis(updated);
+        sessions.push(Session {
+            agent: Agent::OpenCode,
+            session_id: id.to_string(),
+            desktop_id: None,
+            name: None,
+            title: value
+                .get("title")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            cwd: value
+                .get("directory")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            branch: None,
+            live: live_app && recently_active(last_activity_at),
+            archived: value.pointer("/time/archived").is_some(),
+            pid: None,
+            model: None,
+            last_activity_at,
+            transcript_path: Some(path.to_path_buf()),
+            messaging_socket: None,
+            origin: Some("opencode".into()),
+            tmux: None,
+        });
+    }
+    Ok(sessions)
+}
+
+fn recently_active(time: Option<DateTime<Utc>>) -> bool {
+    time.map(|time| (Utc::now() - time).num_minutes().abs() < 15)
+        .unwrap_or(false)
+}
+
+fn file_uri_path(uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("file://")?;
+    Some(percent_decode(rest))
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let Ok(value) = u8::from_str_radix(
+                std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or(""),
+                16,
+            )
+        {
+            output.push(value);
+            index += 3;
+            continue;
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&output).into_owned()
+}
+
 fn fallback_rollout(codex_home: &Path, session_id: &str) -> Option<PathBuf> {
     let sessions = codex_home.join("sessions");
     if !sessions.is_dir() {
@@ -575,8 +927,32 @@ mod tests {
         let (agent, rest) = split_agent_ref("grok:latest");
         assert_eq!(agent, Some(Agent::Grok));
         assert_eq!(rest, "latest");
+        let (agent, rest) = split_agent_ref("cursor:latest");
+        assert_eq!(agent, Some(Agent::Cursor));
+        assert_eq!(rest, "latest");
+        let (agent, rest) = split_agent_ref("opencode:ses_abc");
+        assert_eq!(agent, Some(Agent::OpenCode));
+        assert_eq!(rest, "ses_abc");
         let (agent, rest) = split_agent_ref("disaster recovery");
         assert_eq!(agent, None);
         assert_eq!(rest, "disaster recovery");
+    }
+
+    #[test]
+    fn extracts_cursor_user_query() {
+        let raw = "<timestamp>now</timestamp>\n<user_query>\nFix the leak\n</user_query>";
+        assert_eq!(super::cursor_user_text(raw), "Fix the leak");
+    }
+
+    #[test]
+    fn decodes_file_uris() {
+        assert_eq!(
+            super::file_uri_path("file:///Users/jakebarnby/Local/cloud").as_deref(),
+            Some("/Users/jakebarnby/Local/cloud")
+        );
+        assert_eq!(
+            super::file_uri_path("file:///tmp/foo%20bar").as_deref(),
+            Some("/tmp/foo bar")
+        );
     }
 }

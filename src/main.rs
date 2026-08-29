@@ -8,7 +8,7 @@ use std::io::IsTerminal;
 #[derive(Parser)]
 #[command(
     name = "magents",
-    about = "Mates + agents: shared session bus for Claude Code, Codex, and Grok"
+    about = "Mates + agents: shared session bus for Claude, Codex, Cursor, Grok, and OpenCode"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -65,6 +65,10 @@ enum Command {
         grok: bool,
         #[arg(long)]
         codex: bool,
+        #[arg(long)]
+        cursor: bool,
+        #[arg(long)]
+        opencode: bool,
         #[arg(long)]
         all: bool,
     },
@@ -168,9 +172,17 @@ async fn main() -> anyhow::Result<()> {
             claude,
             grok,
             codex,
+            cursor,
+            opencode,
             all,
         }) => {
-            let notes = magents::install::install(claude || all, grok || all, codex || all)?;
+            let notes = magents::install::install(
+                claude || all,
+                grok || all,
+                codex || all,
+                cursor || all,
+                opencode || all,
+            )?;
             for note in notes {
                 println!("{note}");
             }

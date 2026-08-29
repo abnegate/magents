@@ -7,7 +7,9 @@ use std::path::PathBuf;
 pub enum Agent {
     Claude,
     Codex,
+    Cursor,
     Grok,
+    OpenCode,
 }
 
 impl Agent {
@@ -15,7 +17,9 @@ impl Agent {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Cursor => "cursor",
             Self::Grok => "grok",
+            Self::OpenCode => "opencode",
         }
     }
 
@@ -23,7 +27,9 @@ impl Agent {
         match value.trim().to_ascii_lowercase().as_str() {
             "claude" | "claude-code" | "ccd" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
+            "cursor" | "cursor-ide" | "cursor-agent" => Some(Self::Cursor),
             "grok" | "grok-code" => Some(Self::Grok),
+            "opencode" | "open-code" | "oc" => Some(Self::OpenCode),
             _ => None,
         }
     }
@@ -168,6 +174,28 @@ impl Caller {
             return Self {
                 agent: Some(Agent::Claude),
                 session_id: std::env::var("CLAUDE_SESSION_ID").ok(),
+            };
+        }
+        if std::env::var_os("CURSOR_SESSION_ID").is_some()
+            || std::env::var_os("CURSOR_PROJECT_DIR").is_some()
+            || std::env::var_os("CURSOR_AGENT").is_some()
+        {
+            return Self {
+                agent: Some(Agent::Cursor),
+                session_id: std::env::var("CURSOR_SESSION_ID")
+                    .ok()
+                    .or_else(|| std::env::var("COMPOSER_SESSION_ID").ok()),
+            };
+        }
+        if std::env::var_os("OPENCODE_SESSION_ID").is_some()
+            || std::env::var_os("OPENCODE_DIRECTORY").is_some()
+            || std::env::var_os("OPENCODE_SERVER").is_some()
+        {
+            return Self {
+                agent: Some(Agent::OpenCode),
+                session_id: std::env::var("OPENCODE_SESSION_ID")
+                    .ok()
+                    .or_else(|| std::env::var("OPENCODE_SESSION").ok()),
             };
         }
         if std::env::var_os("CODEX_HOME").is_some() || std::env::var_os("CODEX_THREAD_ID").is_some()

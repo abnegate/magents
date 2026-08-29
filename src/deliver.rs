@@ -60,8 +60,35 @@ pub fn deliver_live(homes: &Homes, session: &Session, message: &str) -> Result<V
                 }
             }
         }
+        Agent::OpenCode => match send_opencode_run(session, message) {
+            Ok(()) => delivered.push("opencode-run".into()),
+            Err(error) => delivered.push(format!("opencode-run-failed:{error}")),
+        },
+        Agent::Cursor => {}
     }
     Ok(delivered)
+}
+
+fn send_opencode_run(session: &Session, message: &str) -> Result<()> {
+    let mut command = Command::new("opencode");
+    command.arg("run").arg("--session").arg(&session.session_id);
+    if let Some(cwd) = &session.cwd {
+        command.arg("--dir").arg(cwd);
+    }
+    command
+        .arg(message)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let child = command.spawn().map_err(|source| Error::Io {
+        path: PathBuf::from("opencode"),
+        source,
+    })?;
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 fn send_grok_single(session: &Session, message: &str) -> Result<()> {

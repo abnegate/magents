@@ -37,7 +37,7 @@ pub fn inbox(
     agent: Option<Agent>,
 ) -> Result<Vec<Mail>> {
     let agent = agent.or(caller.agent).ok_or_else(|| {
-        Error::msg("pass session_id, or call from a Claude/Codex/Grok MCP session")
+        Error::msg("pass session_id, or call from a Claude/Codex/Cursor/Grok/OpenCode MCP session")
     })?;
     let session_id = session_id
         .map(ToOwned::to_owned)

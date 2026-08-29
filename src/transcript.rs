@@ -21,6 +21,8 @@ pub fn read_session(session: &Session, limit: usize) -> Result<Transcript> {
         Agent::Claude => read_claude(path)?,
         Agent::Grok => read_grok(path)?,
         Agent::Codex => read_codex(path)?,
+        Agent::Cursor => read_cursor(path)?,
+        Agent::OpenCode => read_opencode(session, path)?,
     };
     Ok(compact(session.clone(), turns, limit))
 }
@@ -52,7 +54,14 @@ pub fn search_transcripts(
         let Some(path) = session.transcript_path.as_deref() else {
             continue;
         };
-        if let Some((matches, snippet)) = scan_file(path, &needle) {
+        let hit = if session.agent == Agent::OpenCode
+            && path.extension().and_then(|ext| ext.to_str()) == Some("db")
+        {
+            scan_opencode_db(path, &session.session_id, &needle)
+        } else {
+            scan_file(path, &needle)
+        };
+        if let Some((matches, snippet)) = hit {
             hits.push(SearchHit {
                 session,
                 matches,
@@ -98,6 +107,230 @@ fn compact(session: Session, turns: Vec<Turn>, limit: usize) -> Transcript {
         turns: window,
         inert: true,
     }
+}
+
+fn read_cursor(path: &Path) -> Result<Vec<Turn>> {
+    let mut turns = Vec::new();
+    for value in jsonl(path)? {
+        let Some(role) = value.get("role").and_then(Value::as_str) else {
+            continue;
+        };
+        if role != "user" && role != "assistant" {
+            continue;
+        }
+        let (text, tools) = content_parts(value.pointer("/message/content"));
+        let text = if role == "user" {
+            unwrap_cursor_user(&text)
+        } else {
+            text
+        };
+        if text.is_empty() && tools.is_empty() {
+            continue;
+        }
+        turns.push(Turn {
+            role: role.to_string(),
+            text,
+            tools,
+        });
+    }
+    Ok(turns)
+}
+
+fn read_opencode(session: &crate::model::Session, path: &Path) -> Result<Vec<Turn>> {
+    if path.extension().and_then(|ext| ext.to_str()) == Some("db") {
+        return read_opencode_sqlite(path, &session.session_id);
+    }
+    read_opencode_json_tree(path, &session.session_id)
+}
+
+fn read_opencode_sqlite(path: &Path, session_id: &str) -> Result<Vec<Turn>> {
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut statement = connection.prepare(
+        "SELECT m.data, p.data
+         FROM message m
+         LEFT JOIN part p ON p.message_id = m.id
+         WHERE m.session_id = ?1
+         ORDER BY m.time_created, p.time_created",
+    )?;
+    let rows = statement.query_map([session_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    })?;
+    let mut turns = Vec::new();
+    let mut current_role = String::new();
+    let mut text = String::new();
+    let mut tools = Vec::new();
+    let flush =
+        |role: &mut String, text: &mut String, tools: &mut Vec<String>, turns: &mut Vec<Turn>| {
+            if role.is_empty() {
+                return;
+            }
+            if text.is_empty() && tools.is_empty() {
+                role.clear();
+                return;
+            }
+            turns.push(Turn {
+                role: std::mem::take(role),
+                text: std::mem::take(text),
+                tools: std::mem::take(tools),
+            });
+        };
+    for row in rows {
+        let (message_raw, part_raw) = row?;
+        let message: Value = serde_json::from_str(&message_raw)?;
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("assistant")
+            .to_string();
+        if role != current_role {
+            flush(&mut current_role, &mut text, &mut tools, &mut turns);
+            current_role = role;
+        }
+        if let Some(part_raw) = part_raw {
+            let part: Value = serde_json::from_str(&part_raw)?;
+            match part.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    if let Some(chunk) = part.get("text").and_then(Value::as_str) {
+                        if !text.is_empty() {
+                            text.push('\n');
+                        }
+                        text.push_str(chunk);
+                    }
+                }
+                Some(kind) if kind.contains("tool") => {
+                    if let Some(name) = part
+                        .get("name")
+                        .or_else(|| part.pointer("/tool/name"))
+                        .or_else(|| part.get("tool"))
+                        .and_then(Value::as_str)
+                    {
+                        tools.push(name.to_string());
+                    } else {
+                        tools.push(kind.to_string());
+                    }
+                }
+                _ => {
+                    if let Some(chunk) = part.get("text").and_then(Value::as_str) {
+                        if !text.is_empty() {
+                            text.push('\n');
+                        }
+                        text.push_str(chunk);
+                    }
+                }
+            }
+        }
+    }
+    flush(&mut current_role, &mut text, &mut tools, &mut turns);
+    Ok(turns)
+}
+
+fn read_opencode_json_tree(path: &Path, session_id: &str) -> Result<Vec<Turn>> {
+    let messages = path
+        .parent()
+        .and_then(|parent| parent.parent())
+        .map(|storage| storage.join("message").join(session_id))
+        .filter(|dir| dir.is_dir());
+    let Some(messages) = messages else {
+        return Ok(Vec::new());
+    };
+    let mut files: Vec<_> = std::fs::read_dir(&messages)
+        .map_err(|source| Error::Io {
+            path: messages.clone(),
+            source,
+        })?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .collect();
+    files.sort();
+    let mut turns = Vec::new();
+    for file in files {
+        let value: Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).map_err(|source| Error::Io {
+                path: file.clone(),
+                source,
+            })?)?;
+        let role = value
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("assistant")
+            .to_string();
+        let parts_dir = file
+            .parent()
+            .and_then(|parent| parent.parent())
+            .map(|storage| {
+                storage
+                    .join("part")
+                    .join(file.file_stem().unwrap_or_default())
+            });
+        let mut text = String::new();
+        let mut tools = Vec::new();
+        if let Some(parts_dir) = parts_dir.filter(|dir| dir.is_dir())
+            && let Ok(entries) = std::fs::read_dir(parts_dir)
+        {
+            for entry in entries.flatten() {
+                let Ok(part) = serde_json::from_str::<Value>(
+                    &std::fs::read_to_string(entry.path()).unwrap_or_default(),
+                ) else {
+                    continue;
+                };
+                if let Some(chunk) = part.get("text").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(chunk);
+                }
+                if part
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind.contains("tool"))
+                    && let Some(name) = part.get("name").and_then(Value::as_str)
+                {
+                    tools.push(name.to_string());
+                }
+            }
+        }
+        if text.is_empty() && tools.is_empty() {
+            continue;
+        }
+        turns.push(Turn { role, text, tools });
+    }
+    Ok(turns)
+}
+
+fn scan_opencode_db(path: &Path, session_id: &str, needle: &str) -> Option<(usize, String)> {
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
+    let mut statement = connection
+        .prepare("SELECT data FROM part WHERE session_id = ?1")
+        .ok()?;
+    let rows = statement
+        .query_map([session_id], |row| row.get::<_, String>(0))
+        .ok()?;
+    let mut matches = 0usize;
+    let mut snippet = None;
+    for row in rows.flatten() {
+        let lowered = row.to_ascii_lowercase();
+        if !lowered.contains(needle) {
+            continue;
+        }
+        matches += 1;
+        if snippet.is_none() {
+            snippet = Some(extract_snippet(&row, needle));
+        }
+    }
+    snippet.map(|snippet| (matches, snippet))
+}
+
+fn unwrap_cursor_user(text: &str) -> String {
+    if let Some(start) = text.find("<user_query>") {
+        let rest = &text[start + "<user_query>".len()..];
+        let body = rest.split("</user_query>").next().unwrap_or(rest);
+        return body.split_whitespace().collect::<Vec<_>>().join(" ");
+    }
+    text.to_string()
 }
 
 fn read_claude(path: &Path) -> Result<Vec<Turn>> {
@@ -340,5 +573,12 @@ mod tests {
     #[test]
     fn clips_whitespace() {
         assert_eq!(clip(" a   b ", 10), "a b");
+    }
+
+    #[test]
+    fn unwraps_cursor_user_query() {
+        let raw =
+            "<timestamp>Sunday</timestamp>\n<user_query>\nPull the 109 point matrix\n</user_query>";
+        assert_eq!(super::unwrap_cursor_user(raw), "Pull the 109 point matrix");
     }
 }
