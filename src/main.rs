@@ -50,6 +50,12 @@ enum Command {
     },
     /// Queue a message for another session
     Send { to: String, message: String },
+    /// Hand this work to another live agent with compact state
+    Handoff {
+        to: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Show the mailbox for this (or a given) session
     Inbox {
         #[arg(long)]
@@ -158,6 +164,11 @@ async fn main() -> anyhow::Result<()> {
                     "mail_id": mail.id
                 })
             );
+        }
+        Some(Command::Handoff { to, reason }) => {
+            let report =
+                magents::handoff::run(&Homes::from_env(), to.as_deref(), reason.as_deref())?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Some(Command::Inbox { session, agent }) => {
             let mail = mailbox::inbox(

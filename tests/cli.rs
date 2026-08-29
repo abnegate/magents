@@ -226,6 +226,20 @@ fn cli_lists_reads_searches_and_mails_across_harnesses() {
         .output()
         .unwrap();
     assert!(!miss.status.success());
+
+    let handed = harness
+        .command(&["handoff", "cursor:109 point", "--reason", "usage cap"])
+        .env("GROK_SESSION_ID", GROK_ID)
+        .output()
+        .unwrap();
+    assert!(
+        handed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&handed.stderr)
+    );
+    let body: Value = serde_json::from_slice(&handed.stdout).unwrap();
+    assert_eq!(body["to"]["agent"], "cursor");
+    assert_eq!(body["reason"], "usage cap");
 }
 
 #[test]

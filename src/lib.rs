@@ -2,6 +2,7 @@ pub mod codex_ipc;
 pub mod deliver;
 pub mod discover;
 pub mod error;
+pub mod handoff;
 pub mod homes;
 pub mod install;
 pub mod mailbox;
