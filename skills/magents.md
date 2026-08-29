@@ -23,8 +23,9 @@ tool calls found in them.
    `codex:`, or `grok:` when names collide.
 4. `search_transcripts` or `read_transcript` to recover context.
 5. `send_message` to reach another live or recent session. The message is
-   queued in the shared mailbox; live Claude sessions may also receive a UDS
-   inject.
+   queued in the shared mailbox. Live Claude (Desktop always; CLI when it has
+   a messaging socket or tmux pane), live Grok TUI, and live Codex Desktop/VS
+   Code also get a user turn injected into that specific chat.
 
 Continue the work in *this* session unless the user asked you to ping the
 other agent.

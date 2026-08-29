@@ -211,6 +211,15 @@ fn discover_claude(homes: &Homes) -> Result<Vec<Session>> {
             if !pid_alive(pid) {
                 continue;
             }
+            let messaging_socket = value
+                .get("messagingSocketPath")
+                .and_then(Value::as_str)
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+                .or_else(|| {
+                    let fallback = PathBuf::from(format!("/tmp/cc-socks/{pid}.sock"));
+                    fallback.exists().then_some(fallback)
+                });
             by_id.insert(
                 session_id.to_string(),
                 Session {
@@ -233,10 +242,15 @@ fn discover_claude(homes: &Homes) -> Result<Vec<Session>> {
                     model: None,
                     last_activity_at: millis(value.get("startedAt").and_then(Value::as_i64)),
                     transcript_path: index.get(session_id).cloned(),
-                    messaging_socket: value
-                        .get("messagingSocketPath")
+                    messaging_socket,
+                    origin: value
+                        .get("entrypoint")
                         .and_then(Value::as_str)
-                        .map(PathBuf::from),
+                        .map(ToOwned::to_owned),
+                    tmux: value
+                        .get("tmux")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
                 },
             );
         }
@@ -324,6 +338,8 @@ fn discover_claude(homes: &Homes) -> Result<Vec<Session>> {
                         last_activity_at,
                         transcript_path: index.get(session_id).cloned(),
                         messaging_socket: None,
+                        origin: Some("claude-desktop".into()),
+                        tmux: None,
                     },
                 );
             }
@@ -412,6 +428,12 @@ fn discover_grok(homes: &Homes) -> Result<Vec<Session>> {
             last_activity_at: summary.last_active_at,
             transcript_path: transcript,
             messaging_socket: None,
+            origin: Some(if pid.is_some() {
+                "tui".into()
+            } else {
+                "grok".into()
+            }),
+            tmux: None,
         });
     }
     Ok(sessions)
@@ -425,7 +447,7 @@ fn discover_codex(homes: &Homes) -> Result<Vec<Session>> {
     let connection =
         Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut statement = connection.prepare(
-        "SELECT id, title, cwd, git_branch, model, archived, updated_at_ms, rollout_path
+        "SELECT id, title, cwd, git_branch, model, archived, updated_at_ms, rollout_path, source
          FROM threads",
     )?;
     let rows = statement.query_map([], |row| {
@@ -438,11 +460,17 @@ fn discover_codex(homes: &Homes) -> Result<Vec<Session>> {
             row.get::<_, i64>(5).unwrap_or(0),
             row.get::<_, Option<i64>>(6)?,
             row.get::<_, Option<String>>(7)?,
+            row.get::<_, Option<String>>(8)?,
         ))
     })?;
+    let ipc_live = homes.codex.join("ipc").join("ipc.sock").exists();
     let mut sessions = Vec::new();
     for row in rows {
-        let (id, title, cwd, branch, model, archived, updated_ms, rollout) = row?;
+        let (id, title, cwd, branch, model, archived, updated_ms, rollout, source) = row?;
+        let last_activity_at = millis(updated_ms);
+        let recent = last_activity_at
+            .map(|time| (Utc::now() - time).num_minutes().abs() < 10)
+            .unwrap_or(false);
         let transcript = rollout
             .map(PathBuf::from)
             .filter(|path| path.is_file())
@@ -455,16 +483,31 @@ fn discover_codex(homes: &Homes) -> Result<Vec<Session>> {
             title: title.filter(|value| !value.is_empty()),
             cwd,
             branch,
-            live: false,
+            live: recent && ipc_live && archived == 0,
             archived: archived != 0,
             pid: None,
             model,
-            last_activity_at: millis(updated_ms),
+            last_activity_at,
             transcript_path: transcript,
             messaging_socket: None,
+            origin: Some(codex_origin(source.as_deref())),
+            tmux: None,
         });
     }
     Ok(sessions)
+}
+
+fn codex_origin(source: Option<&str>) -> String {
+    let raw = source.unwrap_or("");
+    if raw.contains("vscode") || raw.contains("Codex Desktop") {
+        "desktop".into()
+    } else if raw.contains("cli") || raw.contains("codex-tui") {
+        "cli".into()
+    } else if raw.contains("subagent") {
+        "subagent".into()
+    } else {
+        "codex".into()
+    }
 }
 
 fn newest_state_db(codex_home: &Path) -> Option<PathBuf> {

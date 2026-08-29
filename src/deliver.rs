@@ -1,3 +1,4 @@
+use crate::codex_ipc;
 use crate::error::{Error, Result};
 use crate::homes::Homes;
 use crate::model::{Agent, Session};
@@ -5,10 +6,11 @@ use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 #[derive(Deserialize)]
@@ -19,15 +21,146 @@ struct PeerKey {
 
 pub fn deliver_live(homes: &Homes, session: &Session, message: &str) -> Result<Vec<String>> {
     let mut delivered = Vec::new();
-    if session.agent == Agent::Claude
-        && let Some(socket) = &session.messaging_socket
-    {
-        match send_claude_uds(homes, session, socket, message) {
-            Ok(()) => delivered.push("claude-uds".into()),
-            Err(error) => delivered.push(format!("claude-uds-failed:{error}")),
+    match session.agent {
+        Agent::Claude => {
+            if let Some(socket) = &session.messaging_socket {
+                match send_claude_uds(homes, session, socket, message) {
+                    Ok(()) => delivered.push("claude-uds".into()),
+                    Err(error) => delivered.push(format!("claude-uds-failed:{error}")),
+                }
+            }
+            if delivered.is_empty()
+                && let Some(target) = &session.tmux
+            {
+                match send_tmux(target, message) {
+                    Ok(()) => delivered.push("claude-tmux".into()),
+                    Err(error) => delivered.push(format!("claude-tmux-failed:{error}")),
+                }
+            }
+        }
+        Agent::Grok => match send_grok_single(session, message) {
+            Ok(()) => delivered.push("grok-single".into()),
+            Err(error) => delivered.push(format!("grok-single-failed:{error}")),
+        },
+        Agent::Codex => {
+            let ipc = homes.codex.join("ipc").join("ipc.sock");
+            if ipc.exists() {
+                match codex_ipc::send_user_turn(&ipc, &session.session_id, message) {
+                    Ok(()) => delivered.push("codex-ipc".into()),
+                    Err(error) => delivered.push(format!("codex-ipc-failed:{error}")),
+                }
+            }
+            if delivered
+                .iter()
+                .all(|item| item.starts_with("codex-ipc-failed"))
+            {
+                match send_codex_exec(session, message) {
+                    Ok(()) => delivered.push("codex-exec".into()),
+                    Err(error) => delivered.push(format!("codex-exec-failed:{error}")),
+                }
+            }
         }
     }
     Ok(delivered)
+}
+
+fn send_grok_single(session: &Session, message: &str) -> Result<()> {
+    let cwd = session.cwd.as_deref().unwrap_or(".");
+    let child = Command::new("grok")
+        .args([
+            "--cwd",
+            cwd,
+            "--resume",
+            &session.session_id,
+            "--always-approve",
+            "--single",
+            message,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|source| Error::Io {
+            path: PathBuf::from("grok"),
+            source,
+        })?;
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+fn send_tmux(target: &str, message: &str) -> Result<()> {
+    let status = Command::new("tmux")
+        .args(["send-keys", "-t", target, "-l", "--", message])
+        .status()
+        .map_err(|source| Error::Io {
+            path: PathBuf::from("tmux"),
+            source,
+        })?;
+    if !status.success() {
+        return Err(Error::msg(format!("tmux send-keys failed for {target}")));
+    }
+    let status = Command::new("tmux")
+        .args(["send-keys", "-t", target, "Enter"])
+        .status()
+        .map_err(|source| Error::Io {
+            path: PathBuf::from("tmux"),
+            source,
+        })?;
+    if !status.success() {
+        return Err(Error::msg(format!("tmux enter failed for {target}")));
+    }
+    Ok(())
+}
+
+fn send_codex_exec(session: &Session, message: &str) -> Result<()> {
+    let mut command = Command::new("codex");
+    command.arg("exec").arg("--skip-git-repo-check");
+    if let Some(cwd) = &session.cwd {
+        command.arg("-C").arg(cwd);
+    }
+    command
+        .arg("resume")
+        .arg(&session.session_id)
+        .arg(message)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|source| Error::Io {
+        path: PathBuf::from("codex"),
+        source,
+    })?;
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().map_err(|source| Error::Io {
+            path: PathBuf::from("codex"),
+            source,
+        })? {
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            if !status.success() {
+                let detail = stderr.trim();
+                return Err(Error::msg(if detail.is_empty() {
+                    format!("codex exec resume exited {status}")
+                } else {
+                    format!("codex exec resume: {detail}")
+                }));
+            }
+            return Ok(());
+        }
+        if started.elapsed() > Duration::from_secs(8) {
+            std::thread::spawn(move || {
+                let mut child = child;
+                let _ = child.wait();
+            });
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn send_claude_uds(homes: &Homes, session: &Session, socket: &Path, message: &str) -> Result<()> {

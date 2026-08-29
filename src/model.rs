@@ -61,6 +61,12 @@ pub struct Session {
     pub transcript_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub messaging_socket: Option<PathBuf>,
+    /// cli, claude-desktop, tui, vscode/desktop
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// Claude CLI tmux pane, e.g. `session:@window.%pane`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tmux: Option<String>,
 }
 
 impl Session {
@@ -79,6 +85,8 @@ impl Session {
             self.title.clone(),
             self.cwd.clone(),
             self.branch.clone(),
+            self.origin.clone(),
+            self.tmux.clone(),
             self.pid.map(|pid| pid.to_string()),
         ]
         .into_iter()

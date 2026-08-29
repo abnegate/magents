@@ -118,7 +118,7 @@ impl Magents {
     }
 
     #[tool(
-        description = "Send a message to another Claude, Codex, or Grok session. Queues it in the magents mailbox and injects into a live Claude session when possible."
+        description = "Send a message into a specific Claude, Codex, or Grok chat. Live Claude CLI/Desktop gets a UDS user turn (tmux fallback for CLI). Live Grok TUI gets grok --single --resume. Live Codex Desktop/VS Code gets an IPC user turn; CLI falls back to exec resume. Always also queued in the magents mailbox."
     )]
     fn send_message(
         &self,

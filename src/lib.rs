@@ -1,3 +1,4 @@
+pub mod codex_ipc;
 pub mod deliver;
 pub mod discover;
 pub mod error;

@@ -15,7 +15,7 @@ is the shared API, not a second copy of history.
 | `get_session` | Lookup by id, title, live name, pid, or `agent:ref` |
 | `read_transcript` | Compact inert handoff (last request, last action, recent turns) |
 | `search_transcripts` | Full-text search across those transcripts |
-| `send_message` | Queue a message for another session (live Claude may get a UDS inject) |
+| `send_message` | Queue a message for another session, and inject a live user turn when a path exists |
 | `inbox` | Read messages addressed to this session |
 | `whoami` | Detect which agent spawned this MCP connection |
 
@@ -66,9 +66,20 @@ launch `magents` without `mcp` if they prefer.
 
 ## How talk works
 
-1. `send_message` always appends to `~/Library/Application Support/magents/mailbox/<agent>/<session>.jsonl` (or `$MAGENTS_HOME/mailbox` on other OSes).
-2. If the target is a **live Claude Code / Claude Desktop** session, magents also injects a real user turn over that session's unix socket (`priority: now`), addressed to that specific chat. Target with `claude:<session-id>`, `claude:<live-name>`, or a title fragment.
-3. Codex and Grok still pick the message up on `inbox`. There is no supported inject into a running Grok/Codex TUI.
+1. `send_message` always appends to the mailbox.
+2. Live inject, when a path exists:
+
+| Surface | Live inject |
+|---|---|
+| Claude Desktop | UDS user turn (`/tmp/cc-socks/<pid>.sock`) |
+| Claude CLI | Same UDS protocol when the session has a messaging socket (pass `--messaging-socket-path`, or when Claude's feature gate is on). If the session is in tmux, magents types the prompt into that pane as a fallback. |
+| Grok TUI | `grok --cwd <cwd> --resume <id> --always-approve --single <message>` |
+| Codex Desktop / VS Code | Length-prefixed JSON-RPC on `~/.codex/ipc/ipc.sock` (`thread-follower-start-turn`) into that specific thread |
+| Codex CLI | `codex exec resume` for legacy (non-paginated) threads |
+
+Claude Desktop always exposes the UDS mesh. Terminal `claude` often does not, until you start it with `--messaging-socket-path /tmp/cc-socks/<name>.sock` (hidden flag). Magents still lists those CLI sessions and can inject via tmux when the pid file records a pane.
+
+Codex Desktop threads are often `history_mode=paginated`; `codex exec resume` rejects those. The IPC path talks to the already-loaded Desktop app-server instead.
 
 Live Claude sessions come from `~/.claude/sessions/<pid>.json`. Live Grok sessions come from `~/.grok/active_sessions.json`. Codex threads come from `~/.codex/state_*.sqlite` plus rollout JSONL.
 
