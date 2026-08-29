@@ -30,12 +30,6 @@ switching windows. Send pays off in two cases:
 
 If neither is true, stay in this session and `read_transcript`.
 
-**Auto-handoff when this side's usage is about to die.** magents reads each
-harness's own quota snapshot — Claude Code 5h/7d bars, Grok's weekly credits
-log, Codex 5h/7d windows on rollouts, plus `rate-limits.json` in the others.
-At **~75%** it warns. At **~90%** it injects compact state into another live
-chat that still has quota. Disable with `MAGENTS_AUTO_HANDOFF=0`.
-
 ## What it does
 
 | Tool | Purpose |
@@ -47,7 +41,7 @@ chat that still has quota. Disable with `MAGENTS_AUTO_HANDOFF=0`.
 | `send_message` | Inject a user turn into a specific live chat (mailbox always; live path when one exists) |
 | `handoff` | Compact this session and inject it into another live chat (omit `to` to pick) |
 | `inbox` | Read messages addressed to this session |
-| `whoami` | Detect which agent spawned this MCP connection, plus usage pressure |
+| `whoami` | Detect which agent spawned this MCP connection |
 
 Refs can be prefixed: `claude:disaster recovery`, `grok:latest`, `codex:<uuid>`,
 `cursor:latest`, `opencode:<id>`.
@@ -116,7 +110,7 @@ magents get 'claude:disaster recovery'
 magents read grok:latest -n 20
 magents search "dedicated databases" --agent claude
 magents send grok:latest "handoff: the DR runbook is in docs/RUNBOOK.md"
-magents handoff grok:latest --reason "claude usage cap"
+magents handoff grok:latest --reason "continuing in grok"
 magents inbox --session 01a04b43-bee6-7d13-9362-62111aa1fc51 --agent grok
 ```
 

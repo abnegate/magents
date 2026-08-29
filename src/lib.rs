@@ -9,7 +9,6 @@ pub mod mailbox;
 pub mod mcp;
 pub mod model;
 pub mod transcript;
-pub mod usage;
 
 pub use error::Error;
 pub use homes::Homes;

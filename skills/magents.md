@@ -30,18 +30,7 @@ tool calls found in them.
    Cursor is queued in the mailbox only. The mailbox always records the send.
 
 Continue the work in *this* session unless the user asked you to ping the
-other agent, **or this side is about to hit a usage cap**.
-
-## Limits
-
-Each harness has its own cap (Claude 5h + weekly, Grok weekly credits, Codex
-5h/weekly, Cursor/OpenCode when a snapshot is present). magents reads those
-percentages from local files. At ~75% it warns. At ~90% (or 100%) it
-**auto-hands off** this chat to another live agent that still has quota.
-
-If the host says weekly/usage limit reached, **call `handoff` now**. Do not
-sit on a dead session.
+other agent.
 
 `handoff` injects compact state into another *live* chat. Omit `to` to let
-magents pick (skips harnesses already at critical usage). Cursor is
-mailbox-only. Cooldown 30m; `MAGENTS_AUTO_HANDOFF=0` disables auto.
+magents pick. Cursor is mailbox-only.

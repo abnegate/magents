@@ -56,10 +56,6 @@ enum Command {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Show Claude / Codex / Cursor / Grok / OpenCode usage
-    Usage,
-    /// Read Claude Code statusline JSON on stdin and store rate limits
-    UsageIngest,
     /// Show the mailbox for this (or a given) session
     Inbox {
         #[arg(long)]
@@ -173,17 +169,6 @@ async fn main() -> anyhow::Result<()> {
             let report =
                 magents::handoff::run(&Homes::from_env(), to.as_deref(), reason.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&report)?);
-        }
-        Some(Command::Usage) => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&magents::usage::report(&Homes::from_env()))?
-            );
-        }
-        Some(Command::UsageIngest) => {
-            let mut raw = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut raw)?;
-            magents::usage::ingest_statusline(&Homes::from_env(), &raw)?;
         }
         Some(Command::Inbox { session, agent }) => {
             let mail = mailbox::inbox(

@@ -228,7 +228,12 @@ fn cli_lists_reads_searches_and_mails_across_harnesses() {
     assert!(!miss.status.success());
 
     let handed = harness
-        .command(&["handoff", "cursor:109 point", "--reason", "usage cap"])
+        .command(&[
+            "handoff",
+            "cursor:109 point",
+            "--reason",
+            "switching windows",
+        ])
         .env("GROK_SESSION_ID", GROK_ID)
         .output()
         .unwrap();
@@ -239,56 +244,7 @@ fn cli_lists_reads_searches_and_mails_across_harnesses() {
     );
     let body: Value = serde_json::from_slice(&handed.stdout).unwrap();
     assert_eq!(body["to"]["agent"], "cursor");
-    assert_eq!(body["reason"], "usage cap");
-}
-
-#[test]
-fn cli_usage_and_ingest() {
-    let _lock = ENV.lock().unwrap();
-    let harness = Harness::new();
-    write(
-        &harness.root.join("claude/abtop-rate-limits.json"),
-        r#"{"source":"claude","five_hour":{"used_percentage":0,"resets_at":1},"seven_day":{"used_percentage":100,"resets_at":2}}"#,
-    );
-    write(
-        &harness.root.join("grok/logs/unified.jsonl"),
-        r#"{"msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":61}}}"#,
-    );
-    let usage = harness.json(&["usage"]);
-    let rows = usage.as_array().unwrap();
-    let claude = rows
-        .iter()
-        .find(|row| row["agent"] == "claude")
-        .expect("claude usage");
-    assert_eq!(claude["level"], "critical");
-    assert_eq!(claude["limiting"], "seven_day");
-    let grok = rows
-        .iter()
-        .find(|row| row["agent"] == "grok")
-        .expect("grok usage");
-    assert_eq!(grok["level"], "ok");
-
-    let mut child = harness
-        .command(&["usage-ingest"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    {
-        use std::io::Write;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(
-                br#"{"model":"opus","rate_limits":{"five_hour":{"used_percentage":1},"seven_day":{"used_percentage":2}}}"#,
-            )
-            .unwrap();
-    }
-    let status = child.wait().unwrap();
-    assert!(status.success());
-    assert!(harness.root.join("claude/rate-limits.json").is_file());
+    assert_eq!(body["reason"], "switching windows");
 }
 
 #[test]
