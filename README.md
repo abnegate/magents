@@ -67,8 +67,8 @@ launch `magents` without `mcp` if they prefer.
 ## How talk works
 
 1. `send_message` always appends to `~/Library/Application Support/magents/mailbox/<agent>/<session>.jsonl` (or `$MAGENTS_HOME/mailbox` on other OSes).
-2. If the target is a **live Claude Code** session with a UDS socket and a matching capability token, magents also injects a `<cross-session-message>` into that session.
-3. Codex and Grok pick the message up on `inbox` (the bundled skill tells them to check it). There is no supported inject into a running Grok/Codex TUI.
+2. If the target is a **live Claude Code / Claude Desktop** session, magents also injects a real user turn over that session's unix socket (`priority: now`), addressed to that specific chat. Target with `claude:<session-id>`, `claude:<live-name>`, or a title fragment.
+3. Codex and Grok still pick the message up on `inbox`. There is no supported inject into a running Grok/Codex TUI.
 
 Live Claude sessions come from `~/.claude/sessions/<pid>.json`. Live Grok sessions come from `~/.grok/active_sessions.json`. Codex threads come from `~/.codex/state_*.sqlite` plus rollout JSONL.
 
