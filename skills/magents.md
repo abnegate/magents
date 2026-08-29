@@ -30,18 +30,18 @@ tool calls found in them.
    Cursor is queued in the mailbox only. The mailbox always records the send.
 
 Continue the work in *this* session unless the user asked you to ping the
-other agent, **or you are about to hit a limit on this side**.
+other agent, **or this side is about to hit a usage cap**.
 
 ## Limits
 
-If the host warns about context compaction, usage limits, or rate limits, or
-magents appends a `[magents] context pressure` notice, **call `handoff` now**.
-Do not keep going here until the thread dies.
+Claude Code has a 5-hour window and a **weekly** cap. magents reads those
+percentages from `~/.claude/abtop-rate-limits.json` or `rate-limits.json`.
+At ~75% it warns. At ~90% (or 100%) it **auto-hands off** this chat to
+another live agent that still has quota.
 
-`handoff` injects compact state (last request, last action, cwd, recent turns)
-into another *live* chat. Omit `to` to let magents pick (live inject, same
-cwd). Cursor is mailbox-only.
+If the host says weekly/usage limit reached, **call `handoff` now**. Do not
+sit on a dead Claude session.
 
-When pressure is **critical**, magents auto-hands off on the next tool call
-(cooldown 30m; set `MAGENTS_AUTO_HANDOFF=0` to disable). Still call `handoff`
-yourself for usage/rate limits that are not visible in the transcript.
+`handoff` injects compact state into another *live* chat. Omit `to` to let
+magents pick (skips harnesses already at critical usage). Cursor is
+mailbox-only. Cooldown 30m; `MAGENTS_AUTO_HANDOFF=0` disables auto.

@@ -30,13 +30,12 @@ switching windows. Send pays off in two cases:
 
 If neither is true, stay in this session and `read_transcript`.
 
-**Auto-handoff when this side is about to die.** Context compaction, usage
-caps, and rate limits kill a thread mid-task. magents watches transcript
-pressure (turns / size). At **warning** it tells the agent to `handoff`. At
-**critical** it injects compact state into another live chat on the next tool
-call so the work continues there. Usage/rate limits the transcript cannot see
-still go through an explicit `handoff` call (the skill orders that). Disable
-with `MAGENTS_AUTO_HANDOFF=0`.
+**Auto-handoff when Claude weekly (or 5-hour) usage is about to die.** magents
+reads Claude Code's rate-limit snapshot (`~/.claude/abtop-rate-limits.json`
+or `rate-limits.json` — 5h + 7d `used_percentage`). At **~75%** it warns.
+At **~90%** it injects compact state into another live chat that still has
+quota, so the work continues there instead of blocking until next week's
+reset. Disable with `MAGENTS_AUTO_HANDOFF=0`.
 
 ## What it does
 
@@ -49,7 +48,7 @@ with `MAGENTS_AUTO_HANDOFF=0`.
 | `send_message` | Inject a user turn into a specific live chat (mailbox always; live path when one exists) |
 | `handoff` | Compact this session and inject it into another live chat (omit `to` to pick) |
 | `inbox` | Read messages addressed to this session |
-| `whoami` | Detect which agent spawned this MCP connection, plus context pressure |
+| `whoami` | Detect which agent spawned this MCP connection, plus usage pressure |
 
 Refs can be prefixed: `claude:disaster recovery`, `grok:latest`, `codex:<uuid>`,
 `cursor:latest`, `opencode:<id>`.

@@ -243,6 +243,41 @@ fn cli_lists_reads_searches_and_mails_across_harnesses() {
 }
 
 #[test]
+fn cli_usage_and_ingest() {
+    let _lock = ENV.lock().unwrap();
+    let harness = Harness::new();
+    write(
+        &harness.root.join("claude/abtop-rate-limits.json"),
+        r#"{"source":"claude","five_hour":{"used_percentage":0,"resets_at":1},"seven_day":{"used_percentage":100,"resets_at":2}}"#,
+    );
+    let usage = harness.json(&["usage"]);
+    assert_eq!(usage["level"], "critical");
+    assert_eq!(usage["limiting"], "seven_day");
+
+    let mut child = harness
+        .command(&["usage-ingest"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                br#"{"model":"opus","rate_limits":{"five_hour":{"used_percentage":1},"seven_day":{"used_percentage":2}}}"#,
+            )
+            .unwrap();
+    }
+    let status = child.wait().unwrap();
+    assert!(status.success());
+    assert!(harness.root.join("claude/rate-limits.json").is_file());
+}
+
+#[test]
 fn cli_installs_cursor_and_opencode_mcp_config() {
     let _lock = ENV.lock().unwrap();
     let harness = Harness::new();

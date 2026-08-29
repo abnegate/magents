@@ -5,28 +5,23 @@ use crate::homes::Homes;
 use crate::mailbox;
 use crate::model::{Agent, Caller, Session, Transcript};
 use crate::transcript::{read_session, read_transcript};
+use crate::usage::{self, Snapshot};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::time::Duration;
 
-const DEFAULT_CRITICAL_TURNS: u64 = 80;
-const DEFAULT_CRITICAL_BYTES: u64 = 1_500_000;
-const DEFAULT_COOLDOWN_SECS: u64 = 30 * 60;
+pub use crate::usage::Level;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Level {
-    Ok,
-    Warn,
-    Critical,
-}
+const DEFAULT_COOLDOWN_SECS: u64 = 30 * 60;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Pressure {
     pub level: Level,
     pub turns: usize,
     pub bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Snapshot>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -56,34 +51,28 @@ pub fn auto_enabled() -> bool {
     }
 }
 
-pub fn pressure_for(session: &Session) -> Pressure {
+pub fn pressure_for(homes: &Homes, session: &Session) -> Pressure {
     let transcript = read_session(session, 1).ok();
     let turns = transcript
         .as_ref()
         .map(|transcript| transcript.turn_count)
         .unwrap_or(0);
     let bytes = transcript_bytes(session);
-    let critical_turns = env_u64("MAGENTS_HANDOFF_TURNS", DEFAULT_CRITICAL_TURNS);
-    let critical_bytes = env_u64("MAGENTS_HANDOFF_BYTES", DEFAULT_CRITICAL_BYTES);
-    let warn_turns = critical_turns.saturating_mul(3) / 5;
-    let warn_bytes = critical_bytes.saturating_mul(3) / 5;
-    let turns64 = turns as u64;
-    let level = if turns64 >= critical_turns || bytes >= critical_bytes {
-        Level::Critical
-    } else if turns64 >= warn_turns || bytes >= warn_bytes {
-        Level::Warn
-    } else {
-        Level::Ok
-    };
+    let usage = usage::for_agent(homes, session.agent);
+    let level = usage
+        .as_ref()
+        .map(|snapshot| snapshot.level)
+        .unwrap_or(Level::Ok);
     Pressure {
         level,
         turns,
         bytes,
+        usage,
     }
 }
 
 pub fn pressure_for_caller(homes: &Homes, caller: &Caller) -> Result<Pressure> {
-    Ok(pressure_for(&source_session(homes, caller)?))
+    Ok(pressure_for(homes, &source_session(homes, caller)?))
 }
 
 pub fn run(homes: &Homes, to: Option<&str>, reason: Option<&str>) -> Result<Report> {
@@ -98,16 +87,15 @@ pub fn nudge(homes: &Homes) -> Option<String> {
     match pressure.level {
         Level::Ok => None,
         Level::Warn => Some(format!(
-            "[magents] context pressure warning ({} turns, {} bytes). If you are near usage, rate, or compaction limits, call handoff so another live agent continues this work.",
-            pressure.turns, pressure.bytes
+            "[magents] {} warning. Call handoff so another live agent continues this work before this side is blocked.",
+            usage_reason(&pressure)
         )),
         Level::Critical => {
             if auto_enabled() {
                 match maybe_auto(homes, &caller) {
                     Ok(Some(report)) => Some(format!(
-                        "[magents] context pressure critical ({} turns, {} bytes). Auto-handed off to {}:{} ({}). Continue there, not here.",
-                        pressure.turns,
-                        pressure.bytes,
+                        "[magents] {}. Auto-handed off to {}:{} ({}). Continue there, not here.",
+                        usage_reason(&pressure),
                         report.to.agent,
                         report.to.label(),
                         if report.delivered.is_empty() {
@@ -117,18 +105,18 @@ pub fn nudge(homes: &Homes) -> Option<String> {
                         }
                     )),
                     Ok(None) => Some(format!(
-                        "[magents] context pressure critical ({} turns, {} bytes). A handoff already left this session recently. Call handoff if the other side is not continuing.",
-                        pressure.turns, pressure.bytes
+                        "[magents] {}. A handoff already left this session recently. Call handoff if the other side is not continuing.",
+                        usage_reason(&pressure)
                     )),
                     Err(error) => Some(format!(
-                        "[magents] context pressure critical ({} turns, {} bytes). Call handoff now ({error}).",
-                        pressure.turns, pressure.bytes
+                        "[magents] {}. Call handoff now ({error}).",
+                        usage_reason(&pressure)
                     )),
                 }
             } else {
                 Some(format!(
-                    "[magents] context pressure critical ({} turns, {} bytes). Call handoff now so another live agent continues this work.",
-                    pressure.turns, pressure.bytes
+                    "[magents] {}. Call handoff now so another live agent continues this work.",
+                    usage_reason(&pressure)
                 ))
             }
         }
@@ -140,12 +128,13 @@ fn maybe_auto(homes: &Homes, caller: &Caller) -> Result<Option<Report>> {
     if cooling(homes, &from) {
         return Ok(None);
     }
+    let pressure = pressure_for(homes, &from);
     Ok(Some(send(
         homes,
         caller,
         from,
         None,
-        Some("context pressure"),
+        Some(&usage_reason(&pressure)),
         true,
     )?))
 }
@@ -158,7 +147,7 @@ fn send(
     reason: Option<&str>,
     auto: bool,
 ) -> Result<Report> {
-    let pressure = pressure_for(&from);
+    let pressure = pressure_for(homes, &from);
     let to = match to {
         Some(reference) => resolve(homes, reference)?,
         None => pick_peer(homes, &from)?,
@@ -171,12 +160,7 @@ fn send(
     let reason = reason
         .map(ToOwned::to_owned)
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| {
-            format!(
-                "context pressure ({} turns, {} bytes)",
-                pressure.turns, pressure.bytes
-            )
-        });
+        .unwrap_or_else(|| usage_reason(&pressure));
     let message = compose_message(&from, &transcript, &reason, auto);
     let delivered = deliver::deliver_live(homes, &to, &message)?;
     let mail = mailbox::compose(
@@ -213,9 +197,12 @@ pub fn pick_peer(homes: &Homes, from: &Session) -> Result<Session> {
     let mut peers: Vec<Session> = live
         .into_iter()
         .filter(|session| session.agent != from.agent || session.session_id != from.session_id)
+        .filter(|session| !usage::exhausted(homes, session.agent))
         .collect();
     if peers.is_empty() {
-        return Err(Error::msg("no other live session to hand off to"));
+        return Err(Error::msg(
+            "no other live session with remaining quota to hand off to",
+        ));
     }
     peers.sort_by_key(|session| {
         let inject = u8::from(!injects(session.agent));
@@ -329,6 +316,13 @@ fn stamp_path(homes: &Homes, from: &Session) -> std::path::PathBuf {
         .join(format!("{}-{}.json", from.agent, from.session_id))
 }
 
+fn usage_reason(pressure: &Pressure) -> String {
+    match pressure.usage.as_ref() {
+        Some(snapshot) => usage::summary(snapshot),
+        None => "usage limit".to_string(),
+    }
+}
+
 fn env_u64(key: &str, default: u64) -> u64 {
     std::env::var(key)
         .ok()
@@ -358,20 +352,35 @@ mod tests {
     use crate::model::{Agent, Caller, Session, Transcript, Turn};
     use crate::test_env;
     use crate::transcript::read_transcript;
+    use serde_json::json;
 
     const ENV: &[&str] = &[
         "GROK_SESSION_ID",
         "CLAUDE_SESSION_ID",
         "CLAUDE_PROJECT_DIR",
         "MAGENTS_AUTO_HANDOFF",
-        "MAGENTS_HANDOFF_TURNS",
-        "MAGENTS_HANDOFF_BYTES",
+        "MAGENTS_USAGE_WARN",
+        "MAGENTS_USAGE_CRITICAL",
         "MAGENTS_HANDOFF_COOLDOWN_SECS",
         "CODEX_HOME",
         "CODEX_THREAD_ID",
         "CURSOR_SESSION_ID",
         "OPENCODE_SESSION_ID",
     ];
+
+    fn write_claude_usage(homes: &Homes, weekly: i64, five: i64) {
+        std::fs::create_dir_all(&homes.claude).unwrap();
+        std::fs::write(
+            homes.claude.join("abtop-rate-limits.json"),
+            json!({
+                "source": "claude",
+                "five_hour": { "used_percentage": five, "resets_at": 1 },
+                "seven_day": { "used_percentage": weekly, "resets_at": 2 }
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
 
     fn session() -> Session {
         Session {
@@ -454,7 +463,7 @@ mod tests {
         }
         let world = World::new();
         let grok = resolve(&world.homes, "grok:Queue GC").unwrap();
-        let pressure = pressure_for(&grok);
+        let pressure = pressure_for(&world.homes, &grok);
         assert_eq!(pressure.level, Level::Ok);
         assert!(pressure.turns > 0);
     }
@@ -515,23 +524,25 @@ mod tests {
     fn auto_cooldown_skips_second_send() {
         let _guard = test_env::lock(ENV);
         unsafe {
-            std::env::set_var("GROK_SESSION_ID", "01testgrok0000000000000000");
-            std::env::set_var("MAGENTS_HANDOFF_TURNS", "1");
+            std::env::remove_var("GROK_SESSION_ID");
+            std::env::set_var("CLAUDE_PROJECT_DIR", "/tmp/dr");
+            std::env::set_var("CLAUDE_SESSION_ID", "11111111-1111-4111-8111-111111111111");
             std::env::set_var("MAGENTS_HANDOFF_COOLDOWN_SECS", "1800");
             std::env::set_var("MAGENTS_AUTO_HANDOFF", "1");
         }
         let world = World::new();
-        let grok = resolve(&world.homes, "grok:Queue GC").unwrap();
-        assert_eq!(pressure_for(&grok).level, Level::Critical);
+        write_claude_usage(&world.homes, 95, 0);
+        let claude = resolve(&world.homes, "claude:disaster-recovery").unwrap();
+        assert_eq!(pressure_for(&world.homes, &claude).level, Level::Critical);
         let first = send(
             &world.homes,
             &Caller {
-                agent: Some(Agent::Grok),
-                session_id: Some(grok.session_id.clone()),
+                agent: Some(Agent::Claude),
+                session_id: Some(claude.session_id.clone()),
             },
-            grok.clone(),
+            claude.clone(),
             None,
-            Some("context pressure"),
+            Some("claude weekly usage 95%"),
             true,
         )
         .unwrap();
@@ -555,22 +566,33 @@ mod tests {
     fn nudge_warns_then_orders_handoff_when_auto_off() {
         let _guard = test_env::lock(ENV);
         unsafe {
-            std::env::set_var("GROK_SESSION_ID", "01testgrok0000000000000000");
+            std::env::remove_var("GROK_SESSION_ID");
+            std::env::set_var("CLAUDE_PROJECT_DIR", "/tmp/dr");
+            std::env::set_var("CLAUDE_SESSION_ID", "11111111-1111-4111-8111-111111111111");
             std::env::set_var("MAGENTS_AUTO_HANDOFF", "0");
-            std::env::remove_var("MAGENTS_HANDOFF_BYTES");
         }
         let world = World::new();
-        let grok = resolve(&world.homes, "grok:Queue GC").unwrap();
-        let turns = pressure_for(&grok).turns as u64;
-        unsafe { std::env::set_var("MAGENTS_HANDOFF_TURNS", (turns + 2).to_string()) };
-        assert_eq!(pressure_for(&grok).level, Level::Warn);
+        write_claude_usage(&world.homes, 80, 0);
+        let claude = resolve(&world.homes, "claude:disaster-recovery").unwrap();
+        assert_eq!(pressure_for(&world.homes, &claude).level, Level::Warn);
         let warning = super::nudge(&world.homes).unwrap();
         assert!(warning.contains("warning"), "{warning}");
-        unsafe { std::env::set_var("MAGENTS_HANDOFF_TURNS", "1") };
-        assert_eq!(pressure_for(&grok).level, Level::Critical);
+        assert!(warning.contains("weekly"), "{warning}");
+        write_claude_usage(&world.homes, 95, 0);
+        assert_eq!(pressure_for(&world.homes, &claude).level, Level::Critical);
         let critical = super::nudge(&world.homes).unwrap();
         assert!(critical.contains("Call handoff now"), "{critical}");
         assert!(!critical.contains("Auto-handed"));
+    }
+
+    #[test]
+    fn pick_peer_skips_claude_when_weekly_is_exhausted() {
+        let _guard = test_env::lock(ENV);
+        let world = World::new();
+        write_claude_usage(&world.homes, 100, 0);
+        let grok = resolve(&world.homes, "grok:Queue GC").unwrap();
+        let peer = pick_peer(&world.homes, &grok).unwrap();
+        assert_ne!(peer.agent, Agent::Claude);
     }
 
     #[test]
@@ -616,5 +638,169 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("same session"));
         let _ = read_transcript(&world.homes, "grok:Queue GC", 4).unwrap();
+    }
+
+    #[test]
+    fn auto_nudge_hands_off_when_weekly_is_critical() {
+        let _guard = test_env::lock(ENV);
+        unsafe {
+            std::env::remove_var("GROK_SESSION_ID");
+            std::env::set_var("CLAUDE_PROJECT_DIR", "/tmp/dr");
+            std::env::set_var("CLAUDE_SESSION_ID", "11111111-1111-4111-8111-111111111111");
+            std::env::set_var("MAGENTS_AUTO_HANDOFF", "1");
+            std::env::remove_var("MAGENTS_HANDOFF_COOLDOWN_SECS");
+        }
+        let world = World::new();
+        write_claude_usage(&world.homes, 100, 0);
+        let nudge = super::nudge(&world.homes).unwrap();
+        assert!(nudge.contains("Auto-handed off"), "{nudge}");
+        assert!(nudge.contains("weekly"), "{nudge}");
+    }
+
+    #[test]
+    fn auto_nudge_reports_error_without_a_peer() {
+        let _guard = test_env::lock(ENV);
+        unsafe {
+            std::env::remove_var("GROK_SESSION_ID");
+            std::env::set_var("CLAUDE_PROJECT_DIR", "/tmp/dr");
+            std::env::set_var("CLAUDE_SESSION_ID", "11111111-1111-4111-8111-111111111111");
+            std::env::set_var("MAGENTS_AUTO_HANDOFF", "true");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(dir.path());
+        let pid = std::process::id();
+        std::fs::create_dir_all(homes.claude.join("sessions")).unwrap();
+        std::fs::write(
+            homes.claude.join("sessions").join(format!("{pid}.json")),
+            json!({
+                "pid": pid,
+                "sessionId": "11111111-1111-4111-8111-111111111111",
+                "cwd": "/tmp/dr",
+                "entrypoint": "cli",
+                "name": "disaster-recovery",
+                "startedAt": 1
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(homes.claude.join("projects").join("tmp-dr")).unwrap();
+        std::fs::write(
+            homes
+                .claude
+                .join("projects")
+                .join("tmp-dr")
+                .join("11111111-1111-4111-8111-111111111111.jsonl"),
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}
+"#,
+        )
+        .unwrap();
+        write_claude_usage(&homes, 95, 0);
+        let nudge = super::nudge(&homes).unwrap();
+        assert!(nudge.contains("Call handoff now"), "{nudge}");
+        assert!(nudge.contains("no other live session"), "{nudge}");
+    }
+
+    #[test]
+    fn stale_or_corrupt_stamp_does_not_block_auto() {
+        let _guard = test_env::lock(ENV);
+        unsafe {
+            std::env::remove_var("GROK_SESSION_ID");
+            std::env::set_var("CLAUDE_PROJECT_DIR", "/tmp/dr");
+            std::env::set_var("CLAUDE_SESSION_ID", "11111111-1111-4111-8111-111111111111");
+            std::env::set_var("MAGENTS_AUTO_HANDOFF", "1");
+            std::env::set_var("MAGENTS_HANDOFF_COOLDOWN_SECS", "nope");
+        }
+        let world = World::new();
+        write_claude_usage(&world.homes, 95, 0);
+        let claude = resolve(&world.homes, "claude:disaster-recovery").unwrap();
+        let path = super::stamp_path(&world.homes, &claude);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "not-json").unwrap();
+        let first = super::nudge(&world.homes).unwrap();
+        assert!(first.contains("Auto-handed off"), "{first}");
+        let cooling = super::nudge(&world.homes).unwrap();
+        assert!(cooling.contains("already left"), "{cooling}");
+        std::fs::write(
+            &path,
+            json!({ "at_ms": 1, "to": "grok:01testgrok0000000000000000" }).to_string(),
+        )
+        .unwrap();
+        let stale = super::nudge(&world.homes).unwrap();
+        assert!(stale.contains("Auto-handed off"), "{stale}");
+    }
+
+    #[test]
+    fn compose_clips_and_fills_empty_turns() {
+        let from = session();
+        let empty = Transcript {
+            session: from.clone(),
+            turn_count: 0,
+            returned_turns: 0,
+            last_user_request: None,
+            last_assistant_action: None,
+            turns: vec![],
+            inert: true,
+        };
+        let message = compose_message(&from, &empty, r#"reason "quoted""#, false);
+        assert!(message.contains("(no recent turns)"));
+        assert!(message.contains("trigger=\"requested\""));
+        assert!(message.contains("reason=\"reason 'quoted'\""));
+        let long = "word ".repeat(80);
+        let filled = Transcript {
+            session: from.clone(),
+            turn_count: 1,
+            returned_turns: 1,
+            last_user_request: Some(long.clone()),
+            last_assistant_action: Some("did it".into()),
+            turns: vec![Turn {
+                role: "assistant".into(),
+                text: long,
+                tools: vec!["Bash".into()],
+            }],
+            inert: true,
+        };
+        let clipped = compose_message(&from, &filled, "usage limit", false);
+        assert!(clipped.contains("..."));
+        assert!(clipped.contains("[Bash]"));
+    }
+
+    #[test]
+    fn source_session_and_pressure_edges() {
+        let _guard = test_env::lock(ENV);
+        unsafe {
+            std::env::remove_var("GROK_SESSION_ID");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+            std::env::remove_var("CLAUDE_PROJECT_DIR");
+        }
+        let world = World::new();
+        let error = source_session(
+            &world.homes,
+            &Caller {
+                agent: None,
+                session_id: None,
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot detect"));
+        unsafe { std::env::set_var("GROK_SESSION_ID", "01testgrok0000000000000000") };
+        let pressure = super::pressure_for_caller(
+            &world.homes,
+            &Caller {
+                agent: Some(Agent::Grok),
+                session_id: Some("01testgrok0000000000000000".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(pressure.level, Level::Ok);
+        assert!(super::nudge(&world.homes).is_none());
+        let report = run(&world.homes, Some("cursor:Test rounds"), Some("   ")).unwrap();
+        assert_eq!(report.reason, "usage limit");
+        let mut missing = session();
+        let database = world.homes.codex.join("threads.db");
+        std::fs::write(&database, "xx").unwrap();
+        missing.transcript_path = Some(database);
+        assert_eq!(pressure_for(&world.homes, &missing).bytes, 0);
+        missing.transcript_path = Some(world.homes.magents.join("missing.jsonl"));
+        assert_eq!(pressure_for(&world.homes, &missing).bytes, 0);
     }
 }
