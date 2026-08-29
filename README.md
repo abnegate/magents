@@ -30,12 +30,11 @@ switching windows. Send pays off in two cases:
 
 If neither is true, stay in this session and `read_transcript`.
 
-**Auto-handoff when Claude weekly (or 5-hour) usage is about to die.** magents
-reads Claude Code's rate-limit snapshot (`~/.claude/abtop-rate-limits.json`
-or `rate-limits.json` — 5h + 7d `used_percentage`). At **~75%** it warns.
-At **~90%** it injects compact state into another live chat that still has
-quota, so the work continues there instead of blocking until next week's
-reset. Disable with `MAGENTS_AUTO_HANDOFF=0`.
+**Auto-handoff when this side's usage is about to die.** magents reads each
+harness's own quota snapshot — Claude Code 5h/7d bars, Grok's weekly credits
+log, Codex 5h/7d windows on rollouts, plus `rate-limits.json` in the others.
+At **~75%** it warns. At **~90%** it injects compact state into another live
+chat that still has quota. Disable with `MAGENTS_AUTO_HANDOFF=0`.
 
 ## What it does
 

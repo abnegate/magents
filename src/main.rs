@@ -56,7 +56,7 @@ enum Command {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Show Claude Code 5-hour / weekly usage
+    /// Show Claude / Codex / Cursor / Grok / OpenCode usage
     Usage,
     /// Read Claude Code statusline JSON on stdin and store rate limits
     UsageIngest,
@@ -177,7 +177,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Usage) => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&magents::usage::claude(&Homes::from_env()))?
+                serde_json::to_string_pretty(&magents::usage::report(&Homes::from_env()))?
             );
         }
         Some(Command::UsageIngest) => {

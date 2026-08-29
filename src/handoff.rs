@@ -382,6 +382,38 @@ mod tests {
         .unwrap();
     }
 
+    fn write_grok_usage(homes: &Homes, weekly: f64) {
+        std::fs::create_dir_all(homes.grok.join("logs")).unwrap();
+        std::fs::write(
+            homes.grok.join("logs").join("unified.jsonl"),
+            json!({
+                "msg": "billing: fetched credits config",
+                "ctx": { "config": { "creditUsagePercent": weekly } }
+            })
+            .to_string()
+                + "\n",
+        )
+        .unwrap();
+    }
+
+    fn write_codex_usage(homes: &Homes, weekly: f64) {
+        let dir = homes.codex.join("sessions").join("live");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("rollout.jsonl"),
+            json!({
+                "payload": {
+                    "rate_limits": {
+                        "primary": { "used_percent": weekly, "window_minutes": 10080 }
+                    }
+                }
+            })
+            .to_string()
+                + "\n",
+        )
+        .unwrap();
+    }
+
     fn session() -> Session {
         Session {
             agent: Agent::Grok,
@@ -593,6 +625,39 @@ mod tests {
         let grok = resolve(&world.homes, "grok:Queue GC").unwrap();
         let peer = pick_peer(&world.homes, &grok).unwrap();
         assert_ne!(peer.agent, Agent::Claude);
+    }
+
+    #[test]
+    fn pick_peer_skips_grok_and_codex_when_exhausted() {
+        let _guard = test_env::lock(ENV);
+        let world = World::new();
+        write_grok_usage(&world.homes, 100.0);
+        let claude = resolve(&world.homes, "claude:disaster-recovery").unwrap();
+        let peer = pick_peer(&world.homes, &claude).unwrap();
+        assert_ne!(peer.agent, Agent::Grok);
+        write_codex_usage(&world.homes, 96.0);
+        let grok = resolve(&world.homes, "grok:Queue GC").unwrap();
+        let peer = pick_peer(&world.homes, &grok).unwrap();
+        assert_ne!(peer.agent, Agent::Codex);
+    }
+
+    #[test]
+    fn auto_nudge_hands_off_when_grok_weekly_is_critical() {
+        let _guard = test_env::lock(ENV);
+        unsafe {
+            std::env::set_var("GROK_SESSION_ID", "01testgrok0000000000000000");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+            std::env::remove_var("CLAUDE_PROJECT_DIR");
+            std::env::set_var("MAGENTS_AUTO_HANDOFF", "1");
+            std::env::remove_var("MAGENTS_HANDOFF_COOLDOWN_SECS");
+        }
+        let world = World::new();
+        write_grok_usage(&world.homes, 97.0);
+        let grok = resolve(&world.homes, "grok:Queue GC").unwrap();
+        assert_eq!(pressure_for(&world.homes, &grok).level, Level::Critical);
+        let nudge = super::nudge(&world.homes).unwrap();
+        assert!(nudge.contains("Auto-handed off"), "{nudge}");
+        assert!(nudge.contains("weekly"), "{nudge}");
     }
 
     #[test]

@@ -250,9 +250,23 @@ fn cli_usage_and_ingest() {
         &harness.root.join("claude/abtop-rate-limits.json"),
         r#"{"source":"claude","five_hour":{"used_percentage":0,"resets_at":1},"seven_day":{"used_percentage":100,"resets_at":2}}"#,
     );
+    write(
+        &harness.root.join("grok/logs/unified.jsonl"),
+        r#"{"msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":61}}}"#,
+    );
     let usage = harness.json(&["usage"]);
-    assert_eq!(usage["level"], "critical");
-    assert_eq!(usage["limiting"], "seven_day");
+    let rows = usage.as_array().unwrap();
+    let claude = rows
+        .iter()
+        .find(|row| row["agent"] == "claude")
+        .expect("claude usage");
+    assert_eq!(claude["level"], "critical");
+    assert_eq!(claude["limiting"], "seven_day");
+    let grok = rows
+        .iter()
+        .find(|row| row["agent"] == "grok")
+        .expect("grok usage");
+    assert_eq!(grok["level"], "ok");
 
     let mut child = harness
         .command(&["usage-ingest"])

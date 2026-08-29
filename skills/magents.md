@@ -34,13 +34,13 @@ other agent, **or this side is about to hit a usage cap**.
 
 ## Limits
 
-Claude Code has a 5-hour window and a **weekly** cap. magents reads those
-percentages from `~/.claude/abtop-rate-limits.json` or `rate-limits.json`.
-At ~75% it warns. At ~90% (or 100%) it **auto-hands off** this chat to
-another live agent that still has quota.
+Each harness has its own cap (Claude 5h + weekly, Grok weekly credits, Codex
+5h/weekly, Cursor/OpenCode when a snapshot is present). magents reads those
+percentages from local files. At ~75% it warns. At ~90% (or 100%) it
+**auto-hands off** this chat to another live agent that still has quota.
 
 If the host says weekly/usage limit reached, **call `handoff` now**. Do not
-sit on a dead Claude session.
+sit on a dead session.
 
 `handoff` injects compact state into another *live* chat. Omit `to` to let
 magents pick (skips harnesses already at critical usage). Cursor is

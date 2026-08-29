@@ -13,6 +13,16 @@ pub enum Agent {
 }
 
 impl Agent {
+    pub fn all() -> [Agent; 5] {
+        [
+            Self::Claude,
+            Self::Codex,
+            Self::Cursor,
+            Self::Grok,
+            Self::OpenCode,
+        ]
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
@@ -52,6 +62,7 @@ mod tests {
         assert_eq!(Agent::parse("nope"), None);
         assert_eq!(Agent::Claude.to_string(), "claude");
         assert_eq!(Agent::Codex.as_str(), "codex");
+        assert_eq!(Agent::all().len(), 5);
     }
 }
 
