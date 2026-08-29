@@ -217,3 +217,162 @@ pub async fn serve() -> anyhow::Result<()> {
     service.waiting().await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{InboxArgs, ListArgs, Magents, SearchArgs, SendArgs, SessionArgs};
+    use crate::handoff_tests::World;
+    use crate::test_env;
+    use rmcp::ServerHandler;
+    use rmcp::handler::server::wrapper::Parameters;
+    use rmcp::model::ContentBlock;
+
+    const CALLER_ENV: &[&str] = &[
+        "GROK_SESSION_ID",
+        "CLAUDE_CODE_MESSAGING_SOCKET",
+        "CLAUDE_PROJECT_DIR",
+        "CLAUDE_SESSION_ID",
+        "CURSOR_SESSION_ID",
+        "CURSOR_PROJECT_DIR",
+        "CURSOR_AGENT",
+        "COMPOSER_SESSION_ID",
+        "OPENCODE_SESSION_ID",
+        "OPENCODE_DIRECTORY",
+        "OPENCODE_SERVER",
+        "OPENCODE_SESSION",
+        "CODEX_HOME",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+    ];
+
+    fn text(result: rmcp::model::CallToolResult) -> String {
+        result
+            .content
+            .into_iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn tools_list_read_search_send_inbox_and_whoami() {
+        let _guard = test_env::lock(CALLER_ENV);
+        unsafe {
+            std::env::set_var("GROK_SESSION_ID", "01testgrok0000000000000000");
+        }
+        let world = World::new();
+        let server = Magents::new(world.homes.clone());
+
+        let info = server.get_info();
+        assert_eq!(info.server_info.name, "magents");
+        assert!(
+            info.instructions
+                .as_deref()
+                .unwrap_or("")
+                .contains("untrusted inert history")
+        );
+
+        let listed = server
+            .list_sessions(Parameters(ListArgs {
+                agent: Some("cursor".into()),
+                query: Some("Test rounds".into()),
+                live_only: Some(false),
+                include_archived: Some(true),
+                limit: Some(5),
+            }))
+            .unwrap();
+        let listed = text(listed);
+        assert!(
+            listed.contains("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            "{listed}"
+        );
+
+        let missing = server
+            .get_session(Parameters(SessionArgs {
+                session_id: "does-not-exist".into(),
+                limit: None,
+            }))
+            .unwrap();
+        assert_eq!(missing.is_error, Some(true));
+        assert!(text(missing).contains("session not found"));
+
+        let found = server
+            .get_session(Parameters(SessionArgs {
+                session_id: "claude:disaster-recovery".into(),
+                limit: None,
+            }))
+            .unwrap();
+        assert!(text(found).contains("11111111-1111-4111-8111-111111111111"));
+
+        let transcript = server
+            .read_transcript(Parameters(SessionArgs {
+                session_id: "cursor:Test rounds".into(),
+                limit: Some(8),
+            }))
+            .unwrap();
+        assert!(text(transcript).contains("109 point matrix"));
+
+        let hits = server
+            .search_transcripts(Parameters(SearchArgs {
+                query: "billing worker".into(),
+                agent: Some("codex".into()),
+                include_archived: Some(false),
+                limit: Some(3),
+            }))
+            .unwrap();
+        assert!(text(hits).contains("Billing"));
+
+        let sent = server
+            .send_message(Parameters(SendArgs {
+                to: "cursor:Test rounds".into(),
+                message: "handoff from mcp tests".into(),
+            }))
+            .unwrap();
+        let sent = text(sent);
+        assert!(sent.contains("\"queued\": true"), "{sent}");
+
+        let inbox = server
+            .inbox(Parameters(InboxArgs {
+                session_id: Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into()),
+                agent: Some("cursor".into()),
+            }))
+            .unwrap();
+        assert!(text(inbox).contains("handoff from mcp tests"));
+
+        let who = text(server.whoami().unwrap());
+        assert!(who.contains("grok"), "{who}");
+    }
+
+    #[test]
+    fn list_defaults_and_whoami_without_env() {
+        let _guard = test_env::lock(CALLER_ENV);
+        for key in CALLER_ENV {
+            unsafe { std::env::remove_var(key) };
+        }
+        let world = World::new();
+        let server = Magents::new(world.homes.clone());
+        let listed = server
+            .list_sessions(Parameters(ListArgs {
+                agent: None,
+                query: None,
+                live_only: None,
+                include_archived: None,
+                limit: None,
+            }))
+            .unwrap();
+        let listed = text(listed);
+        assert!(listed.contains("claude"));
+        let who = text(server.whoami().unwrap());
+        assert!(who.contains("\"agent\": null"), "{who}");
+        let inbox = server
+            .inbox(Parameters(InboxArgs {
+                session_id: None,
+                agent: None,
+            }))
+            .unwrap();
+        assert_eq!(inbox.is_error, Some(true));
+    }
+}

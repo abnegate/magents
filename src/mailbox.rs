@@ -93,3 +93,129 @@ fn mailbox_path(homes: &Homes, agent: Agent, session_id: &str) -> PathBuf {
         .join(agent.as_str())
         .join(format!("{session_id}.jsonl"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{compose, inbox, post};
+    use crate::homes::Homes;
+    use crate::model::{Agent, Caller};
+
+    #[test]
+    fn inbox_requires_identity_and_skips_junk() {
+        let dir = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(dir.path());
+        let empty = inbox(
+            &homes,
+            &Caller {
+                agent: Some(Agent::Grok),
+                session_id: Some("s1".into()),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(empty.is_empty());
+
+        let missing_agent = inbox(
+            &homes,
+            &Caller {
+                agent: None,
+                session_id: None,
+            },
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(missing_agent.to_string().contains("pass session_id"));
+
+        let missing_session = inbox(
+            &homes,
+            &Caller {
+                agent: Some(Agent::Grok),
+                session_id: None,
+            },
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(missing_session.to_string().contains("pass session_id"));
+
+        let mail = compose(
+            &Caller {
+                agent: Some(Agent::Claude),
+                session_id: Some("from".into()),
+            },
+            Agent::Grok,
+            "s1".into(),
+            "hello".into(),
+            vec!["claude-uds".into()],
+        );
+        post(&homes, &mail).unwrap();
+        let path = homes.mailbox_dir().join("grok").join("s1.jsonl");
+        std::fs::write(
+            &path,
+            format!(
+                "\n{}\nnot-json\n{}\n",
+                serde_json::to_string(&mail).unwrap(),
+                serde_json::to_string(&mail).unwrap()
+            ),
+        )
+        .unwrap();
+        let items = inbox(
+            &homes,
+            &Caller {
+                agent: None,
+                session_id: None,
+            },
+            Some("s1"),
+            Some(Agent::Grok),
+        )
+        .unwrap();
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn post_and_inbox_io_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(dir.path());
+        std::fs::create_dir_all(homes.mailbox_dir()).unwrap();
+        std::fs::write(homes.mailbox_dir().join("grok"), "not-a-dir").unwrap();
+        let mail = compose(
+            &Caller {
+                agent: Some(Agent::Claude),
+                session_id: Some("from".into()),
+            },
+            Agent::Grok,
+            "s1".into(),
+            "hello".into(),
+            vec![],
+        );
+        assert!(post(&homes, &mail).is_err());
+
+        let homes = Homes::isolated(dir.path().join("inbox-io"));
+        let path = homes.mailbox_dir().join("grok").join("s1.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{}\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o000);
+            std::fs::set_permissions(&path, permissions).unwrap();
+            let error = inbox(
+                &homes,
+                &Caller {
+                    agent: Some(Agent::Grok),
+                    session_id: Some("s1".into()),
+                },
+                None,
+                None,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("failed to read"));
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o644);
+            std::fs::set_permissions(&path, permissions).unwrap();
+        }
+    }
+}

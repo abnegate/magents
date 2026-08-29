@@ -30,3 +30,33 @@ impl Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+    use std::path::PathBuf;
+
+    #[test]
+    fn displays_every_variant() {
+        assert_eq!(Error::msg("x").to_string(), "x");
+        assert_eq!(
+            Error::NotFound("s".into()).to_string(),
+            "session not found: s"
+        );
+        assert!(
+            Error::Ambiguous {
+                reference: "r".into(),
+                matches: vec!["a".into(), "b".into()],
+            }
+            .to_string()
+            .contains("ambiguous")
+        );
+        let io = Error::Io {
+            path: PathBuf::from("/tmp/x"),
+            source: std::io::Error::other("boom"),
+        };
+        assert!(io.to_string().contains("/tmp/x"));
+        let json = Error::from(serde_json::from_str::<u8>("nope").unwrap_err());
+        assert!(json.to_string().contains("json error"));
+    }
+}

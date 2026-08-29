@@ -98,3 +98,70 @@ pub fn named_process_alive(name: &str) -> bool {
         .map(|status| status.success())
         .unwrap_or(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Homes, named_process_alive, pid_alive};
+    use crate::test_env;
+
+    const KEYS: &[&str] = &[
+        "HOME",
+        "CLAUDE_CONFIG_DIR",
+        "GROK_HOME",
+        "CODEX_HOME",
+        "CURSOR_HOME",
+        "CURSOR_APP_SUPPORT",
+        "OPENCODE_DATA",
+        "XDG_DATA_HOME",
+        "MAGENTS_HOME",
+    ];
+
+    #[test]
+    fn pid_and_named_process() {
+        assert!(!pid_alive(0));
+        assert!(pid_alive(std::process::id()));
+        assert!(!named_process_alive("magents-no-such-process-xyz"));
+    }
+
+    #[test]
+    fn from_env_reads_overrides_and_xdg() {
+        let _guard = test_env::lock(KEYS);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        unsafe {
+            std::env::set_var("HOME", root);
+            std::env::set_var("CLAUDE_CONFIG_DIR", root.join("c"));
+            std::env::set_var("GROK_HOME", root.join("g"));
+            std::env::set_var("CODEX_HOME", root.join("x"));
+            std::env::set_var("CURSOR_HOME", root.join("u"));
+            std::env::set_var("CURSOR_APP_SUPPORT", root.join("ua"));
+            std::env::remove_var("OPENCODE_DATA");
+            std::env::set_var("XDG_DATA_HOME", root.join("xdg"));
+            std::env::set_var("MAGENTS_HOME", root.join("m"));
+        }
+        let homes = Homes::from_env();
+        assert_eq!(homes.claude, root.join("c"));
+        assert_eq!(homes.grok, root.join("g"));
+        assert_eq!(homes.codex, root.join("x"));
+        assert_eq!(homes.cursor, root.join("u"));
+        assert_eq!(homes.cursor_app, root.join("ua"));
+        assert_eq!(homes.opencode, root.join("xdg").join("opencode"));
+        assert_eq!(homes.magents, root.join("m"));
+        assert_eq!(homes.mailbox_dir(), root.join("m").join("mailbox"));
+
+        unsafe {
+            std::env::remove_var("XDG_DATA_HOME");
+            std::env::remove_var("CLAUDE_CONFIG_DIR");
+            std::env::remove_var("GROK_HOME");
+            std::env::remove_var("CODEX_HOME");
+            std::env::remove_var("CURSOR_HOME");
+            std::env::remove_var("CURSOR_APP_SUPPORT");
+            std::env::remove_var("MAGENTS_HOME");
+            std::env::set_var("OPENCODE_DATA", root.join("oc"));
+        }
+        let homes = Homes::from_env();
+        assert_eq!(homes.claude, root.join(".claude"));
+        assert_eq!(homes.opencode, root.join("oc"));
+        assert!(homes.magents.ends_with("magents"));
+    }
+}

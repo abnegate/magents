@@ -1,8 +1,10 @@
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 static ENV: Mutex<()> = Mutex::new(());
@@ -200,6 +202,30 @@ fn cli_lists_reads_searches_and_mails_across_harnesses() {
             .unwrap()
             .contains("matrix is in cloud/docs")
     );
+
+    let live = harness.json(&["list", "--live", "--agent", "claude", "-n", "5"]);
+    assert!(
+        live.as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["live"] == true)
+    );
+
+    let search = harness.json(&[
+        "search",
+        "dedicated databases",
+        "--agent",
+        "grok",
+        "-n",
+        "5",
+    ]);
+    assert!(!search.as_array().unwrap().is_empty());
+
+    let miss = harness
+        .command(&["get", "no-such-session-xyz"])
+        .output()
+        .unwrap();
+    assert!(!miss.status.success());
 }
 
 #[test]
@@ -220,4 +246,31 @@ fn cli_installs_cursor_and_opencode_mcp_config() {
     let opencode = fs::read_to_string(harness.root.join(".config/opencode/opencode.json")).unwrap();
     assert!(opencode.contains("magents"));
     assert!(opencode.contains("\"type\": \"local\""));
+}
+
+#[test]
+fn mcp_stdio_exits_when_stdin_closes() {
+    let _lock = ENV.lock().unwrap();
+    let harness = Harness::new();
+    let mut child = harness
+        .command(&["mcp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdin.take());
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() > Duration::from_secs(3) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(_) => break,
+        }
+    }
 }

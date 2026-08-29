@@ -69,9 +69,12 @@ pub fn deliver_live(homes: &Homes, session: &Session, message: &str) -> Result<V
     Ok(delivered)
 }
 
+fn program(var: &str, fallback: &str) -> String {
+    std::env::var(var).unwrap_or_else(|_| fallback.into())
+}
+
 fn send_opencode_run(session: &Session, message: &str) -> Result<()> {
-    let program = std::env::var("MAGENTS_OPENCODE_BIN").unwrap_or_else(|_| "opencode".into());
-    let mut command = Command::new(program);
+    let mut command = Command::new(program("MAGENTS_OPENCODE_BIN", "opencode"));
     command.arg("run").arg("--session").arg(&session.session_id);
     if let Some(cwd) = &session.cwd {
         command.arg("--dir").arg(cwd);
@@ -94,7 +97,7 @@ fn send_opencode_run(session: &Session, message: &str) -> Result<()> {
 
 fn send_grok_single(session: &Session, message: &str) -> Result<()> {
     let cwd = session.cwd.as_deref().unwrap_or(".");
-    let child = Command::new("grok")
+    let child = Command::new(program("MAGENTS_GROK_BIN", "grok"))
         .args([
             "--cwd",
             cwd,
@@ -120,7 +123,8 @@ fn send_grok_single(session: &Session, message: &str) -> Result<()> {
 }
 
 fn send_tmux(target: &str, message: &str) -> Result<()> {
-    let status = Command::new("tmux")
+    let tmux = program("MAGENTS_TMUX_BIN", "tmux");
+    let status = Command::new(&tmux)
         .args(["send-keys", "-t", target, "-l", "--", message])
         .status()
         .map_err(|source| Error::Io {
@@ -130,7 +134,7 @@ fn send_tmux(target: &str, message: &str) -> Result<()> {
     if !status.success() {
         return Err(Error::msg(format!("tmux send-keys failed for {target}")));
     }
-    let status = Command::new("tmux")
+    let status = Command::new(&tmux)
         .args(["send-keys", "-t", target, "Enter"])
         .status()
         .map_err(|source| Error::Io {
@@ -144,7 +148,7 @@ fn send_tmux(target: &str, message: &str) -> Result<()> {
 }
 
 fn send_codex_exec(session: &Session, message: &str) -> Result<()> {
-    let mut command = Command::new("codex");
+    let mut command = Command::new(program("MAGENTS_CODEX_BIN", "codex"));
     command.arg("exec").arg("--skip-git-repo-check");
     if let Some(cwd) = &session.cwd {
         command.arg("-C").arg(cwd);
@@ -316,12 +320,502 @@ fn read_peer_token(path: &PathBuf) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::PeerKey;
+    use super::{PeerKey, deliver_live};
+    use crate::homes::Homes;
+    use crate::model::{Agent, Session};
+    use crate::test_env;
+    use std::fs;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+    use std::path::{Path, PathBuf};
+    use std::thread;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    const ENV: &[&str] = &[
+        "MAGENTS_GROK_BIN",
+        "MAGENTS_CODEX_BIN",
+        "MAGENTS_TMUX_BIN",
+        "MAGENTS_OPENCODE_BIN",
+    ];
+
+    fn session(agent: Agent, id: &str) -> Session {
+        Session {
+            agent,
+            session_id: id.into(),
+            desktop_id: None,
+            name: None,
+            title: None,
+            cwd: Some("/tmp/work".into()),
+            branch: None,
+            live: true,
+            archived: false,
+            pid: Some(std::process::id()),
+            model: None,
+            last_activity_at: None,
+            transcript_path: None,
+            messaging_socket: None,
+            origin: None,
+            tmux: None,
+        }
+    }
+
+    fn isolated() -> (TempDir, Homes) {
+        let dir = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(dir.path());
+        (dir, homes)
+    }
+
+    fn wait_for(path: &Path, timeout: Duration) -> String {
+        let started = std::time::Instant::now();
+        loop {
+            if let Ok(body) = fs::read_to_string(path)
+                && !body.trim().is_empty()
+            {
+                return body;
+            }
+            if started.elapsed() > timeout {
+                return String::new();
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_listener(path: &Path) {
+        let started = std::time::Instant::now();
+        while !path.exists() {
+            if started.elapsed() > Duration::from_secs(2) {
+                panic!("socket {} never appeared", path.display());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
 
     #[test]
     fn parses_peer_key() {
         let key: PeerKey =
             serde_json::from_str(r#"{"peerToken":"abc","procStart":"now"}"#).unwrap();
         assert_eq!(key.peer_token, "abc");
+    }
+
+    #[test]
+    fn grok_single_uses_stub_and_cwd_fallback() {
+        let _guard = test_env::lock(ENV);
+        let (dir, homes) = isolated();
+        let log = dir.path().join("grok.log");
+        let stub = dir.path().join("grok");
+        test_env::write_executable(
+            &stub,
+            &format!("printf '%s\\n' \"$@\" > '{}'", log.display()),
+        );
+        unsafe { std::env::set_var("MAGENTS_GROK_BIN", &stub) };
+        let mut live = session(Agent::Grok, "grok-1");
+        live.cwd = None;
+        let delivered = deliver_live(&homes, &live, "ping from magents").unwrap();
+        let args = wait_for(&log, Duration::from_secs(2));
+        assert_eq!(delivered, vec!["grok-single".to_string()]);
+        assert!(args.contains("--single"), "{args}");
+        assert!(args.contains("grok-1"), "{args}");
+        assert!(args.contains("ping from magents"), "{args}");
+    }
+
+    #[test]
+    fn grok_single_reports_missing_binary() {
+        let _guard = test_env::lock(ENV);
+        let (dir, homes) = isolated();
+        unsafe {
+            std::env::set_var(
+                "MAGENTS_GROK_BIN",
+                dir.path().join("missing-grok").as_os_str(),
+            );
+        }
+        let delivered = deliver_live(&homes, &session(Agent::Grok, "g"), "hi").unwrap();
+        assert!(
+            delivered
+                .iter()
+                .any(|item| item.starts_with("grok-single-failed:")),
+            "{delivered:?}"
+        );
+    }
+
+    #[test]
+    fn tmux_fallback_when_claude_has_no_socket() {
+        let _guard = test_env::lock(ENV);
+        let (dir, homes) = isolated();
+        let log = dir.path().join("tmux.log");
+        let stub = dir.path().join("tmux");
+        test_env::write_executable(
+            &stub,
+            &format!("printf '%s\\n' \"$@\" >> '{}'", log.display()),
+        );
+        unsafe { std::env::set_var("MAGENTS_TMUX_BIN", &stub) };
+        let mut live = session(Agent::Claude, "c1");
+        live.tmux = Some("magents:0.0".into());
+        let delivered = deliver_live(&homes, &live, "typed").unwrap();
+        assert_eq!(delivered, vec!["claude-tmux".to_string()]);
+        let args = wait_for(&log, Duration::from_secs(2));
+        assert!(args.contains("send-keys"), "{args}");
+        assert!(args.contains("typed"), "{args}");
+        assert!(args.contains("Enter"), "{args}");
+    }
+
+    #[test]
+    fn tmux_send_keys_failure_is_reported() {
+        let _guard = test_env::lock(ENV);
+        let (dir, homes) = isolated();
+        let stub = dir.path().join("tmux");
+        test_env::write_executable(&stub, "exit 1");
+        unsafe { std::env::set_var("MAGENTS_TMUX_BIN", &stub) };
+        let mut live = session(Agent::Claude, "c1");
+        live.tmux = Some("gone:0.0".into());
+        let delivered = deliver_live(&homes, &live, "typed").unwrap();
+        assert!(
+            delivered
+                .iter()
+                .any(|item| item.starts_with("claude-tmux-failed:")),
+            "{delivered:?}"
+        );
+    }
+
+    #[test]
+    fn tmux_enter_failure_is_reported() {
+        let _guard = test_env::lock(ENV);
+        let (dir, homes) = isolated();
+        let stub = dir.path().join("tmux");
+        test_env::write_executable(
+            &stub,
+            r#"
+case " $* " in
+  *" -l "*) exit 0 ;;
+  *) exit 1 ;;
+esac
+"#,
+        );
+        unsafe { std::env::set_var("MAGENTS_TMUX_BIN", &stub) };
+        let mut live = session(Agent::Claude, "c1");
+        live.tmux = Some("pane:0.0".into());
+        let delivered = deliver_live(&homes, &live, "typed").unwrap();
+        assert!(
+            delivered
+                .iter()
+                .any(|item| item.contains("tmux enter failed")),
+            "{delivered:?}"
+        );
+    }
+
+    #[test]
+    fn missing_tmux_binary_is_reported() {
+        let _guard = test_env::lock(ENV);
+        let (dir, homes) = isolated();
+        unsafe {
+            std::env::set_var("MAGENTS_TMUX_BIN", dir.path().join("no-tmux").as_os_str());
+        }
+        let mut live = session(Agent::Claude, "c1");
+        live.tmux = Some("pane:0.0".into());
+        let delivered = deliver_live(&homes, &live, "typed").unwrap();
+        assert!(
+            delivered
+                .iter()
+                .any(|item| item.starts_with("claude-tmux-failed:")),
+            "{delivered:?}"
+        );
+    }
+
+    #[test]
+    fn codex_exec_resume_uses_stub() {
+        let _guard = test_env::lock(ENV);
+        let (dir, homes) = isolated();
+        let log = dir.path().join("codex.log");
+        let stub = dir.path().join("codex");
+        test_env::write_executable(
+            &stub,
+            &format!("printf '%s\\n' \"$@\" > '{}'", log.display()),
+        );
+        unsafe { std::env::set_var("MAGENTS_CODEX_BIN", &stub) };
+        let delivered = deliver_live(&homes, &session(Agent::Codex, "thread-1"), "go").unwrap();
+        assert_eq!(delivered, vec!["codex-exec".to_string()]);
+        let args = wait_for(&log, Duration::from_secs(2));
+        assert!(args.contains("exec"), "{args}");
+        assert!(args.contains("resume"), "{args}");
+        assert!(args.contains("thread-1"), "{args}");
+        assert!(args.contains("-C"), "{args}");
+    }
+
+    #[test]
+    fn codex_exec_failure_includes_stderr() {
+        let _guard = test_env::lock(ENV);
+        let (dir, homes) = isolated();
+        let stub = dir.path().join("codex");
+        test_env::write_executable(
+            &stub,
+            "echo paginated_threads is not supported yet >&2; exit 1",
+        );
+        unsafe { std::env::set_var("MAGENTS_CODEX_BIN", &stub) };
+        let mut live = session(Agent::Codex, "thread-1");
+        live.cwd = None;
+        let delivered = deliver_live(&homes, &live, "go").unwrap();
+        assert!(
+            delivered
+                .iter()
+                .any(|item| item.contains("paginated_threads")),
+            "{delivered:?}"
+        );
+    }
+
+    #[test]
+    fn codex_exec_failure_without_stderr() {
+        let _guard = test_env::lock(ENV);
+        let (dir, homes) = isolated();
+        let stub = dir.path().join("codex");
+        test_env::write_executable(&stub, "exit 1");
+        unsafe { std::env::set_var("MAGENTS_CODEX_BIN", &stub) };
+        let delivered = deliver_live(&homes, &session(Agent::Codex, "t"), "go").unwrap();
+        assert!(
+            delivered
+                .iter()
+                .any(|item| item.contains("codex exec resume exited")),
+            "{delivered:?}"
+        );
+    }
+
+    #[test]
+    fn codex_ipc_success_and_failure_paths() {
+        let _guard = test_env::lock(ENV);
+        let world = crate::handoff_tests::World::new();
+        let stub = world.homes.magents.join("codex-stub");
+        test_env::write_executable(&stub, "exit 0");
+        unsafe { std::env::set_var("MAGENTS_CODEX_BIN", &stub) };
+        let billing = crate::discover::resolve(&world.homes, "codex:Billing").unwrap();
+        let delivered = deliver_live(&world.homes, &billing, "via dummy sock").unwrap();
+        assert!(
+            delivered
+                .iter()
+                .any(|item| item.starts_with("codex-ipc-failed:")),
+            "{delivered:?}"
+        );
+        assert!(
+            delivered.iter().any(|item| item == "codex-exec"),
+            "{delivered:?}"
+        );
+
+        let (dir, homes) = isolated();
+        let socket = homes.codex.join("ipc").join("ipc.sock");
+        fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        thread::spawn({
+            let socket = socket.clone();
+            move || {
+                let listener = UnixListener::bind(&socket).unwrap();
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+                let mut buffer = Vec::new();
+                for _ in 0..2 {
+                    while buffer.len() < 4 {
+                        let mut chunk = [0u8; 8192];
+                        let read = stream.read(&mut chunk).unwrap();
+                        buffer.extend_from_slice(&chunk[..read]);
+                    }
+                    let length = u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize;
+                    let total = 4 + length;
+                    while buffer.len() < total {
+                        let mut chunk = [0u8; 8192];
+                        let read = stream.read(&mut chunk).unwrap();
+                        buffer.extend_from_slice(&chunk[..read]);
+                    }
+                    let request: serde_json::Value =
+                        serde_json::from_slice(&buffer[4..total]).unwrap();
+                    buffer.drain(..total);
+                    let id = request["requestId"].clone();
+                    let payload = serde_json::json!({
+                        "type": "response",
+                        "requestId": id,
+                        "result": { "clientId": "c1", "turn": { "status": "in_progress" } }
+                    });
+                    let body = serde_json::to_vec(&payload).unwrap();
+                    let mut frame = Vec::new();
+                    frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
+                    frame.extend_from_slice(&body);
+                    stream.write_all(&frame).unwrap();
+                }
+            }
+        });
+        wait_listener(&socket);
+        let delivered = deliver_live(&homes, &session(Agent::Codex, "thread-1"), "ipc hi").unwrap();
+        assert_eq!(delivered, vec!["codex-ipc".to_string()]);
+        let _ = dir;
+    }
+
+    #[test]
+    fn missing_codex_binary_is_reported() {
+        let _guard = test_env::lock(ENV);
+        let (dir, homes) = isolated();
+        unsafe {
+            std::env::set_var("MAGENTS_CODEX_BIN", dir.path().join("no-codex").as_os_str());
+        }
+        let delivered = deliver_live(&homes, &session(Agent::Codex, "t"), "go").unwrap();
+        assert!(
+            delivered
+                .iter()
+                .any(|item| item.starts_with("codex-exec-failed:")),
+            "{delivered:?}"
+        );
+    }
+
+    #[test]
+    fn opencode_missing_binary_is_reported() {
+        let _guard = test_env::lock(ENV);
+        let (dir, homes) = isolated();
+        unsafe {
+            std::env::set_var(
+                "MAGENTS_OPENCODE_BIN",
+                dir.path().join("no-opencode").as_os_str(),
+            );
+        }
+        let mut live = session(Agent::OpenCode, "ses");
+        live.cwd = None;
+        let delivered = deliver_live(&homes, &live, "go").unwrap();
+        assert!(
+            delivered
+                .iter()
+                .any(|item| item.starts_with("opencode-run-failed:")),
+            "{delivered:?}"
+        );
+    }
+
+    #[test]
+    fn claude_uds_missing_socket_and_missing_token() {
+        let (_dir, homes) = isolated();
+        let mut live = session(Agent::Claude, "c1");
+        live.messaging_socket = Some(PathBuf::from("/tmp/magents-no-such-socket.sock"));
+        let delivered = deliver_live(&homes, &live, "hi").unwrap();
+        assert!(
+            delivered
+                .iter()
+                .any(|item| item.starts_with("claude-uds-failed:")),
+            "{delivered:?}"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("empty.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        drop(listener);
+        live.messaging_socket = Some(socket);
+        live.pid = None;
+        let delivered = deliver_live(&homes, &live, "hi").unwrap();
+        assert!(
+            delivered.iter().any(|item| item.contains("peer token")),
+            "{delivered:?}"
+        );
+    }
+
+    #[test]
+    fn claude_uds_capability_token_and_error_reply() {
+        let (dir, homes) = isolated();
+        let socket = dir.path().join("caps.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let digest = {
+            use sha2::{Digest, Sha256};
+            let bytes = Sha256::digest(socket.to_string_lossy().as_bytes());
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        fs::create_dir_all(homes.claude.join("messaging-capabilities")).unwrap();
+        fs::write(
+            homes
+                .claude
+                .join("messaging-capabilities")
+                .join(format!("{digest}.json")),
+            r#"{"authToken":"cap-token"}"#,
+        )
+        .unwrap();
+        let received = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+            let mut buf = String::new();
+            let _ = stream.read_to_string(&mut buf);
+            let _ = writeln!(stream, r#"{{"type":"error","data":"nope"}}"#);
+            buf
+        });
+        let mut live = session(Agent::Claude, "c1");
+        live.messaging_socket = Some(socket);
+        live.pid = None;
+        let delivered = deliver_live(&homes, &live, "from magents").unwrap();
+        assert!(
+            delivered
+                .iter()
+                .any(|item| item.contains("claude-uds-failed:nope")),
+            "{delivered:?}"
+        );
+        let body = received.join().unwrap();
+        assert!(body.contains("cap-token"));
+    }
+
+    #[test]
+    fn claude_uds_hash_key_and_empty_ack() {
+        let (dir, homes) = isolated();
+        let socket = dir.path().join("4242.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let real = fs::canonicalize(&socket).unwrap();
+        let digest = {
+            use sha2::{Digest, Sha256};
+            let bytes = Sha256::digest(real.to_string_lossy().as_bytes());
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        fs::create_dir_all(homes.claude.join("sessions")).unwrap();
+        fs::write(
+            homes
+                .claude
+                .join("sessions")
+                .join(format!("4242.{digest}.key")),
+            r#"{"peerToken":"hash-token","procStart":"now"}"#,
+        )
+        .unwrap();
+        let received = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+            let mut buf = String::new();
+            let _ = stream.read_to_string(&mut buf);
+            let _ = writeln!(stream, "   ");
+            buf
+        });
+        let mut live = session(Agent::Claude, "c1");
+        live.messaging_socket = Some(socket);
+        live.pid = None;
+        let delivered = deliver_live(&homes, &live, "hash path").unwrap();
+        assert_eq!(delivered, vec!["claude-uds".to_string()]);
+        let body = received.join().unwrap();
+        assert!(body.contains("hash-token"));
+    }
+
+    #[test]
+    fn claude_uds_non_error_ack_is_ok() {
+        let (dir, homes) = isolated();
+        let socket = dir.path().join("ok.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        fs::create_dir_all(homes.claude.join("sessions")).unwrap();
+        fs::write(
+            homes
+                .claude
+                .join("sessions")
+                .join(format!("{}.deadbeef.key", std::process::id())),
+            r#"{"peerToken":"pid-token","procStart":"now"}"#,
+        )
+        .unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+            let mut buf = String::new();
+            let _ = stream.read_to_string(&mut buf);
+            let _ = writeln!(stream, r#"{{"type":"ok"}}"#);
+        });
+        let mut live = session(Agent::Claude, "c1");
+        live.messaging_socket = Some(socket);
+        let delivered = deliver_live(&homes, &live, "ack").unwrap();
+        assert_eq!(delivered, vec!["claude-uds".to_string()]);
     }
 }

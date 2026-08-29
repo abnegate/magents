@@ -212,8 +212,69 @@ fn read_more(stream: &mut UnixStream, buffer: &mut Vec<u8>, socket: &Path) -> Re
 
 #[cfg(test)]
 mod tests {
-    use super::encode_frame;
-    use serde_json::json;
+    use super::{encode_frame, send_user_turn};
+    use serde_json::{Value, json};
+    use std::io::{Read, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::path::{Path, PathBuf};
+    use std::thread;
+    use std::time::Duration;
+
+    fn read_value(stream: &mut UnixStream, buffer: &mut Vec<u8>) -> Value {
+        stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+        while buffer.len() < 4 {
+            let mut chunk = [0u8; 8192];
+            let read = stream.read(&mut chunk).unwrap();
+            assert!(read > 0, "client closed");
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        let length = u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize;
+        let total = 4 + length;
+        while buffer.len() < total {
+            let mut chunk = [0u8; 8192];
+            let read = stream.read(&mut chunk).unwrap();
+            assert!(read > 0, "client closed mid-frame");
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        let payload = buffer[4..total].to_vec();
+        buffer.drain(..total);
+        serde_json::from_slice(&payload).unwrap()
+    }
+
+    fn write_value(stream: &mut UnixStream, value: &Value) {
+        let frame = encode_frame(value).unwrap();
+        stream.write_all(&frame).unwrap();
+        stream.flush().ok();
+    }
+
+    fn serve(socket: PathBuf, handler: impl Fn(&Value) -> Vec<Value> + Send + 'static) {
+        thread::spawn(move || {
+            let listener = UnixListener::bind(&socket).unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = Vec::new();
+            loop {
+                let Ok(request) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    read_value(&mut stream, &mut buffer)
+                })) else {
+                    break;
+                };
+                for response in handler(&request) {
+                    write_value(&mut stream, &response);
+                }
+            }
+        });
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    fn temp_socket() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("ipc.sock");
+        (dir, socket)
+    }
+
+    fn echo_id(request: &Value) -> Value {
+        request["requestId"].clone()
+    }
 
     #[test]
     fn frames_are_little_endian_length_prefixed() {
@@ -223,5 +284,134 @@ mod tests {
         assert_eq!(length, frame.len() - 4);
         let parsed: serde_json::Value = serde_json::from_slice(&frame[4..]).unwrap();
         assert_eq!(parsed["method"], "initialize");
+    }
+
+    #[test]
+    fn send_user_turn_speaks_initialize_and_start_turn() {
+        let (_dir, socket) = temp_socket();
+        serve(socket.clone(), |request| {
+            let id = echo_id(request);
+            match request["method"].as_str() {
+                Some("initialize") => vec![
+                    json!({
+                        "type": "client-discovery-request",
+                        "requestId": "disc-1"
+                    }),
+                    json!({"type": "broadcast", "method": "noise"}),
+                    json!({
+                        "type": "request",
+                        "requestId": "inbound-1",
+                        "method": "ping"
+                    }),
+                    json!({"type": "ignored"}),
+                    json!({
+                        "type": "response",
+                        "requestId": id,
+                        "result": { "clientId": "client-99" }
+                    }),
+                ],
+                Some("thread-follower-start-turn") => vec![json!({
+                    "type": "response",
+                    "requestId": id,
+                    "result": { "turn": { "status": "in_progress" } }
+                })],
+                _ => Vec::new(),
+            }
+        });
+        send_user_turn(&socket, "thread-1", "hello from magents").unwrap();
+    }
+
+    #[test]
+    fn send_user_turn_failed_status_is_error() {
+        let (_dir, socket) = temp_socket();
+        serve(socket.clone(), |request| {
+            let id = echo_id(request);
+            match request["method"].as_str() {
+                Some("initialize") => vec![json!({
+                    "type": "response",
+                    "requestId": id,
+                    "result": {}
+                })],
+                Some("thread-follower-start-turn") => vec![json!({
+                    "type": "response",
+                    "requestId": id,
+                    "result": { "turn": { "status": "failed" } }
+                })],
+                _ => Vec::new(),
+            }
+        });
+        let error = send_user_turn(&socket, "thread-1", "nope").unwrap_err();
+        assert!(error.to_string().contains("codex turn failed"));
+    }
+
+    #[test]
+    fn send_user_turn_rpc_error_is_error() {
+        let (_dir, socket) = temp_socket();
+        serve(socket.clone(), |request| {
+            let id = echo_id(request);
+            vec![json!({
+                "type": "response",
+                "requestId": id,
+                "resultType": "error",
+                "error": "nope"
+            })]
+        });
+        let error = send_user_turn(&socket, "thread-1", "nope").unwrap_err();
+        assert!(error.to_string().contains("codex ipc initialize error"));
+    }
+
+    #[test]
+    fn send_user_turn_rejects_missing_socket() {
+        let error = send_user_turn(Path::new("/tmp/magents-no-ipc.sock"), "t", "m").unwrap_err();
+        assert!(error.to_string().contains("failed to read"));
+    }
+
+    #[test]
+    fn send_user_turn_rejects_zero_length_frame() {
+        let (_dir, socket) = temp_socket();
+        thread::spawn({
+            let socket = socket.clone();
+            move || {
+                let listener = UnixListener::bind(&socket).unwrap();
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut sink = [0u8; 32];
+                let _ = stream.read(&mut sink);
+                stream.write_all(&0u32.to_le_bytes()).unwrap();
+            }
+        });
+        thread::sleep(Duration::from_millis(50));
+        let error = send_user_turn(&socket, "t", "m").unwrap_err();
+        assert!(error.to_string().contains("invalid frame length"));
+    }
+
+    #[test]
+    fn send_user_turn_closed_socket() {
+        let (_dir, socket) = temp_socket();
+        thread::spawn({
+            let socket = socket.clone();
+            move || {
+                let listener = UnixListener::bind(&socket).unwrap();
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut sink = [0u8; 4096];
+                let _ = stream.read(&mut sink);
+                drop(stream);
+            }
+        });
+        thread::sleep(Duration::from_millis(50));
+        let error = send_user_turn(&socket, "t", "m").unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("socket closed")
+                || message.contains("failed to read")
+                || message.contains("timeout"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn encode_frame_rejects_giant_payload() {
+        let huge = "x".repeat((8 * 1024 * 1024) + 1);
+        let error = encode_frame(&json!(huge)).unwrap_err();
+        assert!(error.to_string().contains("too large"));
     }
 }

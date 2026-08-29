@@ -46,7 +46,127 @@ mod tests {
         assert_eq!(Agent::parse("cursor-agent"), Some(Agent::Cursor));
         assert_eq!(Agent::parse("grok-code"), Some(Agent::Grok));
         assert_eq!(Agent::parse("open-code"), Some(Agent::OpenCode));
+        assert_eq!(Agent::parse("ccd"), Some(Agent::Claude));
+        assert_eq!(Agent::parse("cursor-ide"), Some(Agent::Cursor));
+        assert_eq!(Agent::parse("oc"), Some(Agent::OpenCode));
         assert_eq!(Agent::parse("nope"), None);
+        assert_eq!(Agent::Claude.to_string(), "claude");
+        assert_eq!(Agent::Codex.as_str(), "codex");
+    }
+}
+
+#[cfg(test)]
+mod caller_tests {
+    use super::{Agent, Caller, Session};
+    use crate::test_env;
+    use chrono::Utc;
+
+    const KEYS: &[&str] = &[
+        "GROK_SESSION_ID",
+        "CLAUDE_CODE_MESSAGING_SOCKET",
+        "CLAUDE_PROJECT_DIR",
+        "CLAUDE_SESSION_ID",
+        "CURSOR_SESSION_ID",
+        "CURSOR_PROJECT_DIR",
+        "CURSOR_AGENT",
+        "COMPOSER_SESSION_ID",
+        "OPENCODE_SESSION_ID",
+        "OPENCODE_DIRECTORY",
+        "OPENCODE_SERVER",
+        "OPENCODE_SESSION",
+        "CODEX_HOME",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+    ];
+
+    fn clear() {
+        for key in KEYS {
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+
+    fn session() -> Session {
+        Session {
+            agent: Agent::Grok,
+            session_id: "id".into(),
+            desktop_id: Some("desk".into()),
+            name: Some("named".into()),
+            title: None,
+            cwd: Some("/tmp/x".into()),
+            branch: Some("main".into()),
+            live: true,
+            archived: false,
+            pid: Some(9),
+            model: None,
+            last_activity_at: Some(Utc::now()),
+            transcript_path: None,
+            messaging_socket: None,
+            origin: Some("tui".into()),
+            tmux: Some("s:0.0".into()),
+        }
+    }
+
+    #[test]
+    fn session_label_haystack_and_activity() {
+        let session = session();
+        assert_eq!(session.label(), "named");
+        assert!(session.haystack().contains("desk"));
+        assert!(session.activity_ms() > 0);
+        let mut untitled = session.clone();
+        untitled.name = None;
+        assert_eq!(untitled.label(), "id");
+        untitled.last_activity_at = None;
+        assert_eq!(untitled.activity_ms(), 0);
+        untitled.title = Some("titled".into());
+        assert_eq!(untitled.label(), "titled");
+    }
+
+    #[test]
+    fn caller_detects_each_harness() {
+        let _guard = test_env::lock(KEYS);
+        clear();
+        assert!(Caller::from_env().agent.is_none());
+
+        unsafe { std::env::set_var("GROK_SESSION_ID", "g1") };
+        let caller = Caller::from_env();
+        assert_eq!(caller.agent, Some(Agent::Grok));
+        assert_eq!(caller.session_id.as_deref(), Some("g1"));
+        unsafe { std::env::remove_var("GROK_SESSION_ID") };
+
+        unsafe { std::env::set_var("CLAUDE_PROJECT_DIR", "/tmp") };
+        let caller = Caller::from_env();
+        assert_eq!(caller.agent, Some(Agent::Claude));
+        unsafe { std::env::remove_var("CLAUDE_PROJECT_DIR") };
+        unsafe { std::env::set_var("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/x") };
+        unsafe { std::env::set_var("CLAUDE_SESSION_ID", "c1") };
+        assert_eq!(Caller::from_env().session_id.as_deref(), Some("c1"));
+        unsafe { std::env::remove_var("CLAUDE_CODE_MESSAGING_SOCKET") };
+        unsafe { std::env::remove_var("CLAUDE_SESSION_ID") };
+
+        unsafe { std::env::set_var("CURSOR_AGENT", "1") };
+        unsafe { std::env::set_var("COMPOSER_SESSION_ID", "cur") };
+        let caller = Caller::from_env();
+        assert_eq!(caller.agent, Some(Agent::Cursor));
+        assert_eq!(caller.session_id.as_deref(), Some("cur"));
+        unsafe { std::env::remove_var("CURSOR_AGENT") };
+        unsafe { std::env::remove_var("COMPOSER_SESSION_ID") };
+        unsafe { std::env::set_var("CURSOR_SESSION_ID", "cur2") };
+        assert_eq!(Caller::from_env().session_id.as_deref(), Some("cur2"));
+        unsafe { std::env::remove_var("CURSOR_SESSION_ID") };
+
+        unsafe { std::env::set_var("OPENCODE_DIRECTORY", "/tmp") };
+        unsafe { std::env::set_var("OPENCODE_SESSION", "oc") };
+        let caller = Caller::from_env();
+        assert_eq!(caller.agent, Some(Agent::OpenCode));
+        assert_eq!(caller.session_id.as_deref(), Some("oc"));
+        unsafe { std::env::remove_var("OPENCODE_DIRECTORY") };
+        unsafe { std::env::remove_var("OPENCODE_SESSION") };
+
+        unsafe { std::env::set_var("CODEX_HOME", "/tmp/codex") };
+        unsafe { std::env::set_var("CODEX_SESSION_ID", "cx") };
+        let caller = Caller::from_env();
+        assert_eq!(caller.agent, Some(Agent::Codex));
+        assert_eq!(caller.session_id.as_deref(), Some("cx"));
     }
 }
 

@@ -945,6 +945,16 @@ mod tests {
     }
 
     #[test]
+    fn recently_active_window() {
+        use chrono::{Duration, Utc};
+        assert!(!super::recently_active(None));
+        assert!(super::recently_active(Some(Utc::now())));
+        assert!(!super::recently_active(Some(
+            Utc::now() - Duration::minutes(30)
+        )));
+    }
+
+    #[test]
     fn decodes_file_uris() {
         assert_eq!(
             super::file_uri_path("file:///Users/jakebarnby/Local/cloud").as_deref(),

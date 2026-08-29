@@ -232,3 +232,146 @@ fn run(program: &str, args: &[&str]) -> Result<String> {
         Err(error) => Err(Error::msg(format!("{program} not found: {error}"))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{install, read_json_object, write_json, write_skill};
+    use crate::test_env;
+    use serde_json::{Value, json};
+    use std::fs;
+    use std::path::Path;
+
+    const ENV: &[&str] = &["HOME", "PATH"];
+
+    fn with_home(run: impl FnOnce(&Path, &Path)) {
+        let _guard = test_env::lock(ENV);
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        unsafe {
+            std::env::set_var("HOME", home);
+            std::env::set_var("PATH", &bin);
+        }
+        run(home, &bin);
+    }
+
+    #[test]
+    fn install_none_is_empty() {
+        let notes = install(false, false, false, false, false).unwrap();
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn install_cursor_and_opencode_merge_json() {
+        with_home(|home, _bin| {
+            let cursor = home.join(".cursor").join("mcp.json");
+            write_json(&cursor, &json!({"mcpServers": {"other": {"command": "x"}}})).unwrap();
+            let opencode = home.join(".config").join("opencode").join("opencode.json");
+            fs::create_dir_all(opencode.parent().unwrap()).unwrap();
+            fs::write(&opencode, "{}\n").unwrap();
+            let notes = install(false, false, false, true, true).unwrap();
+            assert!(notes.iter().any(|note| note.contains("mcp.json")));
+            let cursor_raw = fs::read_to_string(&cursor).unwrap();
+            assert!(cursor_raw.contains("magents"));
+            assert!(cursor_raw.contains("other"));
+            let opencode_raw = fs::read_to_string(&opencode).unwrap();
+            assert!(opencode_raw.contains("$schema"));
+            assert!(opencode_raw.contains("\"type\": \"local\""));
+            assert!(home.join(".cursor/skills/magents/SKILL.md").is_file());
+            assert!(
+                home.join(".config/opencode/skills/magents/SKILL.md")
+                    .is_file()
+            );
+        });
+    }
+
+    #[test]
+    fn install_cli_hosts_with_stubs() {
+        with_home(|home, bin| {
+            test_env::write_executable(&bin.join("grok"), "echo added magents");
+            test_env::write_executable(&bin.join("claude"), "echo added magents");
+            test_env::write_executable(&bin.join("codex"), "exit 0");
+            let notes = install(true, true, true, false, false).unwrap();
+            assert!(notes.iter().any(|note| note.contains("added magents")));
+            assert!(
+                notes
+                    .iter()
+                    .any(|note| note.contains("codex mcp add magents"))
+            );
+            assert!(home.join(".grok/skills/magents/SKILL.md").is_file());
+            assert!(home.join(".claude/skills/magents/SKILL.md").is_file());
+        });
+    }
+
+    #[test]
+    fn install_cli_host_missing_binary() {
+        with_home(|_home, _bin| {
+            let error = install(false, true, false, false, false).unwrap_err();
+            assert!(error.to_string().contains("grok not found"));
+        });
+    }
+
+    #[test]
+    fn install_cli_host_failure() {
+        with_home(|_home, bin| {
+            test_env::write_executable(&bin.join("claude"), "echo boom >&2; exit 1");
+            let error = install(true, false, false, false, false).unwrap_err();
+            assert!(error.to_string().contains("claude mcp add failed"));
+        });
+    }
+
+    #[test]
+    fn json_helpers_cover_empty_invalid_and_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.json");
+        assert!(read_json_object(&missing).unwrap().is_empty());
+        let empty = dir.path().join("empty.json");
+        fs::write(&empty, "  \n").unwrap();
+        assert!(read_json_object(&empty).unwrap().is_empty());
+        let array = dir.path().join("array.json");
+        fs::write(&array, "[1]\n").unwrap();
+        let error = read_json_object(&array).unwrap_err();
+        assert!(error.to_string().contains("not a JSON object"));
+        let skill = write_skill(dir.path().join("nested").join("SKILL.md")).unwrap();
+        assert!(skill.contains("SKILL.md"));
+        write_json(
+            &dir.path().join("ok.json"),
+            &Value::Object(Default::default()),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn cursor_rejects_non_object_servers() {
+        with_home(|home, _bin| {
+            let path = home.join(".cursor").join("mcp.json");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, r#"{"mcpServers":[]}"#).unwrap();
+            let error = install(false, false, false, true, false).unwrap_err();
+            assert!(error.to_string().contains("mcpServers must be an object"));
+        });
+    }
+
+    #[test]
+    fn json_write_fails_when_parent_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("blocked");
+        fs::write(&parent, "file").unwrap();
+        let error = write_json(&parent.join("mcp.json"), &json!({})).unwrap_err();
+        assert!(error.to_string().contains("failed to read"));
+        let error = write_skill(parent.join("SKILL.md")).unwrap_err();
+        assert!(error.to_string().contains("failed to read"));
+    }
+
+    #[test]
+    fn opencode_rejects_non_object_mcp() {
+        with_home(|home, _bin| {
+            let path = home.join(".config").join("opencode").join("opencode.json");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, r#"{"mcp":[]}"#).unwrap();
+            let error = install(false, false, false, false, true).unwrap_err();
+            assert!(error.to_string().contains("mcp must be an object"));
+        });
+    }
+}

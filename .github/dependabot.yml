@@ -1,0 +1,25 @@
+# Dependabot version updates. See:
+# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+
+multi-ecosystem-groups:
+  dependencies:
+    schedule:
+      interval: "weekly"
+
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    patterns:
+      - "*"
+    multi-ecosystem-group: "dependencies"
+
+  # Actions are pinned to commit SHAs, which never move on their own. Without
+  # an updater a pin silently freezes CI on a vulnerable release. Dependabot
+  # rewrites the SHA and the trailing version comment together.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    patterns:
+      - "*"
+    multi-ecosystem-group: "dependencies"

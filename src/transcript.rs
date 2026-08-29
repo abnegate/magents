@@ -576,5 +576,133 @@ mod tests {
         let raw =
             "<timestamp>Sunday</timestamp>\n<user_query>\nPull the 109 point matrix\n</user_query>";
         assert_eq!(super::unwrap_cursor_user(raw), "Pull the 109 point matrix");
+        assert_eq!(super::unwrap_cursor_user("plain"), "plain");
+    }
+
+    #[test]
+    fn clips_long_text_and_snippets() {
+        let long = "word ".repeat(200);
+        let clipped = clip(&long, 20);
+        assert!(clipped.ends_with("..."));
+        assert!(clipped.chars().count() > 20);
+        let line = format!("{}NEEDLE{}", "a".repeat(200), "b".repeat(200));
+        let snippet = super::extract_snippet(&line, "needle");
+        assert!(snippet.starts_with("..."));
+        assert!(snippet.ends_with("..."));
+    }
+
+    #[test]
+    fn content_parts_variants() {
+        let (text, tools) = content_parts(Some(&json!("just a string")));
+        assert_eq!(text, "just a string");
+        assert!(tools.is_empty());
+        let (text, tools) = content_parts(Some(&json!([
+            {"type": "other", "text": "side"},
+            {"type": "tool_use", "name": "Bash"}
+        ])));
+        assert!(text.contains("side"));
+        assert_eq!(tools, vec!["Bash".to_string()]);
+        let (text, tools) = content_parts(None);
+        assert!(text.is_empty());
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn search_and_compact_edge_cases() {
+        use crate::discover::list_sessions;
+        use crate::homes::Homes;
+        use crate::model::{Agent, Session, Turn};
+
+        let empty = super::search_transcripts(
+            &Homes::isolated(tempfile::tempdir().unwrap().path()),
+            "   ",
+            None,
+            false,
+            10,
+        )
+        .unwrap_err();
+        assert!(empty.to_string().contains("query is required"));
+
+        let no_path = super::read_session(
+            &Session {
+                agent: Agent::Cursor,
+                session_id: "x".into(),
+                desktop_id: None,
+                name: None,
+                title: None,
+                cwd: None,
+                branch: None,
+                live: false,
+                archived: false,
+                pid: None,
+                model: None,
+                last_activity_at: None,
+                transcript_path: None,
+                messaging_socket: None,
+                origin: None,
+                tmux: None,
+            },
+            10,
+        )
+        .unwrap_err();
+        assert!(no_path.to_string().contains("no transcript"));
+
+        let compact = super::compact(
+            Session {
+                agent: Agent::Grok,
+                session_id: "x".into(),
+                desktop_id: None,
+                name: None,
+                title: None,
+                cwd: None,
+                branch: None,
+                live: false,
+                archived: false,
+                pid: None,
+                model: None,
+                last_activity_at: None,
+                transcript_path: None,
+                messaging_socket: None,
+                origin: None,
+                tmux: None,
+            },
+            vec![
+                Turn {
+                    role: "user".into(),
+                    text: "one".into(),
+                    tools: vec![],
+                },
+                Turn {
+                    role: "assistant".into(),
+                    text: String::new(),
+                    tools: vec!["shell".into()],
+                },
+                Turn {
+                    role: "user".into(),
+                    text: "two".into(),
+                    tools: vec![],
+                },
+            ],
+            1,
+        );
+        assert_eq!(compact.returned_turns, 1);
+        assert_eq!(compact.last_user_request.as_deref(), Some("two"));
+        assert_eq!(
+            compact.last_assistant_action.as_deref(),
+            Some("called shell")
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(dir.path());
+        let _ = list_sessions(&homes, &crate::discover::ListFilter::default());
+        let jsonl = dir.path().join("empty.jsonl");
+        std::fs::write(&jsonl, "\nnot-json\n").unwrap();
+        assert!(super::jsonl(&jsonl).unwrap().is_empty());
+        assert!(super::scan_file(&jsonl, "needle").is_none());
+        assert!(
+            super::read_opencode_json_tree(&dir.path().join("nope.json"), "x")
+                .unwrap()
+                .is_empty()
+        );
     }
 }

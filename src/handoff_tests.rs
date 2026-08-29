@@ -24,13 +24,13 @@ const CODEX_ID: &str = "01testcodex000000000000000";
 const OPENCODE_ID: &str = "ses_testopencode0001";
 const OPENCODE_CHILD: &str = "ses_testchild0000001";
 
-struct World {
+pub(crate) struct World {
     _dir: TempDir,
-    homes: Homes,
+    pub(crate) homes: Homes,
 }
 
 impl World {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let homes = Homes::isolated(dir.path());
         write_claude(&homes);
@@ -58,6 +58,21 @@ fn write(path: &Path, body: &str) {
 }
 
 fn write_claude(homes: &Homes) {
+    write(&homes.claude.join("sessions").join("not-a-pid.json"), "{}");
+    write(&homes.claude.join("sessions").join("12345.notjson"), "skip");
+    write(
+        &homes.claude.join("sessions").join("999999.json"),
+        &json!({
+            "pid": 999999u32,
+            "sessionId": "dead-claude",
+            "cwd": "/tmp/dead"
+        })
+        .to_string(),
+    );
+    write(
+        &homes.claude.join("sessions").join("888888.json"),
+        "not-json",
+    );
     write(
         &homes
             .claude
@@ -74,6 +89,46 @@ fn write_claude(homes: &Homes) {
         .unwrap(),
     );
     write(
+        &homes.claude_desktop.join("local_live.json"),
+        &json!({
+            "sessionId": "desktop-live",
+            "cliSessionId": CLAUDE_ID,
+            "title": "Disaster recovery desktop",
+            "cwd": "/tmp/dr",
+            "branch": "fix/dr",
+            "model": "opus",
+            "lastActivityAt": now_ms(),
+            "isArchived": false
+        })
+        .to_string(),
+    );
+    write(
+        &homes.claude_desktop.join("local_old.json"),
+        &json!({
+            "sessionId": "desktop-old",
+            "cliSessionId": "22222222-2222-4222-8222-222222222222",
+            "title": "Archived desktop chat",
+            "originCwd": "/tmp/old",
+            "lastFocusedAt": 1_700_000_000,
+            "isArchived": true
+        })
+        .to_string(),
+    );
+    write(&homes.claude_desktop.join("local_bad.json"), "not-json");
+    write(
+        &homes.claude_desktop.join("local_noid.json"),
+        &json!({"title": "missing id"}).to_string(),
+    );
+    write(
+        &homes
+            .claude
+            .join("projects")
+            .join("tmp-old")
+            .join("22222222-2222-4222-8222-222222222222.jsonl"),
+        r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"old desktop prompt"}]}}
+"#,
+    );
+    write(
         &homes
             .claude
             .join("projects")
@@ -82,6 +137,8 @@ fn write_claude(homes: &Homes) {
         r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"run the 109 point matrix"}]}}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"starting verification"},{"type":"tool_use","name":"Bash"}]}}
 {"type":"user","isMeta":true,"message":{"role":"user","content":[{"type":"text","text":"ignore me"}]}}
+{"type":"progress"}
+{"type":"assistant","message":{"role":"assistant","content":[]}}
 "#,
     );
 }
@@ -112,8 +169,49 @@ fn write_grok(homes: &Homes) {
         r#"{"params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"fix the dedicated databases leak"}}}}
 {"params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"closing the fd"}}}}
 {"params":{"update":{"sessionUpdate":"tool_call","name":"shell"}}}
+{"params":{"update":{"sessionUpdate":"noise"}}}
+{"params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"second turn"}}}}
+{"params":{"update":{"sessionUpdate":"tool_call","toolCall":{"name":"grep"}}}}
 {"params":{"update":{"sessionUpdate":"turn_completed"}}}
 "#,
+    );
+    let sub = homes
+        .grok
+        .join("sessions")
+        .join("%2Ftmp%2Fedge")
+        .join("01subagentgrok00000000000");
+    write(
+        &sub.join("summary.json"),
+        &json!({
+            "info": { "id": "01subagentgrok00000000000", "cwd": "/tmp/edge" },
+            "session_kind": "subagent",
+            "generated_title": "hidden"
+        })
+        .to_string(),
+    );
+    write(&sub.join("summary.bad"), "nope");
+    write(
+        &homes
+            .grok
+            .join("sessions")
+            .join("%2Ftmp%2Fother")
+            .join("01othergrok0000000000000")
+            .join("summary.json"),
+        "not-json",
+    );
+    let idle = homes
+        .grok
+        .join("sessions")
+        .join("%2Ftmp%2Fidle")
+        .join("01idlegrok00000000000000");
+    write(
+        &idle.join("summary.json"),
+        &json!({
+            "info": { "id": "01idlegrok00000000000000", "cwd": "/tmp/idle" },
+            "session_summary": "Idle grok chat",
+            "session_kind": "main"
+        })
+        .to_string(),
     );
 }
 
@@ -127,6 +225,10 @@ fn write_codex(homes: &Homes) {
         r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fix billing worker memory"}]}}
 {"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"patching the worker"}]}}
 {"type":"event_msg","payload":{"type":"token_count"}}
+{"type":"response_item"}
+{"type":"response_item","payload":{"type":"reasoning"}}
+{"type":"response_item","payload":{"type":"message"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[]}}
 "#,
     );
     let connection = Connection::open(&db).unwrap();
@@ -159,6 +261,48 @@ fn write_codex(homes: &Homes) {
                 now_ms(),
                 rollout.to_str().unwrap()
             ],
+        )
+        .unwrap();
+    let older = homes.codex.join("state_0.sqlite");
+    Connection::open(&older)
+        .unwrap()
+        .execute("CREATE TABLE threads (id TEXT PRIMARY KEY)", [])
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO threads (id, title, cwd, git_branch, model, archived, updated_at_ms, rollout_path, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, NULL, 'cli')",
+            rusqlite::params![
+                "01archivedcodex00000000000",
+                "Old cli thread",
+                "/tmp/old-codex",
+                "main",
+                "gpt",
+                now_ms() - 3_600_000
+            ],
+        )
+        .unwrap();
+    let fallback = homes
+        .codex
+        .join("sessions")
+        .join("rollout-01fallbackcodex000000000.jsonl");
+    write(
+        &fallback,
+        r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fallback rollout"}]}}
+"#,
+    );
+    connection
+        .execute(
+            "INSERT INTO threads (id, title, cwd, git_branch, model, archived, updated_at_ms, rollout_path, source)
+             VALUES (?1, '', ?2, NULL, NULL, 0, ?3, NULL, 'other')",
+            rusqlite::params!["01fallbackcodex000000000", "/tmp/fb", now_ms()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO threads (id, title, cwd, git_branch, model, archived, updated_at_ms, rollout_path, source)
+             VALUES (?1, 'sub', NULL, NULL, NULL, 0, ?2, NULL, 'codex-subagent')",
+            rusqlite::params!["01subagentcodex000000000", now_ms()],
         )
         .unwrap();
 }
@@ -329,6 +473,36 @@ fn write_opencode_sqlite(homes: &Homes) {
             ],
         )
         .unwrap();
+    connection
+        .execute(
+            "INSERT INTO part VALUES ('prt_tool', 'msg_asst', ?1, 2, 3, ?2)",
+            rusqlite::params![
+                OPENCODE_ID,
+                json!({"type":"tool_call","name":"bash"}).to_string()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO part VALUES ('prt_tool2', 'msg_asst', ?1, 2, 4, ?2)",
+            rusqlite::params![OPENCODE_ID, json!({"type":"tool_use"}).to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO part VALUES ('prt_other', 'msg_asst', ?1, 2, 5, ?2)",
+            rusqlite::params![
+                OPENCODE_ID,
+                json!({"type":"markdown","text":"more"}).to_string()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO session VALUES (?1, 'proj', NULL, '/tmp/zone', 'archived zone', ?2, ?2)",
+            rusqlite::params!["ses_archived_zone", now_ms()],
+        )
+        .unwrap();
 }
 
 fn write_opencode_json_only(root: &Path) {
@@ -362,6 +536,38 @@ fn write_opencode_json_only(root: &Path) {
             .join("msg_1")
             .join("prt_1.json"),
         &json!({"type":"text","text":"json fallback prompt about dedicated databases"}).to_string(),
+    );
+    write(
+        &root
+            .join("storage")
+            .join("part")
+            .join("msg_1")
+            .join("prt_2.json"),
+        &json!({"type":"text","text":"second json chunk"}).to_string(),
+    );
+    write(
+        &root
+            .join("storage")
+            .join("part")
+            .join("msg_1")
+            .join("prt_3.json"),
+        &json!({"type":"tool_call","name":"grep"}).to_string(),
+    );
+    write(
+        &root
+            .join("storage")
+            .join("part")
+            .join("msg_1")
+            .join("prt_bad.json"),
+        "not-json",
+    );
+    write(
+        &root
+            .join("storage")
+            .join("message")
+            .join("ses_jsononly")
+            .join("msg_empty.json"),
+        &json!({"role":"assistant"}).to_string(),
     );
 }
 
@@ -429,10 +635,20 @@ fn reads_compact_handoff_for_each_agent() {
 
     let grok = read_transcript(&world.homes, "grok:Queue GC", 20).unwrap();
     assert!(
+        grok.turns
+            .iter()
+            .any(|turn| turn.text.contains("dedicated databases"))
+    );
+    assert!(
         grok.last_user_request
             .as_deref()
-            .unwrap_or("")
-            .contains("dedicated databases")
+            .unwrap()
+            .contains("second turn")
+    );
+    assert!(
+        grok.turns
+            .iter()
+            .any(|turn| turn.tools.contains(&"shell".into()))
     );
 
     let codex = read_transcript(&world.homes, "codex:Billing", 20).unwrap();
@@ -461,9 +677,12 @@ fn reads_compact_handoff_for_each_agent() {
             .unwrap()
             .contains("zone-dev --simple check")
     );
-    assert_eq!(
-        opencode.last_assistant_action.as_deref(),
-        Some("all checks passed")
+    assert!(
+        opencode
+            .last_assistant_action
+            .as_deref()
+            .unwrap()
+            .contains("all checks passed")
     );
 }
 
@@ -486,6 +705,8 @@ fn searches_across_harnesses() {
     let zone =
         search_transcripts(&world.homes, "zone-dev", Some(Agent::OpenCode), false, 10).unwrap();
     assert_eq!(zone.len(), 1);
+    let limited = search_transcripts(&world.homes, "109 point", None, false, 1).unwrap();
+    assert_eq!(limited.len(), 1);
 }
 
 #[test]
@@ -528,9 +749,18 @@ fn reads_opencode_json_fallback_after_storage_layout_fix() {
     let session = resolve(&homes, "opencode:json fallback").unwrap();
     let transcript = read_transcript(&homes, "opencode:json fallback", 20).unwrap();
     assert_eq!(session.session_id, "ses_jsononly");
-    assert_eq!(
-        transcript.last_user_request.as_deref(),
-        Some("json fallback prompt about dedicated databases")
+    assert!(
+        transcript
+            .last_user_request
+            .as_deref()
+            .unwrap()
+            .contains("json fallback prompt about dedicated databases")
+    );
+    assert!(
+        transcript
+            .turns
+            .iter()
+            .any(|turn| turn.tools.contains(&"grep".into()))
     );
 }
 
@@ -600,6 +830,7 @@ fn opencode_run_is_invoked_with_session_and_dir() {
     fs::create_dir_all(&bin).unwrap();
     let stub = bin.join("opencode");
     let log = dir.path().join("opencode-args.txt");
+    let _guard = crate::test_env::lock(&["MAGENTS_OPENCODE_BIN"]);
     write(
         &stub,
         &format!(
@@ -621,6 +852,304 @@ fn opencode_run_is_invoked_with_session_and_dir() {
     assert!(args.contains("--session"));
     assert!(args.contains(OPENCODE_ID));
     assert!(args.contains("/tmp/zone"));
+}
+
+#[test]
+fn filters_limits_latest_ambiguous_and_desktop() {
+    let world = World::new();
+    let defaulted = list_sessions(&world.homes, &ListFilter::default()).unwrap();
+    assert!(!defaulted.is_empty());
+    assert!(defaulted.len() <= 20);
+
+    let live = list_sessions(
+        &world.homes,
+        &ListFilter {
+            agent: Some(Agent::Claude),
+            query: Some("disaster".into()),
+            live_only: true,
+            include_archived: false,
+            limit: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].session_id, CLAUDE_ID);
+    assert_eq!(live[0].desktop_id.as_deref(), Some("desktop-live"));
+    assert_eq!(live[0].branch.as_deref(), Some("fix/dr"));
+
+    let archived = list_sessions(
+        &world.homes,
+        &ListFilter {
+            agent: Some(Agent::Claude),
+            query: None,
+            live_only: false,
+            include_archived: true,
+            limit: 0,
+        },
+    )
+    .unwrap();
+    assert!(
+        archived
+            .iter()
+            .any(|session| session.session_id == "22222222-2222-4222-8222-222222222222")
+    );
+
+    let missed = list_sessions(
+        &world.homes,
+        &ListFilter {
+            agent: Some(Agent::Grok),
+            query: Some("no-such-haystack-term".into()),
+            live_only: false,
+            include_archived: false,
+            limit: 20,
+        },
+    )
+    .unwrap();
+    assert!(missed.is_empty());
+
+    let truncated = list_sessions(
+        &world.homes,
+        &ListFilter {
+            agent: None,
+            query: None,
+            live_only: false,
+            include_archived: true,
+            limit: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(truncated.len(), 1);
+
+    let latest = resolve(&world.homes, "claude:latest").unwrap();
+    assert_eq!(latest.session_id, CLAUDE_ID);
+    let by_pid = resolve(&world.homes, &format!("claude:{}", pid())).unwrap();
+    assert_eq!(by_pid.session_id, CLAUDE_ID);
+    let twins = resolve(&world.homes, &pid().to_string()).unwrap_err();
+    assert!(matches!(twins, Error::Ambiguous { .. }));
+    let empty = resolve(&world.homes, "  ").unwrap_err();
+    assert!(empty.to_string().contains("required"));
+    let none = resolve(&world.homes, "grok:latest-missing-zzzz").unwrap_err();
+    assert!(matches!(none, Error::NotFound(_)));
+
+    let ambiguous = resolve(&world.homes, "tmp").unwrap_err();
+    assert!(matches!(ambiguous, Error::Ambiguous { .. }));
+
+    let no_latest = resolve(
+        &Homes::isolated(tempfile::tempdir().unwrap().path()),
+        "latest",
+    )
+    .unwrap_err();
+    assert!(matches!(no_latest, Error::NotFound(_)));
+}
+
+#[test]
+fn cursor_headers_without_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let homes = Homes::isolated(dir.path());
+    let db = homes
+        .cursor_app
+        .join("User")
+        .join("globalStorage")
+        .join("state.vscdb");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    Connection::open(&db)
+        .unwrap()
+        .execute("CREATE TABLE other (id TEXT)", [])
+        .unwrap();
+    write(
+        &homes
+            .cursor
+            .join("projects")
+            .join("x")
+            .join("agent-transcripts")
+            .join("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
+            .join("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.jsonl"),
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"orphan cursor"}]}}
+"#,
+    );
+    let sessions = list_sessions(
+        &homes,
+        &ListFilter {
+            agent: Some(Agent::Cursor),
+            query: None,
+            live_only: false,
+            include_archived: true,
+            limit: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(sessions.len(), 1);
+}
+
+#[test]
+fn fallback_rollout_without_sessions_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let homes = Homes::isolated(dir.path());
+    let db = homes.codex.join("state_3.sqlite");
+    fs::create_dir_all(&homes.codex).unwrap();
+    let connection = Connection::open(&db).unwrap();
+    connection
+        .execute(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                cwd TEXT,
+                git_branch TEXT,
+                model TEXT,
+                archived INTEGER,
+                updated_at_ms INTEGER,
+                rollout_path TEXT,
+                source TEXT
+            )",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO threads VALUES ('01norollout', 'x', NULL, NULL, NULL, 0, 1, NULL, 'cli')",
+            [],
+        )
+        .unwrap();
+    let sessions = list_sessions(
+        &homes,
+        &ListFilter {
+            agent: Some(Agent::Codex),
+            query: None,
+            live_only: false,
+            include_archived: true,
+            limit: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert!(sessions[0].transcript_path.is_none());
+}
+
+#[test]
+fn empty_homes_and_cursor_without_db() {
+    let dir = tempfile::tempdir().unwrap();
+    let homes = Homes::isolated(dir.path());
+    assert!(list_sessions(&homes, &all_agents()).unwrap().is_empty());
+    assert!(crate::discover::claude_transcript_index(&homes.claude).is_empty());
+
+    write(
+        &homes
+            .cursor
+            .join("projects")
+            .join("plain")
+            .join("agent-transcripts")
+            .join("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+            .join("cccccccc-cccc-4ccc-8ccc-cccccccccccc.jsonl"),
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"no composer header title here"}]}}
+{"role":"system","message":{"content":[{"type":"text","text":"skip"}]}}
+{"role":"assistant","message":{"content":[]}}
+"#,
+    );
+    write(
+        &homes
+            .cursor
+            .join("projects")
+            .join("blank")
+            .join("agent-transcripts")
+            .join("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+            .join("dddddddd-dddd-4ddd-8ddd-dddddddddddd.jsonl"),
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"   "}]}}
+"#,
+    );
+    write(
+        &homes.cursor.join("projects").join("file-not-dir"),
+        "not a directory",
+    );
+    write(
+        &homes
+            .cursor
+            .join("projects")
+            .join("plain")
+            .join("agent-transcripts")
+            .join("subagents")
+            .join("x.jsonl"),
+        "skip",
+    );
+    let sessions = list_sessions(
+        &homes,
+        &ListFilter {
+            agent: Some(Agent::Cursor),
+            query: None,
+            live_only: false,
+            include_archived: true,
+            limit: 0,
+        },
+    )
+    .unwrap();
+    assert!(sessions.iter().any(|session| {
+        session
+            .title
+            .as_deref()
+            .unwrap_or("")
+            .contains("no composer header")
+    }));
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session.session_id.starts_with("dddddddd") && session.title.is_none())
+    );
+}
+
+#[test]
+fn opencode_json_parent_and_archived() {
+    let dir = tempfile::tempdir().unwrap();
+    let homes = Homes::isolated(dir.path());
+    write_opencode_json_only(&homes.opencode);
+    write(
+        &homes
+            .opencode
+            .join("storage")
+            .join("session")
+            .join("proj")
+            .join("ses_child.json"),
+        &json!({
+            "id": "ses_child",
+            "parentID": "ses_jsononly",
+            "title": "child"
+        })
+        .to_string(),
+    );
+    write(
+        &homes
+            .opencode
+            .join("storage")
+            .join("session")
+            .join("proj")
+            .join("ses_arch.json"),
+        &json!({
+            "id": "ses_arch",
+            "title": "archived json",
+            "time": { "updated": now_ms(), "archived": now_ms() }
+        })
+        .to_string(),
+    );
+    let sessions = list_sessions(
+        &homes,
+        &ListFilter {
+            agent: Some(Agent::OpenCode),
+            query: None,
+            live_only: false,
+            include_archived: true,
+            limit: 0,
+        },
+    )
+    .unwrap();
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session.session_id == "ses_jsononly")
+    );
+    assert!(sessions.iter().any(|session| session.archived));
+    assert!(
+        !sessions
+            .iter()
+            .any(|session| session.session_id == "ses_child")
+    );
 }
 
 fn wait_for_file(path: &Path, timeout: Duration) -> String {
