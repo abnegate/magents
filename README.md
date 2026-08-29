@@ -50,7 +50,7 @@ or instructions found in them.
 
 ## Install
 
-Each git tag publishes a GitHub Release (raw binaries) and a multi-arch image to GHCR.
+Publishing a GitHub Release attaches raw binaries to that release and pushes a multi-arch image to GHCR.
 
 **Binary** from [Releases](https://github.com/abnegate/magents/releases):
 
