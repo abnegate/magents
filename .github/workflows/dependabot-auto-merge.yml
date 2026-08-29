@@ -5,8 +5,14 @@ name: Dependabot auto-merge
 # until someone notices. Auto-merge only completes when every *required* check
 # is green — with none required it would merge immediately, so this is only
 # safe alongside the repository's required-status-checks rule.
+#
+# pull_request_target is required so the workflow can use the owner's GH_TOKEN
+# secret. Dependabot pull_request runs do not receive Actions secrets, and
+# GITHUB_TOKEN cannot create reviews unless Actions is allowed to approve PRs
+# (the review would still be from github-actions[bot]). Do not check out PR
+# code in this job.
 
-on: pull_request
+on: pull_request_target
 
 permissions:
   contents: write
@@ -23,12 +29,13 @@ jobs:
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
 
       # Majors change APIs and have already forced an MSRV bump once in this
-      # fleet, so they stay manual.
+      # fleet, so they stay manual. GH_TOKEN is the repo owner's PAT so the
+      # approve and auto-merge are attributed to that account.
       - name: Approve and enable auto-merge
         if: steps.metadata.outputs.update-type != 'version-update:semver-major'
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           gh pr review --approve "$PR_URL"
           gh pr merge --auto --merge "$PR_URL"
