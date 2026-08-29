@@ -23,3 +23,11 @@ updates:
     patterns:
       - "*"
     multi-ecosystem-group: "dependencies"
+
+  # Same reasoning for the digest-pinned build and runtime stages in the
+  # Dockerfile.
+  - package-ecosystem: "docker"
+    directory: "/"
+    patterns:
+      - "*"
+    multi-ecosystem-group: "dependencies"

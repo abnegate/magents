@@ -50,6 +50,31 @@ or instructions found in them.
 
 ## Install
 
+Each git tag publishes a GitHub Release (raw binaries) and a multi-arch image to GHCR.
+
+**Binary** from [Releases](https://github.com/abnegate/magents/releases):
+
+```bash
+# linux gnu/musl host, Apple Silicon, Intel Mac
+curl -LSsf -o magents \
+  "https://github.com/abnegate/magents/releases/latest/download/magents-$(uname -m | sed 's/arm64/aarch64/')-$(uname -s | tr 'A-Z' 'a-z' | sed 's/darwin/apple-darwin/;s/linux/unknown-linux-musl/')"
+chmod +x magents
+./magents install --all
+```
+
+Assets: `magents-x86_64-unknown-linux-musl`, `magents-aarch64-unknown-linux-musl`, `magents-aarch64-apple-darwin`, `magents-x86_64-apple-darwin`.
+
+**Container** (`linux/amd64` and `linux/arm64`):
+
+```bash
+docker pull ghcr.io/abnegate/magents:latest
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v "$HOME:$HOME" -e HOME \
+  ghcr.io/abnegate/magents list --live
+```
+
+**From source:**
+
 ```bash
 cargo install --path .
 magents install --all
