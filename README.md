@@ -1,11 +1,33 @@
 # magents
 
-**Mates + agents.** A local session bus so Claude Code, Codex, and Grok can
-see what the others were working on and talk to each other.
+**Mates + agents.** Same work, new driver.
 
-It is an MCP server (stdio) plus a small CLI. Each coding agent connects as a
-client. Transcripts stay on disk where those tools already write them; magents
-is the shared API, not a second copy of history.
+Claude Code, Codex, and Grok already keep transcripts on disk. magents is the
+shared API over those sessions — an MCP server plus a small CLI — so one agent
+can pick up where another left off without you recapping, and so they can ping
+a *specific live chat* when you are not sitting in the middle.
+
+It is not a second copy of history and not a new council. The chats you already
+have open stay the unit of work.
+
+## Why
+
+**Handoff without a new thread.** You were in Claude Desktop on the disaster
+recovery branch. Now you are in Grok. Ask Grok what Claude was doing; it reads
+the live session and continues *here*. No paste buffer, no "new chat, here's
+the context."
+
+**Send when you are not the messenger.** "Grok, tell Codex hi" is slower than
+switching windows. Send pays off in two cases:
+
+1. **You are not looking.** Three agents running. Claude hits a wall that
+   Codex owns. Claude injects into that Codex thread and keeps going. You
+   find out later.
+2. **The sender already has the context.** Not a one-liner — the failing
+   query, the file, the constraint it just measured. You would have to
+   reconstruct that. The agent already has it.
+
+If neither is true, stay in this session and `read_transcript`.
 
 ## What it does
 
@@ -15,7 +37,7 @@ is the shared API, not a second copy of history.
 | `get_session` | Lookup by id, title, live name, pid, or `agent:ref` |
 | `read_transcript` | Compact inert handoff (last request, last action, recent turns) |
 | `search_transcripts` | Full-text search across those transcripts |
-| `send_message` | Queue a message for another session, and inject a live user turn when a path exists |
+| `send_message` | Inject a user turn into a specific live chat (mailbox always; live path when one exists) |
 | `inbox` | Read messages addressed to this session |
 | `whoami` | Detect which agent spawned this MCP connection |
 
@@ -66,8 +88,11 @@ launch `magents` without `mcp` if they prefer.
 
 ## How talk works
 
+`list_sessions` / `read_transcript` / `search_transcripts` are the handoff.
+`send_message` is for when the other window should actually *do* something.
+
 1. `send_message` always appends to the mailbox.
-2. Live inject, when a path exists:
+2. Live inject, when a path exists, lands as a user turn in **that** chat:
 
 | Surface | Live inject |
 |---|---|
