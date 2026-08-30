@@ -5,11 +5,12 @@
 Claude Code, Codex, Cursor, Grok, and OpenCode already keep transcripts on
 disk. magents is the shared API over those sessions — an MCP server plus a
 small CLI — so one agent can pick up where another left off without you
-recapping, and so they can ping a *specific live chat* when you are not sitting
-in the middle.
+recapping, ping a *specific live chat* when you are not sitting in the middle,
+or start an independent persisted chat for a complete task.
 
-It is not a second copy of history and not a new council. The chats you already
-have open stay the unit of work.
+It is not a second copy of history or a fire-and-forget council. Existing chats
+stay the default unit of work; new chats are for independent work that benefits
+from its own session and working directory.
 
 ## Why
 
@@ -30,6 +31,12 @@ switching windows. Send pays off in two cases:
 
 If neither is true, stay in this session and `read_transcript`.
 
+**Spawn independent work.** When a task can proceed independently, start a new
+headless persisted session with a complete prompt, an explicit isolated working
+directory when files could collide, and a request to reply through magents.
+The spawned agent uses its host's native approval policy; spawning does not add
+an approval bypass.
+
 ## What it does
 
 | Tool | Purpose |
@@ -38,7 +45,8 @@ If neither is true, stay in this session and `read_transcript`.
 | `get_session` | Lookup by id, title, live name, pid, or `agent:ref` |
 | `read_transcript` | Compact inert handoff (last request, last action, recent turns) |
 | `search_transcripts` | Full-text search across those transcripts |
-| `send_message` | Inject a user turn into a specific live chat (mailbox always; live path when one exists) |
+| `spawn_session` | Start a new headless persisted session for independent work |
+| `send_message` | Deliver a user turn to an existing chat (mailbox always; native or supervised resume path) |
 | `handoff` | Compact this session and inject it into another live chat (omit `to` to pick) |
 | `inbox` | Read messages addressed to this session |
 | `whoami` | Detect which agent spawned this MCP connection |
@@ -109,6 +117,8 @@ magents list --agent grok --query edge
 magents get 'claude:disaster recovery'
 magents read grok:latest -n 20
 magents search "dedicated databases" --agent claude
+magents spawn codex --prompt-file /path/to/task.md --cwd /path/to/isolated-worktree
+magents spawn claude --cwd /path/to/isolated-worktree < /path/to/task.md
 magents send grok:latest "handoff: the DR runbook is in docs/RUNBOOK.md"
 magents handoff grok:latest --reason "continuing in grok"
 magents inbox --session 01a04b43-bee6-7d13-9362-62111aa1fc51 --agent grok
@@ -117,23 +127,60 @@ magents inbox --session 01a04b43-bee6-7d13-9362-62111aa1fc51 --agent grok
 `magents` with no args on a piped stdin starts the MCP server, so hosts can
 launch `magents` without `mcp` if they prefer.
 
-## How talk works
+`magents spawn` reads the complete task from stdin by default. Use
+`--prompt-file <path>` to read it from a file (`--prompt-file -` also means
+stdin). Prompt text is never a process argument, so it is not exposed through
+the process list or a shell command line. Empty prompts, repeated
+`--prompt-file` inputs, and the old positional-prompt form are rejected.
+
+## How sessions talk
 
 `list_sessions` / `read_transcript` / `search_transcripts` are the handoff.
-`send_message` is for when the other window should actually *do* something.
+Choose the write operation by where the work should happen:
+
+- `spawn_session` starts a **new**, headless, persisted, independent session.
+  Use it only for work that can proceed independently. Send a complete task,
+  include how to verify it, ask the agent to reply through magents, and pass an
+  explicit isolated `cwd` whenever concurrent edits could collide.
+- `send_message` addresses an **existing** session. It records the message in
+  the mailbox and injects a live user turn where the host supports one.
+- `handoff` compacts this session's context and sends it to an **existing live**
+  session so that session can continue the same work.
+
+Spawning returns as soon as the supervisor accepts the task. A successful
+response contains `accepted: true`, `status: "starting"`, and the new `session`.
+That session initially has `live: false` while its host starts. This means the
+launch was accepted, not that the task succeeded or finished. Follow it with
+`get_session`, `read_transcript`, or a requested reply. Spawn responses do not
+contain a mailbox `mail_id`.
+
+Spawned agents inherit their host's native approval and sandbox behavior.
+The spawn path never adds `--dangerously-skip-permissions`, `--yolo`,
+`--full-auto`, `--always-approve`, or another approval bypass.
+
+For an existing chat, `send_message` works as follows:
 
 1. `send_message` always appends to the mailbox.
-2. Live inject, when a path exists, lands as a user turn in **that** chat:
+2. Delivery lands as a user turn in **that** chat, preferring a native live
+   path and otherwise starting a supervised headless resume:
 
-| Surface | Live inject |
+| Surface | Delivery route |
 |---|---|
-| Claude Desktop | UDS user turn (`/tmp/cc-socks/<pid>.sock`) |
-| Claude CLI | Same UDS protocol when the session has a messaging socket (pass `--messaging-socket-path`, or when Claude's feature gate is on). If the session is in tmux, magents types the prompt into that pane as a fallback. |
-| Grok TUI | `grok --cwd <cwd> --resume <id> --always-approve --single <message>` |
-| Codex Desktop / VS Code | Length-prefixed JSON-RPC on `~/.codex/ipc/ipc.sock` (`thread-follower-start-turn`) into that specific thread |
-| Codex CLI | `codex exec resume` for legacy (non-paginated) threads |
-| Cursor | Mailbox only (no supported live inject into the IDE agent chat) |
-| OpenCode | `opencode run --session <id> --dir <cwd> <message>` |
+| Claude Desktop | UDS user turn (`/tmp/cc-socks/<pid>.sock`), then tmux or supervised `claude -p --verbose --resume <id>` fallback |
+| Claude CLI | UDS when the session has a messaging socket, then tmux or supervised `claude -p --verbose --resume <id>` fallback |
+| Grok | Supervised `grok --cwd <cwd> --resume <id> --output-format streaming-json --prompt-file /dev/stdin` |
+| Codex Desktop / VS Code | Length-prefixed JSON-RPC on `~/.codex/ipc/ipc.sock` (`thread-follower-start-turn`), then supervised `codex exec --json -C <cwd> resume <id> -` fallback |
+| Codex CLI | Supervised `codex exec --json -C <cwd> resume <id> -` |
+| Cursor | Supervised `cursor-agent -p --output-format stream-json --resume <id> --workspace <cwd>` |
+| OpenCode | Supervised `opencode run --format json --dir <cwd> --session <id>` |
+
+All supervised routes pass the user turn through stdin, drain the host's output,
+and reap the process without exposing transcript text, tokens, or raw host
+output in the response.
+
+Supervised Cursor processes use `CURSOR_CONFIG_DIR` and `CURSOR_DATA_DIR` for
+their isolated homes. Supervised OpenCode processes use the real
+`XDG_DATA_HOME/opencode` and `XDG_CONFIG_HOME/opencode` layouts.
 
 Claude Desktop always exposes the UDS mesh. Terminal `claude` often does not, until you start it with `--messaging-socket-path /tmp/cc-socks/<name>.sock` (hidden flag). Magents still lists those CLI sessions and can inject via tmux when the pid file records a pane.
 
@@ -148,7 +195,7 @@ cargo test --locked --all-targets
 cargo llvm-cov --locked --all-targets --ignore-filename-regex 'src/main.rs|/rustlib/' --fail-under-lines 95
 ```
 
-CI runs format, clippy (`-D warnings`), the full test suite, and the 95% line-coverage gate. That covers parser units, isolated-home integration (list / read / search / mailbox for every harness, Claude UDS inject against a fake socket, OpenCode / Grok / Codex / tmux live-inject argv), MCP tool handlers, and CLI end-to-end (`list`, `get`, `read`, `search`, `send`, `inbox`, `install`).
+CI runs format, clippy (`-D warnings`), the full test suite, and the 95% line-coverage gate. That covers parser units, isolated-home integration (list / read / search / mailbox for every harness, supervised spawn commands, Claude UDS inject against a fake socket, OpenCode / Grok / Codex / tmux live-inject argv), MCP tool handlers, and CLI end-to-end (`list`, `get`, `read`, `search`, `spawn`, `send`, `inbox`, `install`).
 
 ## Requirements
 

@@ -6,9 +6,14 @@ pub struct Homes {
     pub claude: PathBuf,
     pub grok: PathBuf,
     pub codex: PathBuf,
+    /// Cursor Agent configuration.
+    pub cursor_config: PathBuf,
+    /// Cursor Agent data. This field retains the original `cursor` meaning.
     pub cursor: PathBuf,
+    /// Cursor Desktop application support.
     pub cursor_app: PathBuf,
     pub opencode: PathBuf,
+    pub opencode_config: PathBuf,
     pub magents: PathBuf,
     pub claude_desktop: PathBuf,
 }
@@ -19,7 +24,14 @@ impl Homes {
         let claude = env_path("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude"));
         let grok = env_path("GROK_HOME").unwrap_or_else(|| home.join(".grok"));
         let codex = env_path("CODEX_HOME").unwrap_or_else(|| home.join(".codex"));
-        let cursor = env_path("CURSOR_HOME").unwrap_or_else(|| home.join(".cursor"));
+        let cursor_home = env_path("CURSOR_HOME");
+        let cursor_config = env_path("CURSOR_CONFIG_DIR")
+            .or_else(|| cursor_home.clone())
+            .or_else(|| env_path("XDG_CONFIG_HOME").map(|path| path.join("cursor")))
+            .unwrap_or_else(|| home.join(".cursor"));
+        let cursor = env_path("CURSOR_DATA_DIR")
+            .or(cursor_home)
+            .unwrap_or_else(|| home.join(".cursor"));
         let cursor_app = env_path("CURSOR_APP_SUPPORT").unwrap_or_else(|| {
             home.join("Library")
                 .join("Application Support")
@@ -28,6 +40,9 @@ impl Homes {
         let opencode = env_path("OPENCODE_DATA")
             .or_else(|| env_path("XDG_DATA_HOME").map(|path| path.join("opencode")))
             .unwrap_or_else(|| home.join(".local").join("share").join("opencode"));
+        let opencode_config = env_path("XDG_CONFIG_HOME")
+            .map(|path| path.join("opencode"))
+            .unwrap_or_else(|| home.join(".config").join("opencode"));
         let magents = env_path("MAGENTS_HOME").unwrap_or_else(|| {
             dirs::data_dir()
                 .unwrap_or_else(|| home.join(".local").join("share"))
@@ -42,9 +57,11 @@ impl Homes {
             claude,
             grok,
             codex,
+            cursor_config,
             cursor,
             cursor_app,
             opencode,
+            opencode_config,
             magents,
             claude_desktop,
         }
@@ -54,15 +71,25 @@ impl Homes {
         self.magents.join("mailbox")
     }
 
+    pub fn spawn_dir(&self) -> PathBuf {
+        self.magents.join("spawns")
+    }
+
+    pub fn opencode_data_home(&self) -> &Path {
+        self.opencode.parent().unwrap_or_else(|| Path::new("."))
+    }
+
     pub fn isolated(root: impl AsRef<Path>) -> Self {
         let root = root.as_ref();
         Self {
             claude: root.join("claude"),
             grok: root.join("grok"),
             codex: root.join("codex"),
+            cursor_config: root.join("cursor-config"),
             cursor: root.join("cursor"),
             cursor_app: root.join("cursor-app"),
             opencode: root.join("opencode"),
+            opencode_config: root.join("opencode-config").join("opencode"),
             magents: root.join("magents"),
             claude_desktop: root.join("claude-desktop"),
         }
@@ -109,11 +136,14 @@ mod tests {
         "CLAUDE_CONFIG_DIR",
         "GROK_HOME",
         "CODEX_HOME",
-        "CURSOR_HOME",
         "CURSOR_APP_SUPPORT",
-        "OPENCODE_DATA",
+        "CURSOR_CONFIG_DIR",
+        "CURSOR_DATA_DIR",
+        "CURSOR_HOME",
+        "XDG_CONFIG_HOME",
         "XDG_DATA_HOME",
         "MAGENTS_HOME",
+        "OPENCODE_DATA",
     ];
 
     #[test]
@@ -133,35 +163,89 @@ mod tests {
             std::env::set_var("CLAUDE_CONFIG_DIR", root.join("c"));
             std::env::set_var("GROK_HOME", root.join("g"));
             std::env::set_var("CODEX_HOME", root.join("x"));
-            std::env::set_var("CURSOR_HOME", root.join("u"));
-            std::env::set_var("CURSOR_APP_SUPPORT", root.join("ua"));
-            std::env::remove_var("OPENCODE_DATA");
+            std::env::set_var("CURSOR_CONFIG_DIR", root.join("cursor-config"));
+            std::env::set_var("CURSOR_DATA_DIR", root.join("cursor-data"));
+            std::env::set_var("CURSOR_APP_SUPPORT", root.join("cursor-app"));
+            std::env::set_var("XDG_CONFIG_HOME", root.join("xdg-config"));
             std::env::set_var("XDG_DATA_HOME", root.join("xdg"));
             std::env::set_var("MAGENTS_HOME", root.join("m"));
+            std::env::remove_var("OPENCODE_DATA");
         }
         let homes = Homes::from_env();
         assert_eq!(homes.claude, root.join("c"));
         assert_eq!(homes.grok, root.join("g"));
         assert_eq!(homes.codex, root.join("x"));
-        assert_eq!(homes.cursor, root.join("u"));
-        assert_eq!(homes.cursor_app, root.join("ua"));
+        assert_eq!(homes.cursor_config, root.join("cursor-config"));
+        assert_eq!(homes.cursor, root.join("cursor-data"));
+        assert_eq!(homes.cursor_app, root.join("cursor-app"));
         assert_eq!(homes.opencode, root.join("xdg").join("opencode"));
+        assert_eq!(homes.opencode_data_home(), root.join("xdg"));
+        assert_eq!(
+            homes.opencode_config,
+            root.join("xdg-config").join("opencode")
+        );
         assert_eq!(homes.magents, root.join("m"));
         assert_eq!(homes.mailbox_dir(), root.join("m").join("mailbox"));
+        assert_eq!(homes.spawn_dir(), root.join("m").join("spawns"));
 
         unsafe {
+            std::env::set_var("OPENCODE_DATA", root.join("legacy").join("opencode"));
+        }
+        let homes = Homes::from_env();
+        assert_eq!(homes.opencode, root.join("legacy").join("opencode"));
+        assert_eq!(homes.opencode_data_home(), root.join("legacy"));
+
+        unsafe {
+            std::env::remove_var("OPENCODE_DATA");
             std::env::remove_var("XDG_DATA_HOME");
+            std::env::remove_var("XDG_CONFIG_HOME");
             std::env::remove_var("CLAUDE_CONFIG_DIR");
             std::env::remove_var("GROK_HOME");
             std::env::remove_var("CODEX_HOME");
-            std::env::remove_var("CURSOR_HOME");
             std::env::remove_var("CURSOR_APP_SUPPORT");
+            std::env::remove_var("CURSOR_CONFIG_DIR");
+            std::env::remove_var("CURSOR_DATA_DIR");
             std::env::remove_var("MAGENTS_HOME");
-            std::env::set_var("OPENCODE_DATA", root.join("oc"));
+            std::env::set_var("CURSOR_HOME", root.join("legacy-cursor"));
         }
         let homes = Homes::from_env();
         assert_eq!(homes.claude, root.join(".claude"));
-        assert_eq!(homes.opencode, root.join("oc"));
+        assert_eq!(homes.cursor_config, root.join("legacy-cursor"));
+        assert_eq!(homes.cursor, root.join("legacy-cursor"));
+        assert_eq!(
+            homes.cursor_app,
+            root.join("Library")
+                .join("Application Support")
+                .join("Cursor")
+        );
+        assert_eq!(
+            homes.opencode,
+            root.join(".local").join("share").join("opencode")
+        );
+        assert_eq!(homes.opencode_config, root.join(".config").join("opencode"));
+        assert_eq!(homes.opencode_data_home(), root.join(".local/share"));
         assert!(homes.magents.ends_with("magents"));
+
+        unsafe {
+            std::env::remove_var("CURSOR_HOME");
+            std::env::set_var("XDG_CONFIG_HOME", root.join("xdg-only"));
+        }
+        let homes = Homes::from_env();
+        assert_eq!(homes.cursor_config, root.join("xdg-only").join("cursor"));
+        assert_eq!(homes.cursor, root.join(".cursor"));
+    }
+
+    #[test]
+    fn isolated_cursor_roots_are_distinct() {
+        let directory = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(directory.path());
+
+        assert_eq!(homes.cursor_config, directory.path().join("cursor-config"));
+        assert_eq!(homes.cursor, directory.path().join("cursor"));
+        assert_eq!(homes.cursor_app, directory.path().join("cursor-app"));
+        assert_eq!(homes.opencode_data_home(), directory.path());
+        assert_ne!(homes.cursor_config, homes.cursor);
+        assert_ne!(homes.cursor_config, homes.cursor_app);
+        assert_ne!(homes.cursor, homes.cursor_app);
     }
 }

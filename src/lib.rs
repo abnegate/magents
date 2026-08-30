@@ -8,6 +8,8 @@ pub mod install;
 pub mod mailbox;
 pub mod mcp;
 pub mod model;
+pub mod runtime;
+pub mod spawn;
 pub mod transcript;
 
 pub use error::Error;
