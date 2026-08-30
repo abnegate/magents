@@ -3,7 +3,9 @@ use magents::discover::{ListFilter, list_sessions, resolve};
 use magents::homes::Homes;
 use magents::model::{Agent, Caller};
 use magents::{deliver, mailbox, transcript};
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read};
+use std::path::Path;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -19,7 +21,7 @@ struct Cli {
 enum Command {
     /// Run the stdio MCP server
     Mcp,
-    /// List sessions across Claude, Codex, and Grok
+    /// List sessions across Claude, Codex, Cursor, Grok, and OpenCode
     List {
         #[arg(long)]
         agent: Option<String>,
@@ -48,8 +50,23 @@ enum Command {
         #[arg(short = 'n', long, default_value_t = 10)]
         limit: usize,
     },
+    /// Start a new headless persisted session for independent work
+    Spawn {
+        agent: String,
+        /// Read the complete prompt from PATH; use '-' for stdin
+        #[arg(long, value_name = "PATH", default_value = "-")]
+        prompt_file: PathBuf,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
     /// Queue a message for another session
     Send { to: String, message: String },
+    /// Hand this work to another live agent with compact state
+    Handoff {
+        to: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Show the mailbox for this (or a given) session
     Inbox {
         #[arg(long)]
@@ -72,6 +89,35 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    #[command(name = "__supervise", hide = true)]
+    Supervise {
+        agent: String,
+        #[arg(long)]
+        cwd: PathBuf,
+        #[arg(long)]
+        session: Option<String>,
+    },
+}
+
+fn parse_agent(value: &str) -> anyhow::Result<Agent> {
+    Agent::parse(value).ok_or_else(|| anyhow::anyhow!("unknown agent: {value}"))
+}
+
+fn read_prompt(path: &Path) -> anyhow::Result<String> {
+    let prompt = if path == Path::new("-") {
+        let mut prompt = String::new();
+        std::io::stdin().read_to_string(&mut prompt)?;
+        prompt
+    } else {
+        std::fs::read_to_string(path).map_err(|error| {
+            anyhow::anyhow!("failed to read prompt file {}: {error}", path.display())
+        })?
+    };
+
+    if prompt.trim().is_empty() {
+        anyhow::bail!("prompt must not be empty");
+    }
+    Ok(prompt)
 }
 
 #[tokio::main]
@@ -136,6 +182,16 @@ async fn main() -> anyhow::Result<()> {
             )?;
             println!("{}", serde_json::to_string_pretty(&hits)?);
         }
+        Some(Command::Spawn {
+            agent,
+            prompt_file,
+            cwd,
+        }) => {
+            let agent = parse_agent(&agent)?;
+            let prompt = read_prompt(&prompt_file)?;
+            let report = magents::spawn::run(&Homes::from_env(), agent, &prompt, cwd.as_deref())?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Some(Command::Send { to, message }) => {
             let homes = Homes::from_env();
             let session = resolve(&homes, &to)?;
@@ -158,6 +214,11 @@ async fn main() -> anyhow::Result<()> {
                     "mail_id": mail.id
                 })
             );
+        }
+        Some(Command::Handoff { to, reason }) => {
+            let report =
+                magents::handoff::run(&Homes::from_env(), to.as_deref(), reason.as_deref())?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Some(Command::Inbox { session, agent }) => {
             let mail = mailbox::inbox(
@@ -187,6 +248,142 @@ async fn main() -> anyhow::Result<()> {
                 println!("{note}");
             }
         }
+        Some(Command::Supervise {
+            agent,
+            cwd,
+            session,
+        }) => {
+            let agent = parse_agent(&agent)?;
+            magents::runtime::supervise(&Homes::from_env(), agent, &cwd, session.as_deref())?;
+        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Command, parse_agent, read_prompt};
+    use clap::Parser;
+    use magents::model::Agent;
+    use std::path::PathBuf;
+
+    #[test]
+    fn parses_spawn_arguments() {
+        let cli = Cli::try_parse_from([
+            "magents",
+            "spawn",
+            "codex",
+            "--prompt-file",
+            "task.md",
+            "--cwd",
+            "/tmp/worktree",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Some(Command::Spawn {
+                agent,
+                prompt_file,
+                cwd,
+            }) => {
+                assert_eq!(agent, "codex");
+                assert_eq!(prompt_file, PathBuf::from("task.md"));
+                assert_eq!(cwd, Some(PathBuf::from("/tmp/worktree")));
+            }
+            _ => panic!("expected spawn command"),
+        }
+    }
+
+    #[test]
+    fn defaults_spawn_prompt_to_stdin() {
+        let cli = Cli::try_parse_from(["magents", "spawn", "codex"]).unwrap();
+
+        match cli.command {
+            Some(Command::Spawn { prompt_file, .. }) => {
+                assert_eq!(prompt_file, PathBuf::from("-"));
+            }
+            _ => panic!("expected spawn command"),
+        }
+    }
+
+    #[test]
+    fn rejects_positional_or_conflicting_spawn_prompts() {
+        assert!(Cli::try_parse_from(["magents", "spawn", "codex", "private prompt"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "magents",
+                "spawn",
+                "codex",
+                "--prompt-file",
+                "one.md",
+                "--prompt-file",
+                "two.md",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn reads_prompt_files_and_rejects_empty_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let prompt = directory.path().join("task.md");
+        std::fs::write(&prompt, "complete task\nwith verification\n").unwrap();
+        assert_eq!(
+            read_prompt(&prompt).unwrap(),
+            "complete task\nwith verification\n"
+        );
+
+        let empty = directory.path().join("empty.md");
+        std::fs::write(&empty, " \n\t").unwrap();
+        assert_eq!(
+            read_prompt(&empty).unwrap_err().to_string(),
+            "prompt must not be empty"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_spawn_agent_explicitly() {
+        assert_eq!(parse_agent("codex").unwrap(), Agent::Codex);
+        assert_eq!(
+            parse_agent("unknown").unwrap_err().to_string(),
+            "unknown agent: unknown"
+        );
+    }
+
+    #[test]
+    fn parses_hidden_supervisor_arguments() {
+        let cli = Cli::try_parse_from([
+            "magents",
+            "__supervise",
+            "grok",
+            "--cwd",
+            "/tmp/worktree",
+            "--session",
+            "session-id",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Some(Command::Supervise {
+                agent,
+                cwd,
+                session,
+            }) => {
+                assert_eq!(agent, "grok");
+                assert_eq!(cwd, PathBuf::from("/tmp/worktree"));
+                assert_eq!(session.as_deref(), Some("session-id"));
+            }
+            _ => panic!("expected supervisor command"),
+        }
+    }
+
+    #[test]
+    fn hides_supervisor_from_public_help() {
+        let help = Cli::try_parse_from(["magents", "--help"])
+            .err()
+            .expect("help should stop parsing")
+            .to_string();
+        assert!(help.contains("spawn"));
+        assert!(!help.contains("__supervise"));
+    }
 }

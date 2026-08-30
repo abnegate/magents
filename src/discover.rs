@@ -50,6 +50,7 @@ pub fn list_sessions(homes: &Homes, filter: &ListFilter) -> Result<Vec<Session>>
     if filter.agent.is_none() || filter.agent == Some(Agent::OpenCode) {
         sessions.extend(discover_opencode(homes)?);
     }
+    merge_spawned(homes, &mut sessions, filter.agent)?;
     let needle = filter
         .query
         .as_deref()
@@ -83,6 +84,26 @@ pub fn list_sessions(homes: &Homes, filter: &ListFilter) -> Result<Vec<Session>>
         sessions.truncate(filter.limit);
     }
     Ok(sessions)
+}
+
+fn merge_spawned(homes: &Homes, sessions: &mut Vec<Session>, agent: Option<Agent>) -> Result<()> {
+    let mut spawned: HashMap<(Agent, String), Session> = crate::spawn::sessions(homes)?
+        .into_iter()
+        .filter(|session| agent.is_none() || agent == Some(session.agent))
+        .map(|session| ((session.agent, session.session_id.clone()), session))
+        .collect();
+
+    for session in sessions.iter_mut() {
+        let key = (session.agent, session.session_id.clone());
+        let Some(registry) = spawned.remove(&key) else {
+            continue;
+        };
+        if session.cwd.is_none() {
+            session.cwd = registry.cwd;
+        }
+    }
+    sessions.extend(spawned.into_values());
+    Ok(())
 }
 
 pub fn resolve(homes: &Homes, reference: &str) -> Result<Session> {
@@ -919,8 +940,13 @@ fn millis(value: Option<i64>) -> Option<DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
-    use super::split_agent_ref;
+    use super::{ListFilter, list_sessions, resolve, split_agent_ref};
+    use crate::homes::Homes;
     use crate::model::Agent;
+    use crate::spawn::Transport;
+    use crate::test_env;
+    use serde_json::json;
+    use std::fs;
 
     #[test]
     fn parses_agent_prefixed_refs() {
@@ -963,6 +989,164 @@ mod tests {
         assert_eq!(
             super::file_uri_path("file:///tmp/foo%20bar").as_deref(),
             Some("/tmp/foo bar")
+        );
+    }
+
+    #[test]
+    fn registry_only_session_is_immediately_addressable() {
+        let directory = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(directory.path());
+        let session = crate::spawn::record(
+            &homes,
+            Agent::Codex,
+            "spawned-codex",
+            directory.path(),
+            Transport::CodexExec,
+        )
+        .unwrap();
+
+        let resolved = resolve(&homes, "codex:spawned-codex").unwrap();
+        assert_eq!(resolved.session_id, session.session_id);
+        assert_eq!(resolved.cwd, session.cwd);
+        assert!(!resolved.live);
+        assert_eq!(resolved.origin.as_deref(), Some("codex-exec"));
+
+        let live = list_sessions(
+            &homes,
+            &ListFilter {
+                agent: Some(Agent::Codex),
+                live_only: true,
+                include_archived: true,
+                limit: 0,
+                query: None,
+            },
+        )
+        .unwrap();
+        assert!(live.is_empty());
+    }
+
+    #[test]
+    fn legacy_opencode_data_override_drives_discovery() {
+        const KEYS: &[&str] = &["HOME", "MAGENTS_HOME", "OPENCODE_DATA", "XDG_DATA_HOME"];
+        let _guard = test_env::lock(KEYS);
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = directory.path().join("legacy").join("opencode");
+        let session = legacy
+            .join("storage")
+            .join("session")
+            .join("project")
+            .join("ses_legacy.json");
+        fs::create_dir_all(session.parent().unwrap()).unwrap();
+        fs::write(
+            &session,
+            json!({
+                "id": "ses_legacy",
+                "directory": directory.path(),
+                "title": "legacy override"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("HOME", directory.path());
+            std::env::set_var("MAGENTS_HOME", directory.path().join("magents"));
+            std::env::set_var("OPENCODE_DATA", &legacy);
+            std::env::set_var("XDG_DATA_HOME", directory.path().join("xdg"));
+        }
+
+        let homes = Homes::from_env();
+        let sessions = list_sessions(
+            &homes,
+            &ListFilter {
+                agent: Some(Agent::OpenCode),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(homes.opencode, legacy);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "ses_legacy");
+        assert_eq!(
+            sessions[0].transcript_path.as_deref(),
+            Some(session.as_path())
+        );
+    }
+
+    #[test]
+    fn native_cursor_data_wins_and_registry_only_fills_missing_cwd() {
+        let directory = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(directory.path());
+        assert_ne!(homes.cursor_config, homes.cursor);
+        assert_ne!(homes.cursor_app, homes.cursor);
+        let session_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let transcript = homes
+            .cursor
+            .join("projects")
+            .join("workspace")
+            .join("agent-transcripts")
+            .join(session_id)
+            .join(format!("{session_id}.jsonl"));
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::write(
+            &transcript,
+            json!({
+                "role": "user",
+                "message": {"content": [{"type": "text", "text": "native title"}]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        for (root, ignored_id) in [
+            (&homes.cursor_config, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            (&homes.cursor_app, "cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+        ] {
+            let ignored = root
+                .join("projects")
+                .join("workspace")
+                .join("agent-transcripts")
+                .join(ignored_id)
+                .join(format!("{ignored_id}.jsonl"));
+            fs::create_dir_all(ignored.parent().unwrap()).unwrap();
+            fs::write(
+                ignored,
+                json!({
+                    "role": "user",
+                    "message": {"content": [{"type": "text", "text": "ignored title"}]}
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+        crate::spawn::record(
+            &homes,
+            Agent::Cursor,
+            session_id,
+            directory.path(),
+            Transport::CursorAgent,
+        )
+        .unwrap();
+
+        let sessions = list_sessions(
+            &homes,
+            &ListFilter {
+                agent: Some(Agent::Cursor),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(sessions.len(), 1);
+        let session = &sessions[0];
+        assert_eq!(session.title.as_deref(), Some("native title"));
+        assert_eq!(session.cwd.as_deref(), directory.path().to_str());
+        assert_eq!(session.origin.as_deref(), Some("cursor"));
+        assert_eq!(
+            session.transcript_path.as_deref(),
+            Some(transcript.as_path())
         );
     }
 }

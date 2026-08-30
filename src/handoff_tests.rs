@@ -11,7 +11,6 @@ use serde_json::json;
 use std::fs;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
-use std::process::Command;
 use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -710,11 +709,11 @@ fn searches_across_harnesses() {
 }
 
 #[test]
-fn mailbox_roundtrip_and_cursor_has_no_live_inject() {
+fn mailbox_roundtrip_and_cursor_reports_supervised_failure() {
     let world = World::new();
     let session = resolve(&world.homes, "cursor:Test rounds").unwrap();
     let delivered = deliver_live(&world.homes, &session, "handoff").unwrap();
-    assert!(delivered.is_empty());
+    assert_eq!(delivered, vec!["cursor-cli-failed".to_string()]);
     let caller = Caller {
         agent: Some(Agent::Grok),
         session_id: Some(GROK_ID.into()),
@@ -822,36 +821,21 @@ fn claude_uds_inject_writes_auth_and_user_frames() {
 }
 
 #[test]
-fn opencode_run_is_invoked_with_session_and_dir() {
+fn opencode_run_reports_supervised_failure_with_existing_cwd() {
     let dir = tempfile::tempdir().unwrap();
     let homes = Homes::isolated(dir.path());
     write_opencode_sqlite(&homes);
-    let bin = dir.path().join("bin");
-    fs::create_dir_all(&bin).unwrap();
-    let stub = bin.join("opencode");
-    let log = dir.path().join("opencode-args.txt");
-    let _guard = crate::test_env::lock(&["MAGENTS_OPENCODE_BIN"]);
-    write(
-        &stub,
-        &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\" > '{}'\n",
-            log.display()
-        ),
-    );
-    Command::new("chmod")
-        .args(["+x", stub.to_str().unwrap()])
-        .status()
+    Connection::open(homes.opencode.join("opencode.db"))
+        .unwrap()
+        .execute(
+            "UPDATE session SET directory = ?1 WHERE id = ?2",
+            rusqlite::params![dir.path().to_string_lossy(), OPENCODE_ID],
+        )
         .unwrap();
     let session = resolve(&homes, "opencode:zone-dev").unwrap();
-    unsafe { std::env::set_var("MAGENTS_OPENCODE_BIN", &stub) };
+    assert_eq!(session.cwd.as_deref(), dir.path().to_str());
     let delivered = deliver_live(&homes, &session, "continue the zone-dev checks").unwrap();
-    let args = wait_for_file(&log, Duration::from_secs(2));
-    unsafe { std::env::remove_var("MAGENTS_OPENCODE_BIN") };
-    assert_eq!(delivered, vec!["opencode-run".to_string()]);
-    assert!(args.contains("run"), "opencode stub args were {args:?}");
-    assert!(args.contains("--session"));
-    assert!(args.contains(OPENCODE_ID));
-    assert!(args.contains("/tmp/zone"));
+    assert_eq!(delivered, vec!["opencode-run-failed".to_string()]);
 }
 
 #[test]
@@ -1150,19 +1134,4 @@ fn opencode_json_parent_and_archived() {
             .iter()
             .any(|session| session.session_id == "ses_child")
     );
-}
-
-fn wait_for_file(path: &Path, timeout: Duration) -> String {
-    let started = std::time::Instant::now();
-    loop {
-        if let Ok(body) = fs::read_to_string(path)
-            && !body.trim().is_empty()
-        {
-            return body;
-        }
-        if started.elapsed() > timeout {
-            return String::new();
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
 }

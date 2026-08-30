@@ -2,11 +2,14 @@ pub mod codex_ipc;
 pub mod deliver;
 pub mod discover;
 pub mod error;
+pub mod handoff;
 pub mod homes;
 pub mod install;
 pub mod mailbox;
 pub mod mcp;
 pub mod model;
+pub mod runtime;
+pub mod spawn;
 pub mod transcript;
 
 pub use error::Error;
