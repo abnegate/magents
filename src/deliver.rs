@@ -964,16 +964,32 @@ exit 1
         let listener = UnixListener::bind(&socket).unwrap();
         thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
+            let linger = libc::linger {
+                l_onoff: 1,
+                l_linger: 0,
+            };
+            unsafe {
+                libc::setsockopt(
+                    std::os::fd::AsRawFd::as_raw_fd(&stream),
+                    libc::SOL_SOCKET,
+                    libc::SO_LINGER,
+                    (&raw const linger).cast(),
+                    u32::try_from(std::mem::size_of_val(&linger)).unwrap(),
+                );
+            }
             drop(stream);
         });
         wait_listener(&socket);
         let mut live = session(Agent::Claude, "c1");
         live.messaging_socket = Some(socket);
-        let delivered = deliver_with(&homes, &live, "hi", |_, _, _| {
+        let delivered = deliver_with(&homes, &live, &"h".repeat(256 * 1024), |_, _, _| {
             Err(Error::msg("resume unavailable"))
         })
         .unwrap();
-        assert!(delivered.iter().any(|item| item == "claude-uds-failed"));
+        assert!(
+            delivered.iter().any(|item| item == "claude-uds-failed"),
+            "{delivered:?}"
+        );
     }
 
     #[test]
