@@ -84,33 +84,55 @@ fn install_grok(exe: &Path) -> Result<String> {
 }
 
 fn install_claude(exe: &Path) -> Result<String> {
-    run(
+    let add = [
+        "mcp",
+        "add",
+        "--scope",
+        "user",
+        "magents",
+        "--",
+        exe.to_str().unwrap_or("magents"),
+        "mcp",
+    ];
+    add_or_replace(
         "claude",
-        &[
-            "mcp",
-            "add",
-            "--scope",
-            "user",
-            "magents",
-            "--",
-            exe.to_str().unwrap_or("magents"),
-            "mcp",
-        ],
+        &add,
+        &["mcp", "remove", "--scope", "user", "magents"],
     )
 }
 
 fn install_codex(exe: &Path) -> Result<String> {
-    run(
-        "codex",
-        &[
-            "mcp",
-            "add",
-            "magents",
-            "--",
-            exe.to_str().unwrap_or("magents"),
-            "mcp",
-        ],
-    )
+    let add = [
+        "mcp",
+        "add",
+        "magents",
+        "--",
+        exe.to_str().unwrap_or("magents"),
+        "mcp",
+    ];
+    add_or_replace("codex", &add, &["mcp", "remove", "magents"])
+}
+
+fn add_or_replace(program: &str, add: &[&str], remove: &[&str]) -> Result<String> {
+    match run(program, add) {
+        Ok(note) => Ok(note),
+        Err(error) if already_registered(&error) => {
+            let _ = Command::new(program).args(remove).output();
+            match run(program, add) {
+                Ok(note) => Ok(note),
+                Err(add_error) => {
+                    let _ = run(program, add);
+                    Err(add_error)
+                }
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn already_registered(error: &Error) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("already exists") || text.contains("already registered")
 }
 
 fn install_cursor(exe: &Path) -> Result<String> {
@@ -236,6 +258,7 @@ fn run(program: &str, args: &[&str]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{install, read_json_object, write_json, write_skill};
+    use crate::error::Error;
     use crate::test_env;
     use serde_json::{Value, json};
     use std::fs;
@@ -283,6 +306,46 @@ mod tests {
                 home.join(".config/opencode/skills/magents/SKILL.md")
                     .is_file()
             );
+        });
+    }
+
+    #[test]
+    fn already_registered_matches_host_wording() {
+        assert!(super::already_registered(&Error::msg(
+            "claude mcp add failed: MCP server magents already exists in user config"
+        )));
+        assert!(super::already_registered(&Error::msg(
+            "server already registered"
+        )));
+        assert!(!super::already_registered(&Error::msg(
+            "claude mcp add failed: boom"
+        )));
+    }
+
+    #[test]
+    fn install_claude_replaces_existing() {
+        with_home(|home, bin| {
+            test_env::write_executable(
+                &bin.join("claude"),
+                r#"
+if [ "$1" = mcp ] && [ "$2" = remove ]; then
+  : > "$HOME/.removed-magents"
+  exit 0
+fi
+if [ -f "$HOME/.removed-magents" ]; then
+  echo added magents
+  exit 0
+fi
+echo already exists >&2
+exit 1
+"#,
+            );
+            let notes = install(true, false, false, false, false).unwrap();
+            assert!(
+                notes.iter().any(|note| note.contains("added magents")),
+                "{notes:?}"
+            );
+            assert!(home.join(".claude/skills/magents/SKILL.md").is_file());
         });
     }
 
