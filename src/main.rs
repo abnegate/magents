@@ -58,6 +58,18 @@ enum Command {
         #[arg(short = 'n', long, default_value_t = 10)]
         limit: usize,
     },
+    /// Write a note into Claude, Codex, or Grok first-party memory
+    CreateMemory {
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        file: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        cwd: Option<String>,
+        content: String,
+    },
     /// Start a new headless persisted session for independent work
     Spawn {
         agent: String,
@@ -202,6 +214,23 @@ async fn main() -> anyhow::Result<()> {
                 limit,
             )?;
             println!("{}", serde_json::to_string_pretty(&hits)?);
+        }
+        Some(Command::CreateMemory {
+            agent,
+            file,
+            project,
+            cwd,
+            content,
+        }) => {
+            let created = memory::create_memory(
+                &Homes::from_env(),
+                parse_agent(&agent)?,
+                &content,
+                file.as_deref(),
+                project.as_deref(),
+                cwd.as_deref(),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&created)?);
         }
         Some(Command::Spawn {
             agent,
@@ -405,6 +434,42 @@ mod tests {
             .expect("help should stop parsing")
             .to_string();
         assert!(help.contains("spawn"));
+        assert!(help.contains("create-memory"));
         assert!(!help.contains("__supervise"));
+    }
+
+    #[test]
+    fn parses_create_memory_arguments() {
+        let cli = Cli::try_parse_from([
+            "magents",
+            "create-memory",
+            "--agent",
+            "claude",
+            "--project",
+            "tmp-dr",
+            "--file",
+            "dedicated-db-gaps.md",
+            "--cwd",
+            "/Users/foo/bar",
+            "the note body",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Some(Command::CreateMemory {
+                agent,
+                file,
+                project,
+                cwd,
+                content,
+            }) => {
+                assert_eq!(agent, "claude");
+                assert_eq!(file.as_deref(), Some("dedicated-db-gaps.md"));
+                assert_eq!(project.as_deref(), Some("tmp-dr"));
+                assert_eq!(cwd.as_deref(), Some("/Users/foo/bar"));
+                assert_eq!(content, "the note body");
+            }
+            _ => panic!("expected create-memory command"),
+        }
     }
 }
