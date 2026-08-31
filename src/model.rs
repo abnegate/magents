@@ -35,9 +35,19 @@ impl Agent {
     }
 }
 
+pub(crate) fn valid_session_id(agent: Agent, value: &str) -> bool {
+    let safe = !value.is_empty()
+        && value.len() <= 256
+        && !value.starts_with(['-', '.'])
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+    safe && (agent != Agent::OpenCode || value.starts_with("ses_"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Agent;
+    use super::{Agent, valid_session_id};
 
     #[test]
     fn parses_all_harness_aliases() {
@@ -52,6 +62,16 @@ mod tests {
         assert_eq!(Agent::parse("nope"), None);
         assert_eq!(Agent::Claude.to_string(), "claude");
         assert_eq!(Agent::Codex.as_str(), "codex");
+    }
+
+    #[test]
+    fn session_ids_cannot_be_options_or_paths() {
+        assert!(valid_session_id(Agent::Claude, "valid.id-1"));
+        assert!(!valid_session_id(Agent::Claude, "-p"));
+        assert!(!valid_session_id(Agent::Claude, ".hidden"));
+        assert!(!valid_session_id(Agent::Claude, "../outside"));
+        assert!(valid_session_id(Agent::OpenCode, "ses_valid-1"));
+        assert!(!valid_session_id(Agent::OpenCode, "valid-1"));
     }
 }
 
@@ -163,6 +183,7 @@ mod caller_tests {
         unsafe { std::env::remove_var("OPENCODE_SESSION") };
 
         unsafe { std::env::set_var("CODEX_HOME", "/tmp/codex") };
+        assert!(Caller::from_env().agent.is_none());
         unsafe { std::env::set_var("CODEX_SESSION_ID", "cx") };
         let caller = Caller::from_env();
         assert_eq!(caller.agent, Some(Agent::Codex));
@@ -344,7 +365,8 @@ impl Caller {
                     .or_else(|| std::env::var("OPENCODE_SESSION").ok()),
             };
         }
-        if std::env::var_os("CODEX_HOME").is_some() || std::env::var_os("CODEX_THREAD_ID").is_some()
+        if std::env::var_os("CODEX_THREAD_ID").is_some()
+            || std::env::var_os("CODEX_SESSION_ID").is_some()
         {
             return Self {
                 agent: Some(Agent::Codex),

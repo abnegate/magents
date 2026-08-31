@@ -2,15 +2,16 @@ use crate::codex_ipc;
 use crate::error::{Error, Result};
 use crate::homes::Homes;
 use crate::model::{Agent, Session};
+use crate::runtime;
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use uuid::Uuid;
 
 #[derive(Deserialize)]
@@ -20,178 +21,192 @@ struct PeerKey {
 }
 
 pub fn deliver_live(homes: &Homes, session: &Session, message: &str) -> Result<Vec<String>> {
+    deliver_with(homes, session, message, runtime::resume)
+}
+
+fn deliver_with<F>(
+    homes: &Homes,
+    session: &Session,
+    message: &str,
+    mut resume: F,
+) -> Result<Vec<String>>
+where
+    F: FnMut(&Homes, &Session, &str) -> Result<String>,
+{
     let mut delivered = Vec::new();
     match session.agent {
         Agent::Claude => {
+            let mut succeeded = false;
             if let Some(socket) = &session.messaging_socket {
                 match send_claude_uds(homes, session, socket, message) {
-                    Ok(()) => delivered.push("claude-uds".into()),
-                    Err(error) => delivered.push(format!("claude-uds-failed:{error}")),
+                    Ok(()) => {
+                        delivered.push("claude-uds".into());
+                        succeeded = true;
+                    }
+                    Err(_) => delivered.push("claude-uds-failed".into()),
                 }
             }
-            if delivered.is_empty()
-                && let Some(target) = &session.tmux
-            {
+            if !succeeded && let Some(target) = session.tmux.as_deref() {
                 match send_tmux(target, message) {
-                    Ok(()) => delivered.push("claude-tmux".into()),
-                    Err(error) => delivered.push(format!("claude-tmux-failed:{error}")),
+                    Ok(()) => {
+                        delivered.push("claude-tmux".into());
+                        succeeded = true;
+                    }
+                    Err(_) => delivered.push("claude-tmux-failed".into()),
                 }
+            }
+            if !succeeded {
+                record_resume(
+                    homes,
+                    session,
+                    message,
+                    "claude-cli",
+                    &mut delivered,
+                    &mut resume,
+                );
             }
         }
-        Agent::Grok => match send_grok_single(session, message) {
-            Ok(()) => delivered.push("grok-single".into()),
-            Err(error) => delivered.push(format!("grok-single-failed:{error}")),
-        },
+        Agent::Grok => record_resume(
+            homes,
+            session,
+            message,
+            "grok-single",
+            &mut delivered,
+            &mut resume,
+        ),
         Agent::Codex => {
+            let mut succeeded = false;
             let ipc = homes.codex.join("ipc").join("ipc.sock");
             if ipc.exists() {
                 match codex_ipc::send_user_turn(&ipc, &session.session_id, message) {
-                    Ok(()) => delivered.push("codex-ipc".into()),
-                    Err(error) => delivered.push(format!("codex-ipc-failed:{error}")),
+                    Ok(()) => {
+                        delivered.push("codex-ipc".into());
+                        succeeded = true;
+                    }
+                    Err(_) => delivered.push("codex-ipc-failed".into()),
                 }
             }
-            if delivered
-                .iter()
-                .all(|item| item.starts_with("codex-ipc-failed"))
-            {
-                match send_codex_exec(session, message) {
-                    Ok(()) => delivered.push("codex-exec".into()),
-                    Err(error) => delivered.push(format!("codex-exec-failed:{error}")),
-                }
+            if !succeeded {
+                record_resume(
+                    homes,
+                    session,
+                    message,
+                    "codex-exec",
+                    &mut delivered,
+                    &mut resume,
+                );
             }
         }
-        Agent::OpenCode => match send_opencode_run(session, message) {
-            Ok(()) => delivered.push("opencode-run".into()),
-            Err(error) => delivered.push(format!("opencode-run-failed:{error}")),
-        },
-        Agent::Cursor => {}
+        Agent::OpenCode => record_resume(
+            homes,
+            session,
+            message,
+            "opencode-run",
+            &mut delivered,
+            &mut resume,
+        ),
+        Agent::Cursor => record_resume(
+            homes,
+            session,
+            message,
+            "cursor-cli",
+            &mut delivered,
+            &mut resume,
+        ),
     }
     Ok(delivered)
+}
+
+fn record_resume<F>(
+    homes: &Homes,
+    session: &Session,
+    message: &str,
+    route: &str,
+    delivered: &mut Vec<String>,
+    resume: &mut F,
+) where
+    F: FnMut(&Homes, &Session, &str) -> Result<String>,
+{
+    match resume(homes, session, message) {
+        Ok(marker) => delivered.push(marker),
+        Err(_) => delivered.push(format!("{route}-failed")),
+    }
 }
 
 fn program(var: &str, fallback: &str) -> String {
     std::env::var(var).unwrap_or_else(|_| fallback.into())
 }
 
-fn send_opencode_run(session: &Session, message: &str) -> Result<()> {
-    let mut command = Command::new(program("MAGENTS_OPENCODE_BIN", "opencode"));
-    command.arg("run").arg("--session").arg(&session.session_id);
-    if let Some(cwd) = &session.cwd {
-        command.arg("--dir").arg(cwd);
+fn send_tmux(target: &str, message: &str) -> Result<()> {
+    let tmux = program("MAGENTS_TMUX_BIN", "tmux");
+    let buffer = format!("magents-{}", Uuid::new_v4().simple());
+    if let Err(error) = load_tmux_buffer(&tmux, &buffer, message) {
+        delete_tmux_buffer(&tmux, &buffer);
+        return Err(error);
     }
-    command
-        .arg(message)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let child = command.spawn().map_err(|source| Error::Io {
-        path: PathBuf::from("opencode"),
-        source,
-    })?;
-    std::thread::spawn(move || {
-        let mut child = child;
-        let _ = child.wait();
-    });
-    Ok(())
+    if let Err(error) = run_tmux(
+        &tmux,
+        ["paste-buffer", "-b", &buffer, "-t", target, "-d"],
+        "paste-buffer",
+    ) {
+        delete_tmux_buffer(&tmux, &buffer);
+        return Err(error);
+    }
+    run_tmux(&tmux, ["send-keys", "-t", target, "Enter"], "send-keys")
 }
 
-fn send_grok_single(session: &Session, message: &str) -> Result<()> {
-    let cwd = session.cwd.as_deref().unwrap_or(".");
-    let child = Command::new(program("MAGENTS_GROK_BIN", "grok"))
-        .args([
-            "--cwd",
-            cwd,
-            "--resume",
-            &session.session_id,
-            "--always-approve",
-            "--single",
-            message,
-        ])
-        .stdin(Stdio::null())
+fn load_tmux_buffer(tmux: &str, buffer: &str, message: &str) -> Result<()> {
+    let mut child = Command::new(tmux)
+        .args(["load-buffer", "-b", buffer, "-"])
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|source| Error::Io {
-            path: PathBuf::from("grok"),
-            source,
-        })?;
-    std::thread::spawn(move || {
-        let mut child = child;
+        .map_err(tmux_io)?;
+    let mut input = child
+        .stdin
+        .take()
+        .ok_or_else(|| Error::msg("tmux load-buffer stdin unavailable"))?;
+    if let Err(source) = input.write_all(message.as_bytes()) {
+        drop(input);
         let _ = child.wait();
-    });
-    Ok(())
-}
-
-fn send_tmux(target: &str, message: &str) -> Result<()> {
-    let tmux = program("MAGENTS_TMUX_BIN", "tmux");
-    let status = Command::new(&tmux)
-        .args(["send-keys", "-t", target, "-l", "--", message])
-        .status()
-        .map_err(|source| Error::Io {
-            path: PathBuf::from("tmux"),
-            source,
-        })?;
-    if !status.success() {
-        return Err(Error::msg(format!("tmux send-keys failed for {target}")));
+        return Err(tmux_io(source));
     }
-    let status = Command::new(&tmux)
-        .args(["send-keys", "-t", target, "Enter"])
-        .status()
-        .map_err(|source| Error::Io {
-            path: PathBuf::from("tmux"),
-            source,
-        })?;
+    drop(input);
+    let status = child.wait().map_err(tmux_io)?;
     if !status.success() {
-        return Err(Error::msg(format!("tmux enter failed for {target}")));
+        return Err(Error::msg("tmux load-buffer failed"));
     }
     Ok(())
 }
 
-fn send_codex_exec(session: &Session, message: &str) -> Result<()> {
-    let mut command = Command::new(program("MAGENTS_CODEX_BIN", "codex"));
-    command.arg("exec").arg("--skip-git-repo-check");
-    if let Some(cwd) = &session.cwd {
-        command.arg("-C").arg(cwd);
-    }
-    command
-        .arg("resume")
-        .arg(&session.session_id)
-        .arg(message)
+fn run_tmux<const N: usize>(tmux: &str, arguments: [&str; N], operation: &str) -> Result<()> {
+    let status = Command::new(tmux)
+        .args(arguments)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(|source| Error::Io {
-        path: PathBuf::from("codex"),
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(tmux_io)?;
+    if !status.success() {
+        return Err(Error::msg(format!("tmux {operation} failed")));
+    }
+    Ok(())
+}
+
+fn delete_tmux_buffer(tmux: &str, buffer: &str) {
+    let _ = Command::new(tmux)
+        .args(["delete-buffer", "-b", buffer])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+fn tmux_io(source: std::io::Error) -> Error {
+    Error::Io {
+        path: PathBuf::from("tmux"),
         source,
-    })?;
-    let started = Instant::now();
-    loop {
-        if let Some(status) = child.try_wait().map_err(|source| Error::Io {
-            path: PathBuf::from("codex"),
-            source,
-        })? {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            if !status.success() {
-                let detail = stderr.trim();
-                return Err(Error::msg(if detail.is_empty() {
-                    format!("codex exec resume exited {status}")
-                } else {
-                    format!("codex exec resume: {detail}")
-                }));
-            }
-            return Ok(());
-        }
-        if started.elapsed() > Duration::from_secs(8) {
-            std::thread::spawn(move || {
-                let mut child = child;
-                let _ = child.wait();
-            });
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -237,12 +252,7 @@ fn send_claude_uds(homes: &Homes, session: &Session, socket: &Path, message: &st
             let value: serde_json::Value =
                 serde_json::from_str(&line).unwrap_or(serde_json::Value::Null);
             if value.get("type").and_then(serde_json::Value::as_str) == Some("error") {
-                return Err(Error::msg(
-                    value
-                        .get("data")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("uds error"),
-                ));
+                return Err(Error::msg("Claude UDS rejected message"));
             }
             Ok(())
         }
@@ -320,7 +330,8 @@ fn read_peer_token(path: &PathBuf) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PeerKey, deliver_live};
+    use super::{PeerKey, deliver_live, deliver_with};
+    use crate::error::Error;
     use crate::homes::Homes;
     use crate::model::{Agent, Session};
     use crate::test_env;
@@ -332,12 +343,7 @@ mod tests {
     use std::time::Duration;
     use tempfile::TempDir;
 
-    const ENV: &[&str] = &[
-        "MAGENTS_GROK_BIN",
-        "MAGENTS_CODEX_BIN",
-        "MAGENTS_TMUX_BIN",
-        "MAGENTS_OPENCODE_BIN",
-    ];
+    const ENV: &[&str] = &["MAGENTS_TMUX_BIN"];
 
     fn session(agent: Agent, id: &str) -> Session {
         Session {
@@ -400,82 +406,217 @@ mod tests {
     }
 
     #[test]
-    fn grok_single_uses_stub_and_cwd_fallback() {
+    fn supervised_routes_preserve_targets_and_markers() {
+        let (_dir, homes) = isolated();
+        for (agent, id, marker) in [
+            (Agent::Claude, "claude-id", "claude-cli"),
+            (Agent::Codex, "codex-id", "codex-exec"),
+            (Agent::Cursor, "cursor-id", "cursor-cli"),
+            (Agent::Grok, "grok-id", "grok-single"),
+            (Agent::OpenCode, "opencode-id", "opencode-run"),
+        ] {
+            let live = session(agent, id);
+            let delivered = deliver_with(
+                &homes,
+                &live,
+                "private prompt",
+                |actual_homes, actual, message| {
+                    assert_eq!(actual_homes.magents, homes.magents);
+                    assert_eq!(actual.agent, agent);
+                    assert_eq!(actual.session_id, id);
+                    assert_eq!(actual.cwd.as_deref(), Some("/tmp/work"));
+                    assert_eq!(message, "private prompt");
+                    Ok(marker.to_string())
+                },
+            )
+            .unwrap();
+            assert_eq!(delivered, vec![marker.to_string()]);
+        }
+    }
+
+    #[test]
+    fn supervised_failure_retains_route_without_private_output() {
+        let (_dir, homes) = isolated();
+        let live = session(Agent::Cursor, "cursor-id");
+        let delivered = deliver_with(&homes, &live, "private prompt", |_, _, _| {
+            Err(Error::msg(
+                "child output contains private prompt and uds-secret-token",
+            ))
+        })
+        .unwrap();
+        assert_eq!(delivered, vec!["cursor-cli-failed".to_string()]);
+    }
+
+    #[test]
+    fn tmux_fallback_keeps_message_out_of_argv() {
         let _guard = test_env::lock(ENV);
         let (dir, homes) = isolated();
-        let log = dir.path().join("grok.log");
-        let stub = dir.path().join("grok");
+        let log = dir.path().join("tmux.log");
+        let input = dir.path().join("tmux.stdin");
+        let stub = dir.path().join("tmux");
         test_env::write_executable(
             &stub,
-            &format!("printf '%s\\n' \"$@\" > '{}'", log.display()),
+            &format!(
+                r#"
+{{
+  printf 'call'
+  for argument in "$@"; do
+    printf '\t%s' "$argument"
+  done
+  printf '\n'
+}} >> '{}'
+if [ "$1" = 'load-buffer' ]; then
+  cat > '{}'
+fi
+"#,
+                log.display(),
+                input.display(),
+            ),
         );
-        unsafe { std::env::set_var("MAGENTS_GROK_BIN", &stub) };
-        let mut live = session(Agent::Grok, "grok-1");
-        live.cwd = None;
-        let delivered = deliver_live(&homes, &live, "ping from magents").unwrap();
+        unsafe { std::env::set_var("MAGENTS_TMUX_BIN", &stub) };
+        let mut live = session(Agent::Claude, "c1");
+        live.tmux = Some("magents:0.0".into());
+        let message = "private prompt with spaces and $shell";
+        let delivered = deliver_live(&homes, &live, message).unwrap();
+        assert_eq!(delivered, vec!["claude-tmux".to_string()]);
         let args = wait_for(&log, Duration::from_secs(2));
-        assert_eq!(delivered, vec!["grok-single".to_string()]);
-        assert!(args.contains("--single"), "{args}");
-        assert!(args.contains("grok-1"), "{args}");
-        assert!(args.contains("ping from magents"), "{args}");
-    }
-
-    #[test]
-    fn grok_single_reports_missing_binary() {
-        let _guard = test_env::lock(ENV);
-        let (dir, homes) = isolated();
-        unsafe {
-            std::env::set_var(
-                "MAGENTS_GROK_BIN",
-                dir.path().join("missing-grok").as_os_str(),
-            );
-        }
-        let delivered = deliver_live(&homes, &session(Agent::Grok, "g"), "hi").unwrap();
+        let calls = args
+            .lines()
+            .map(|line| line.split('\t').collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 3, "{calls:?}");
+        let buffer = calls[0][3];
+        assert!(buffer.starts_with("magents-"), "{buffer}");
+        assert_eq!(buffer.len(), "magents-".len() + 32, "{buffer}");
         assert!(
-            delivered
-                .iter()
-                .any(|item| item.starts_with("grok-single-failed:")),
-            "{delivered:?}"
+            buffer["magents-".len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+            "{buffer}"
         );
+        assert_eq!(calls[0], ["call", "load-buffer", "-b", buffer, "-"]);
+        assert_eq!(
+            calls[1],
+            [
+                "call",
+                "paste-buffer",
+                "-b",
+                buffer,
+                "-t",
+                "magents:0.0",
+                "-d",
+            ]
+        );
+        assert_eq!(
+            calls[2],
+            ["call", "send-keys", "-t", "magents:0.0", "Enter"]
+        );
+        assert!(!args.contains(message), "{args}");
+        assert_eq!(wait_for(&input, Duration::from_secs(2)), message);
     }
 
     #[test]
-    fn tmux_fallback_when_claude_has_no_socket() {
+    fn failed_claude_uds_falls_through_to_tmux_and_stops() {
         let _guard = test_env::lock(ENV);
         let (dir, homes) = isolated();
         let log = dir.path().join("tmux.log");
         let stub = dir.path().join("tmux");
         test_env::write_executable(
             &stub,
-            &format!("printf '%s\\n' \"$@\" >> '{}'", log.display()),
+            &format!(
+                r#"
+printf '%s\n' "$@" >> '{}'
+if [ "$1" = 'load-buffer' ]; then
+  cat >/dev/null
+fi
+"#,
+                log.display(),
+            ),
         );
         unsafe { std::env::set_var("MAGENTS_TMUX_BIN", &stub) };
         let mut live = session(Agent::Claude, "c1");
+        live.messaging_socket = Some(dir.path().join("missing.sock"));
         live.tmux = Some("magents:0.0".into());
-        let delivered = deliver_live(&homes, &live, "typed").unwrap();
-        assert_eq!(delivered, vec!["claude-tmux".to_string()]);
+        let delivered = deliver_with(
+            &homes,
+            &live,
+            "typed",
+            |_, _, _| -> crate::error::Result<String> {
+                panic!("supervisor resume must not run after tmux succeeds")
+            },
+        )
+        .unwrap();
+        assert_eq!(delivered.len(), 2, "{delivered:?}");
+        assert_eq!(delivered[0], "claude-uds-failed");
+        assert_eq!(delivered[1], "claude-tmux");
         let args = wait_for(&log, Duration::from_secs(2));
-        assert!(args.contains("send-keys"), "{args}");
-        assert!(args.contains("typed"), "{args}");
-        assert!(args.contains("Enter"), "{args}");
+        assert!(!args.contains("typed"), "{args}");
     }
 
     #[test]
-    fn tmux_send_keys_failure_is_reported() {
+    fn tmux_partial_failure_cleans_buffer_and_falls_back_privately() {
         let _guard = test_env::lock(ENV);
         let (dir, homes) = isolated();
+        let log = dir.path().join("tmux.log");
+        let input = dir.path().join("tmux.stdin");
         let stub = dir.path().join("tmux");
-        test_env::write_executable(&stub, "exit 1");
+        test_env::write_executable(
+            &stub,
+            &format!(
+                r#"
+{{
+  printf 'call'
+  for argument in "$@"; do
+    printf '\t%s' "$argument"
+  done
+  printf '\n'
+}} >> '{}'
+case "$1" in
+  load-buffer)
+    cat > '{}'
+    exit 0
+    ;;
+  paste-buffer|delete-buffer)
+    exit 1
+    ;;
+  *)
+    exit 99
+    ;;
+esac
+"#,
+                log.display(),
+                input.display(),
+            ),
+        );
         unsafe { std::env::set_var("MAGENTS_TMUX_BIN", &stub) };
         let mut live = session(Agent::Claude, "c1");
         live.tmux = Some("gone:0.0".into());
-        let delivered = deliver_live(&homes, &live, "typed").unwrap();
-        assert!(
-            delivered
-                .iter()
-                .any(|item| item.starts_with("claude-tmux-failed:")),
-            "{delivered:?}"
+        let message = "private fallback prompt";
+        let delivered = deliver_with(&homes, &live, message, |_, actual, actual_message| {
+            assert_eq!(actual.session_id, "c1");
+            assert_eq!(actual_message, message);
+            Ok("claude-cli".to_string())
+        })
+        .unwrap();
+        assert_eq!(
+            delivered,
+            ["claude-tmux-failed".to_string(), "claude-cli".to_string()]
         );
+        let args = wait_for(&log, Duration::from_secs(2));
+        let calls = args
+            .lines()
+            .map(|line| line.split('\t').collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 3, "{calls:?}");
+        let buffer = calls[0][3];
+        assert_eq!(calls[0], ["call", "load-buffer", "-b", buffer, "-"]);
+        assert_eq!(
+            calls[1],
+            ["call", "paste-buffer", "-b", buffer, "-t", "gone:0.0", "-d",]
+        );
+        assert_eq!(calls[2], ["call", "delete-buffer", "-b", buffer]);
+        assert!(!args.contains(message), "{args}");
+        assert_eq!(wait_for(&input, Duration::from_secs(2)), message);
     }
 
     #[test]
@@ -486,22 +627,24 @@ mod tests {
         test_env::write_executable(
             &stub,
             r#"
-case " $* " in
-  *" -l "*) exit 0 ;;
-  *) exit 1 ;;
-esac
+if [ "$1" = 'load-buffer' ]; then
+  cat >/dev/null
+  exit 0
+fi
+if [ "$1" = 'paste-buffer' ]; then
+  exit 0
+fi
+exit 1
 "#,
         );
         unsafe { std::env::set_var("MAGENTS_TMUX_BIN", &stub) };
         let mut live = session(Agent::Claude, "c1");
         live.tmux = Some("pane:0.0".into());
-        let delivered = deliver_live(&homes, &live, "typed").unwrap();
-        assert!(
-            delivered
-                .iter()
-                .any(|item| item.contains("tmux enter failed")),
-            "{delivered:?}"
-        );
+        let delivered = deliver_with(&homes, &live, "typed", |_, _, _| {
+            Err(Error::msg("private child output"))
+        })
+        .unwrap();
+        assert!(delivered.iter().any(|item| item == "claude-tmux-failed"));
     }
 
     #[test]
@@ -513,85 +656,33 @@ esac
         }
         let mut live = session(Agent::Claude, "c1");
         live.tmux = Some("pane:0.0".into());
-        let delivered = deliver_live(&homes, &live, "typed").unwrap();
+        let delivered = deliver_with(&homes, &live, "typed", |_, _, _| {
+            Err(Error::msg("private child output"))
+        })
+        .unwrap();
         assert!(
-            delivered
-                .iter()
-                .any(|item| item.starts_with("claude-tmux-failed:")),
-            "{delivered:?}"
-        );
-    }
-
-    #[test]
-    fn codex_exec_resume_uses_stub() {
-        let _guard = test_env::lock(ENV);
-        let (dir, homes) = isolated();
-        let log = dir.path().join("codex.log");
-        let stub = dir.path().join("codex");
-        test_env::write_executable(
-            &stub,
-            &format!("printf '%s\\n' \"$@\" > '{}'", log.display()),
-        );
-        unsafe { std::env::set_var("MAGENTS_CODEX_BIN", &stub) };
-        let delivered = deliver_live(&homes, &session(Agent::Codex, "thread-1"), "go").unwrap();
-        assert_eq!(delivered, vec!["codex-exec".to_string()]);
-        let args = wait_for(&log, Duration::from_secs(2));
-        assert!(args.contains("exec"), "{args}");
-        assert!(args.contains("resume"), "{args}");
-        assert!(args.contains("thread-1"), "{args}");
-        assert!(args.contains("-C"), "{args}");
-    }
-
-    #[test]
-    fn codex_exec_failure_includes_stderr() {
-        let _guard = test_env::lock(ENV);
-        let (dir, homes) = isolated();
-        let stub = dir.path().join("codex");
-        test_env::write_executable(
-            &stub,
-            "echo paginated_threads is not supported yet >&2; exit 1",
-        );
-        unsafe { std::env::set_var("MAGENTS_CODEX_BIN", &stub) };
-        let mut live = session(Agent::Codex, "thread-1");
-        live.cwd = None;
-        let delivered = deliver_live(&homes, &live, "go").unwrap();
-        assert!(
-            delivered
-                .iter()
-                .any(|item| item.contains("paginated_threads")),
-            "{delivered:?}"
-        );
-    }
-
-    #[test]
-    fn codex_exec_failure_without_stderr() {
-        let _guard = test_env::lock(ENV);
-        let (dir, homes) = isolated();
-        let stub = dir.path().join("codex");
-        test_env::write_executable(&stub, "exit 1");
-        unsafe { std::env::set_var("MAGENTS_CODEX_BIN", &stub) };
-        let delivered = deliver_live(&homes, &session(Agent::Codex, "t"), "go").unwrap();
-        assert!(
-            delivered
-                .iter()
-                .any(|item| item.contains("codex exec resume exited")),
+            delivered.iter().any(|item| item == "claude-tmux-failed"),
             "{delivered:?}"
         );
     }
 
     #[test]
     fn codex_ipc_success_and_failure_paths() {
-        let _guard = test_env::lock(ENV);
         let world = crate::handoff_tests::World::new();
-        let stub = world.homes.magents.join("codex-stub");
-        test_env::write_executable(&stub, "exit 0");
-        unsafe { std::env::set_var("MAGENTS_CODEX_BIN", &stub) };
         let billing = crate::discover::resolve(&world.homes, "codex:Billing").unwrap();
-        let delivered = deliver_live(&world.homes, &billing, "via dummy sock").unwrap();
+        let delivered = deliver_with(
+            &world.homes,
+            &billing,
+            "via dummy sock",
+            |_, actual, message| {
+                assert_eq!(actual.session_id, billing.session_id);
+                assert_eq!(message, "via dummy sock");
+                Ok("codex-exec".to_string())
+            },
+        )
+        .unwrap();
         assert!(
-            delivered
-                .iter()
-                .any(|item| item.starts_with("codex-ipc-failed:")),
+            delivered.iter().any(|item| item == "codex-ipc-failed"),
             "{delivered:?}"
         );
         assert!(
@@ -640,46 +731,17 @@ esac
             }
         });
         wait_listener(&socket);
-        let delivered = deliver_live(&homes, &session(Agent::Codex, "thread-1"), "ipc hi").unwrap();
+        let delivered = deliver_with(
+            &homes,
+            &session(Agent::Codex, "thread-1"),
+            "ipc hi",
+            |_, _, _| -> crate::error::Result<String> {
+                panic!("supervisor resume must not run after Codex IPC succeeds")
+            },
+        )
+        .unwrap();
         assert_eq!(delivered, vec!["codex-ipc".to_string()]);
         let _ = dir;
-    }
-
-    #[test]
-    fn missing_codex_binary_is_reported() {
-        let _guard = test_env::lock(ENV);
-        let (dir, homes) = isolated();
-        unsafe {
-            std::env::set_var("MAGENTS_CODEX_BIN", dir.path().join("no-codex").as_os_str());
-        }
-        let delivered = deliver_live(&homes, &session(Agent::Codex, "t"), "go").unwrap();
-        assert!(
-            delivered
-                .iter()
-                .any(|item| item.starts_with("codex-exec-failed:")),
-            "{delivered:?}"
-        );
-    }
-
-    #[test]
-    fn opencode_missing_binary_is_reported() {
-        let _guard = test_env::lock(ENV);
-        let (dir, homes) = isolated();
-        unsafe {
-            std::env::set_var(
-                "MAGENTS_OPENCODE_BIN",
-                dir.path().join("no-opencode").as_os_str(),
-            );
-        }
-        let mut live = session(Agent::OpenCode, "ses");
-        live.cwd = None;
-        let delivered = deliver_live(&homes, &live, "go").unwrap();
-        assert!(
-            delivered
-                .iter()
-                .any(|item| item.starts_with("opencode-run-failed:")),
-            "{delivered:?}"
-        );
     }
 
     #[test]
@@ -687,11 +749,12 @@ esac
         let (_dir, homes) = isolated();
         let mut live = session(Agent::Claude, "c1");
         live.messaging_socket = Some(PathBuf::from("/tmp/magents-no-such-socket.sock"));
-        let delivered = deliver_live(&homes, &live, "hi").unwrap();
+        let delivered = deliver_with(&homes, &live, "hi", |_, _, _| {
+            Err(Error::msg("resume unavailable"))
+        })
+        .unwrap();
         assert!(
-            delivered
-                .iter()
-                .any(|item| item.starts_with("claude-uds-failed:")),
+            delivered.iter().any(|item| item == "claude-uds-failed"),
             "{delivered:?}"
         );
 
@@ -701,18 +764,28 @@ esac
         drop(listener);
         live.messaging_socket = Some(socket);
         live.pid = None;
-        let delivered = deliver_live(&homes, &live, "hi").unwrap();
-        assert!(
-            delivered.iter().any(|item| item.contains("peer token")),
-            "{delivered:?}"
+        let delivered = deliver_with(&homes, &live, "hi", |_, _, _| {
+            Err(Error::msg("resume unavailable"))
+        })
+        .unwrap();
+        assert_eq!(
+            delivered,
+            vec![
+                "claude-uds-failed".to_string(),
+                "claude-cli-failed".to_string(),
+            ]
         );
     }
 
     #[test]
-    fn claude_uds_capability_token_and_error_reply() {
+    fn claude_uds_failure_falls_through_tmux_then_cli_privately() {
+        let _guard = test_env::lock(ENV);
         let (dir, homes) = isolated();
         let socket = dir.path().join("caps.sock");
         let listener = UnixListener::bind(&socket).unwrap();
+        let tmux = dir.path().join("tmux");
+        test_env::write_executable(&tmux, "exit 1");
+        unsafe { std::env::set_var("MAGENTS_TMUX_BIN", &tmux) };
         let digest = {
             use sha2::{Digest, Sha256};
             let bytes = Sha256::digest(socket.to_string_lossy().as_bytes());
@@ -735,21 +808,37 @@ esac
             stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
             let mut buf = String::new();
             let _ = stream.read_to_string(&mut buf);
-            let _ = writeln!(stream, r#"{{"type":"error","data":"nope"}}"#);
+            let _ = writeln!(
+                stream,
+                r#"{{"type":"error","data":"private reply cap-token from magents"}}"#
+            );
             buf
         });
         let mut live = session(Agent::Claude, "c1");
         live.messaging_socket = Some(socket);
         live.pid = None;
-        let delivered = deliver_live(&homes, &live, "from magents").unwrap();
-        assert!(
-            delivered
-                .iter()
-                .any(|item| item.contains("claude-uds-failed:nope")),
-            "{delivered:?}"
+        live.tmux = Some("pane:0.0".into());
+        let delivered = deliver_with(&homes, &live, "from magents", |_, actual, message| {
+            assert_eq!(actual.session_id, "c1");
+            assert_eq!(message, "from magents");
+            Ok("claude-cli".to_string())
+        })
+        .unwrap();
+        assert_eq!(
+            delivered,
+            vec![
+                "claude-uds-failed".to_string(),
+                "claude-tmux-failed".to_string(),
+                "claude-cli".to_string(),
+            ]
         );
+        let evidence = delivered.join("\n");
+        assert!(!evidence.contains("cap-token"), "{delivered:?}");
+        assert!(!evidence.contains("from magents"), "{delivered:?}");
+        assert!(!evidence.contains("private reply"), "{delivered:?}");
         let body = received.join().unwrap();
         assert!(body.contains("cap-token"));
+        assert!(body.contains("from magents"));
     }
 
     #[test]
