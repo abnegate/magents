@@ -1572,10 +1572,25 @@ mod tests {
             .join("agent-transcripts")
             .join(std::ffi::OsStr::from_bytes(&[0xff, 0xfe]));
         let _ = fs::create_dir(&weird);
+        let sessions_dir = isolated.claude.join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let _ = fs::write(
+            sessions_dir.join(std::ffi::OsStr::from_bytes(&[0xff, 0xfe])),
+            "{}",
+        );
         let _ = list_sessions(
             &isolated,
             &ListFilter {
                 agent: Some(Agent::Cursor),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        );
+        let _ = list_sessions(
+            &isolated,
+            &ListFilter {
+                agent: Some(Agent::Claude),
                 include_archived: true,
                 limit: 0,
                 ..ListFilter::default()

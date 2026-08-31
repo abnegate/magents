@@ -749,6 +749,21 @@ mod tests {
         .unwrap_err();
         assert!(empty.to_string().contains("query is required"));
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let blocked = Homes::isolated(tempfile::tempdir().unwrap().path());
+            let projects = blocked.cursor.join("projects");
+            std::fs::create_dir_all(&projects).unwrap();
+            let mut permissions = std::fs::metadata(&projects).unwrap().permissions();
+            permissions.set_mode(0o000);
+            std::fs::set_permissions(&projects, permissions).unwrap();
+            assert!(super::search_transcripts(&blocked, "needle", None, false, 10).is_err());
+            let mut permissions = std::fs::metadata(&projects).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&projects, permissions).unwrap();
+        }
+
         let no_path = super::read_session(
             &Session {
                 agent: Agent::Cursor,
@@ -836,6 +851,9 @@ mod tests {
             let mut permissions = std::fs::metadata(&blocked).unwrap().permissions();
             permissions.set_mode(0o644);
             std::fs::set_permissions(&blocked, permissions).unwrap();
+            let invalid = dir.path().join("invalid-utf8.jsonl");
+            std::fs::write(&invalid, [0xff, 0x80, b'\n']).unwrap();
+            assert!(super::jsonl(&invalid).is_err());
         }
         assert!(super::scan_file(&jsonl, "needle").is_none());
         assert!(
@@ -871,6 +889,19 @@ mod tests {
         let turns = super::read_cursor(&cursor).unwrap();
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].role, "user");
+        let no_role = dir.path().join("norole.jsonl");
+        std::fs::write(&no_role, "{\"message\":{}}\n").unwrap();
+        assert!(super::read_cursor(&no_role).unwrap().is_empty());
+        assert!(
+            super::read_opencode_json_tree(std::path::Path::new("nope.json"), "x")
+                .unwrap()
+                .is_empty()
+        );
+        let garbage = dir.path().join("garbage.db");
+        std::fs::write(&garbage, "not sqlite").unwrap();
+        let mut files = std::collections::BTreeSet::new();
+        super::collect_files(Agent::OpenCode, &garbage, "x", &mut files);
+        assert!(files.is_empty());
 
         let storage = dir.path().join("storage");
         let session_json = storage.join("session").join("proj").join("ses_tree.json");
@@ -909,7 +940,8 @@ mod tests {
                  INSERT INTO message VALUES ('m1', 'ses_x', 2, '{\"role\":\"assistant\"}');
                  INSERT INTO part VALUES ('p1', 'm1', 1, '{\"type\":\"text\",\"text\":\"one\"}');
                  INSERT INTO part VALUES ('p2', 'm1', 2, '{\"type\":\"text\",\"text\":\"two\"}');
-                 INSERT INTO part VALUES ('p3', 'm1', 3, '{\"type\":\"note\",\"text\":\"three\"}');",
+                 INSERT INTO part VALUES ('p3', 'm1', 3, '{\"type\":\"note\",\"text\":\"three\"}');
+                 INSERT INTO part VALUES ('p4', 'm1', 4, '{\"type\":\"tool_use\"}');",
             )
             .unwrap();
         let turns = super::read_opencode_sqlite(&db, "ses_x").unwrap();

@@ -98,19 +98,15 @@ fn note_path(homes: &Homes, cwd: &str) -> Result<PathBuf> {
 }
 
 fn slug_cwd(cwd: &str) -> Result<String> {
-    let slug: String = cwd
-        .trim()
-        .trim_end_matches(['/', '\\'])
-        .chars()
-        .map(|ch| match ch {
-            '/' | '\\' | ':' => '-',
-            other => other,
-        })
-        .collect();
-    if slug.is_empty() || slug.contains("..") {
+    let cwd = cwd.trim().trim_end_matches(['/', '\\']);
+    if cwd.is_empty() || cwd.contains("..") {
         return Err(Error::msg("cwd is not a valid note key"));
     }
-    Ok(slug)
+    use sha2::{Digest, Sha256};
+    Ok(Sha256::digest(cwd.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 struct DateTimeExt;
@@ -170,7 +166,11 @@ mod tests {
         assert!(err.to_string().contains(".."));
         assert!(slug_cwd("").is_err());
         assert!(super::canonicalize_cwd("   ").is_err());
-        assert!(slug_cwd("C:\\Users\\work").unwrap().contains("Users"));
+        assert_ne!(
+            slug_cwd("/home/user/project-x").unwrap(),
+            slug_cwd("/home/user/project/x").unwrap()
+        );
+        assert_eq!(slug_cwd("C:\\Users\\work").unwrap().len(), 64);
     }
 
     #[test]

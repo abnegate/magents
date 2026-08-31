@@ -391,6 +391,7 @@ mod tests {
         "CODEX_HOME",
         "CODEX_THREAD_ID",
         "CODEX_SESSION_ID",
+        "MAGENTS_AWAIT_POLL_MS",
     ];
 
     fn caller(agent: Agent, session: &str) -> Caller {
@@ -581,14 +582,14 @@ mod tests {
         posted(&homes, "s1", "already-there");
         let homes_thread = homes.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::thread::sleep(std::time::Duration::from_millis(300));
             posted(&homes_thread, "s1", "new-mail");
         });
         let received = await_reply(
             &homes,
             &caller(Agent::Grok, "s1"),
             None,
-            Some(2),
+            Some(5),
             None,
             None,
         )
@@ -637,7 +638,7 @@ mod tests {
 
         let homes_thread = homes.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::thread::sleep(std::time::Duration::from_millis(300));
             let from_claude = compose(
                 &caller(Agent::Claude, "peer-session"),
                 Agent::Grok,
@@ -651,7 +652,7 @@ mod tests {
             &homes,
             &caller(Agent::Grok, "s1"),
             Some("claude:peer-session"),
-            Some(2),
+            Some(5),
             None,
             None,
         )
@@ -814,5 +815,81 @@ mod tests {
         std::fs::create_dir_all(homes.mailbox_dir().join("acks")).unwrap();
         std::fs::write(homes.mailbox_dir().join("acks").join("grok"), "file").unwrap();
         assert!(ack(&homes, &caller(Agent::Grok, "s1"), None, None, None).is_err());
+
+        let homes = Homes::isolated(dir.path().join("bad-utf8"));
+        let path = homes.mailbox_dir().join("grok").join("s1.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, [0xff, 0x80]).unwrap();
+        let error = inbox(&homes, &caller(Agent::Grok, "s1"), InboxQuery::default()).unwrap_err();
+        assert!(error.to_string().contains("failed to read"), "{error}");
+    }
+
+    #[test]
+    fn await_and_reply_surface_inbox_io_errors() {
+        let _guard = test_env::lock(CALLER_ENV);
+        for key in CALLER_ENV {
+            unsafe { std::env::remove_var(key) };
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(dir.path());
+        let path = homes.mailbox_dir().join("grok").join("s1.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{}\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o000);
+            std::fs::set_permissions(&path, permissions).unwrap();
+            assert!(
+                await_reply(
+                    &homes,
+                    &caller(Agent::Grok, "s1"),
+                    None,
+                    Some(0),
+                    None,
+                    None
+                )
+                .is_err()
+            );
+            assert!(reply(&homes, &caller(Agent::Grok, "s1"), "pong", None, None, None).is_err());
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o644);
+            std::fs::set_permissions(&path, permissions).unwrap();
+        }
+
+        posted(&homes, "s1", "hello");
+        unsafe { std::env::set_var("MAGENTS_AWAIT_POLL_MS", "1") };
+        let homes_thread = homes.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let path = homes_thread.mailbox_dir().join("grok").join("s1.jsonl");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+                permissions.set_mode(0o000);
+                std::fs::set_permissions(&path, permissions).unwrap();
+            }
+        });
+        assert!(
+            await_reply(
+                &homes,
+                &caller(Agent::Grok, "s1"),
+                None,
+                Some(2),
+                None,
+                None
+            )
+            .is_err()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o644);
+            std::fs::set_permissions(&path, permissions).unwrap();
+        }
+        unsafe { std::env::remove_var("MAGENTS_AWAIT_POLL_MS") };
     }
 }

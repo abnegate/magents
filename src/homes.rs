@@ -246,6 +246,24 @@ mod tests {
     }
 
     #[test]
+    fn opencode_data_home_falls_back_without_parent() {
+        use std::path::PathBuf;
+        let homes = Homes {
+            claude: PathBuf::new(),
+            grok: PathBuf::new(),
+            codex: PathBuf::new(),
+            cursor_config: PathBuf::new(),
+            cursor: PathBuf::new(),
+            cursor_app: PathBuf::new(),
+            opencode: PathBuf::new(),
+            opencode_config: PathBuf::new(),
+            magents: PathBuf::new(),
+            claude_desktop: PathBuf::new(),
+        };
+        assert_eq!(homes.opencode_data_home(), std::path::Path::new("."));
+    }
+
+    #[test]
     fn isolated_cursor_roots_are_distinct() {
         let directory = tempfile::tempdir().unwrap();
         let homes = Homes::isolated(directory.path());

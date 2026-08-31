@@ -71,7 +71,7 @@ jobs:
             --locked \
             --all-targets \
             --ignore-filename-regex 'src/main\.rs|/rustlib/' \
-            --fail-under-lines 95 \
+            --fail-under-lines 98 \
             --cobertura --output-path cobertura.xml
       - name: Upload coverage report
         if: always()

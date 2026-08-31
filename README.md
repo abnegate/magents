@@ -235,10 +235,10 @@ Live Claude sessions come from `~/.claude/sessions/<pid>.json`. Live Grok sessio
 
 ```bash
 cargo test --locked --all-targets
-cargo llvm-cov --locked --all-targets --ignore-filename-regex 'src/main.rs|/rustlib/' --fail-under-lines 95
+cargo llvm-cov --locked --all-targets --ignore-filename-regex 'src/main.rs|/rustlib/' --fail-under-lines 98
 ```
 
-CI runs format, clippy (`-D warnings`), the full test suite, and the 95% line-coverage gate. That covers parser units, isolated-home integration (list / read / search / search-memories / create-memory / mailbox for every harness, supervised spawn commands, Claude UDS inject against a fake socket, OpenCode / Grok / Codex / tmux live-inject argv), MCP tool handlers, and CLI end-to-end (`list`, `get`, `read`, `search`, `search-memories`, `create-memory`, `spawn`, `send`, `inbox`, `install`).
+CI runs format, clippy (`-D warnings`), the full test suite, and the 98% line-coverage gate. That covers parser units, isolated-home integration (list / read / search / search-memories / create-memory / mailbox for every harness, supervised spawn commands, Claude UDS inject against a fake socket, OpenCode / Grok / Codex / tmux live-inject argv), MCP tool handlers, and CLI end-to-end (`list`, `get`, `read`, `search`, `search-memories`, `create-memory`, `spawn`, `send`, `inbox`, `install`).
 
 ## Requirements
 

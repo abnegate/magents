@@ -461,6 +461,10 @@ exit 1
         let skill = dir.path().join("skill-dir");
         fs::create_dir_all(&skill).unwrap();
         assert!(write_skill(skill).is_err());
+        let blocked = dir.path().join("blocked-parent");
+        fs::write(&blocked, "not a directory").unwrap();
+        assert!(write_json(&blocked.join("x.json"), &json!({})).is_err());
+        assert!(write_skill(blocked.join("SKILL.md")).is_err());
 
         with_home(|home, bin| {
             test_env::write_executable(
@@ -471,10 +475,7 @@ exit 1
 "#,
             );
             let error = install(true, false, false, false, false).unwrap_err();
-            assert!(
-                error.to_string().contains("already exists")
-                    || error.to_string().contains("failed")
-            );
+            assert!(error.to_string().contains("already exists"));
 
             test_env::write_executable(&bin.join("grok"), "echo added magents");
             fs::create_dir_all(home.join(".grok")).unwrap();

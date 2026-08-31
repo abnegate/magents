@@ -141,6 +141,10 @@ pub struct Live {
     pub supervisor: u32,
     pub provider: u32,
     pub group: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_started: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_started: Option<String>,
 }
 
 pub fn write_live(
@@ -169,6 +173,8 @@ pub fn write_live(
         supervisor,
         provider,
         group,
+        supervisor_started: process_started(supervisor),
+        provider_started: process_started(provider),
     };
     fs::write(&path, serde_json::to_vec(&live)?).map_err(|source| Error::Io {
         path: path.clone(),
@@ -203,9 +209,10 @@ pub fn stop(homes: &Homes, reference: &str) -> Result<StopReport> {
     })?;
     let live: Live = serde_json::from_str(&raw)?;
     let mut signaled = Vec::new();
-    let supervisor_alive = pid_alive(live.supervisor);
-    let provider_alive = live.provider != live.supervisor && pid_alive(live.provider);
-    if !supervisor_alive && !provider_alive {
+    let supervisor_ours = claimable(live.supervisor, live.supervisor_started.as_deref());
+    let provider_ours = live.provider != live.supervisor
+        && claimable(live.provider, live.provider_started.as_deref());
+    if !supervisor_ours && !provider_ours {
         let _ = fs::remove_file(&path);
         return Ok(StopReport {
             stopped: true,
@@ -214,25 +221,28 @@ pub fn stop(homes: &Homes, reference: &str) -> Result<StopReport> {
             signaled,
         });
     }
-    if supervisor_alive {
+    if supervisor_ours {
         signal_pid(live.supervisor);
         signaled.push("supervisor".into());
     }
-    if provider_alive {
+    if provider_ours {
         signal_pid(live.provider);
         signaled.push("provider".into());
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
     while std::time::Instant::now() < deadline
-        && (pid_alive(live.supervisor)
-            || (live.provider != live.supervisor && pid_alive(live.provider)))
+        && (claimable(live.supervisor, live.supervisor_started.as_deref())
+            || (live.provider != live.supervisor
+                && claimable(live.provider, live.provider_started.as_deref())))
     {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    if pid_alive(live.supervisor) {
+    if claimable(live.supervisor, live.supervisor_started.as_deref()) {
         force_pid(live.supervisor);
     }
-    if live.provider != live.supervisor && pid_alive(live.provider) {
+    if live.provider != live.supervisor
+        && claimable(live.provider, live.provider_started.as_deref())
+    {
         force_pid(live.provider);
     }
     let _ = fs::remove_file(&path);
@@ -248,6 +258,36 @@ fn live_path(homes: &Homes, agent: Agent, session_id: &str) -> PathBuf {
     homes
         .live_dir()
         .join(format!("{}-{session_id}.json", agent.as_str()))
+}
+
+fn process_started(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    let output = std::process::Command::new("ps")
+        .env("LC_ALL", "C")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let started = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if started.is_empty() {
+        None
+    } else {
+        Some(started)
+    }
+}
+
+fn claimable(pid: u32, started: Option<&str>) -> bool {
+    if !pid_alive(pid) {
+        return false;
+    }
+    match started {
+        Some(started) => process_started(pid).as_deref() == Some(started),
+        None => false,
+    }
 }
 
 fn signal_pid(pid: u32) {
@@ -872,6 +912,30 @@ mod tests {
         let _ = supervisor.wait();
         let _ = provider.wait();
 
+        let mut reused = Command::new("/bin/sh")
+            .args(["-c", "exec /bin/sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        write_live(&homes, &session, reused.id(), reused.id(), reused.id()).unwrap();
+        let path = live_path(&homes, session.agent, &session.session_id);
+        let mut live: super::Live =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        live.supervisor_started = Some("Thu Jan  1 00:00:00 1970".into());
+        live.provider_started = Some("Thu Jan  1 00:00:00 1970".into());
+        std::fs::write(&path, serde_json::to_vec(&live).unwrap()).unwrap();
+        let stale = stop(&homes, "codex:live-io").unwrap();
+        assert!(stale.already_exited);
+        assert!(stale.signaled.is_empty());
+        assert!(crate::homes::pid_alive(reused.id()));
+        let _ = reused.kill();
+        let _ = reused.wait();
+        assert!(!super::claimable(std::process::id(), None));
+        assert!(super::process_started(0).is_none());
+        assert!(super::process_started(u32::MAX).is_none());
+
         let registry = Homes::isolated(directory.path().join("registry-io"));
         std::fs::create_dir_all(&registry.magents).unwrap();
         std::fs::write(registry.spawn_dir(), "not-a-dir").unwrap();
@@ -880,6 +944,25 @@ mod tests {
                 &registry,
                 Agent::Codex,
                 "blocked-record",
+                directory.path(),
+                Transport::CodexExec,
+            )
+            .is_err()
+        );
+
+        let restricted = Homes::isolated(directory.path().join("restricted"));
+        std::fs::create_dir_all(restricted.spawn_dir()).unwrap();
+        std::os::unix::fs::symlink("/usr/bin", restricted.live_dir()).unwrap();
+        assert!(write_live(&restricted, &session, 1, 2, 3).is_err());
+
+        let protected = Homes::isolated(directory.path().join("protected"));
+        std::fs::create_dir_all(&protected.magents).unwrap();
+        std::os::unix::fs::symlink("/usr/bin", protected.spawn_dir()).unwrap();
+        assert!(
+            record(
+                &protected,
+                Agent::Codex,
+                "protected-record",
                 directory.path(),
                 Transport::CodexExec,
             )

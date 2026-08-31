@@ -317,6 +317,20 @@ mod tests {
         let homes = Homes::isolated(dir.path());
         let error = pick_peer(&homes, &session()).unwrap_err();
         assert!(error.to_string().contains("no other live session"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let projects = homes.cursor.join("projects");
+            std::fs::create_dir_all(&projects).unwrap();
+            let mut permissions = std::fs::metadata(&projects).unwrap().permissions();
+            permissions.set_mode(0o000);
+            std::fs::set_permissions(&projects, permissions).unwrap();
+            assert!(pick_peer(&homes, &session()).is_err());
+            let mut permissions = std::fs::metadata(&projects).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&projects, permissions).unwrap();
+        }
     }
 
     #[test]

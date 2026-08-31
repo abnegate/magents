@@ -783,6 +783,14 @@ mod tests {
             "claude skip needle nested should stay unseen\n",
         );
         write(&memory.join("hit.md"), "claude skip needle visible\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let grok_root = homes.grok.join("memory");
+            fs::create_dir_all(&grok_root).unwrap();
+            let _ = fs::create_dir(grok_root.join(std::ffi::OsString::from_vec(vec![0xff, 0x80])));
+            let _ = search_memories(&homes, "claude skip needle", Some(Agent::Grok), 10);
+        }
         let hits = search_memories(&homes, "claude skip needle", Some(Agent::Claude), 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].file, "hit.md");
@@ -1501,6 +1509,17 @@ mod tests {
 
         let err = read_memory(&homes, Agent::Claude, None, None, None, None, 10).unwrap_err();
         assert!(err.to_string().contains("file or path is required"));
+        let err = read_memory(
+            &homes,
+            Agent::Claude,
+            Some("topic.md"),
+            None,
+            None,
+            None,
+            10,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("project or cwd is required"));
 
         create_memory(
             &homes,

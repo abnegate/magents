@@ -222,23 +222,21 @@ mod tests {
 
     fn read_value(stream: &mut UnixStream, buffer: &mut Vec<u8>) -> Value {
         stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-        while buffer.len() < 4 {
+        loop {
+            if buffer.len() >= 4 {
+                let length = u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize;
+                let total = 4 + length;
+                if buffer.len() >= total {
+                    let payload = buffer[4..total].to_vec();
+                    buffer.drain(..total);
+                    return serde_json::from_slice(&payload).unwrap();
+                }
+            }
             let mut chunk = [0u8; 8192];
             let read = stream.read(&mut chunk).unwrap();
             assert!(read > 0, "client closed");
             buffer.extend_from_slice(&chunk[..read]);
         }
-        let length = u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize;
-        let total = 4 + length;
-        while buffer.len() < total {
-            let mut chunk = [0u8; 8192];
-            let read = stream.read(&mut chunk).unwrap();
-            assert!(read > 0, "client closed mid-frame");
-            buffer.extend_from_slice(&chunk[..read]);
-        }
-        let payload = buffer[4..total].to_vec();
-        buffer.drain(..total);
-        serde_json::from_slice(&payload).unwrap()
     }
 
     fn write_value(stream: &mut UnixStream, value: &Value) {
@@ -401,9 +399,7 @@ mod tests {
         let error = send_user_turn(&socket, "t", "m").unwrap_err();
         let message = error.to_string();
         assert!(
-            message.contains("socket closed")
-                || message.contains("failed to read")
-                || message.contains("timeout"),
+            message.contains("socket closed") || message.contains("failed to read"),
             "{message}"
         );
     }

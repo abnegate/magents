@@ -56,6 +56,16 @@ pub(crate) mod test_env {
         Guard { _lock: lock, saved }
     }
 
+    #[test]
+    fn recovers_from_poisoned_env_lock() {
+        let handle = std::thread::spawn(|| {
+            let _guard = lock(&[]);
+            panic!("poison the env lock");
+        });
+        assert!(handle.join().is_err());
+        let _guard = lock(&[]);
+    }
+
     pub fn write_executable(path: &std::path::Path, script: &str) {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
