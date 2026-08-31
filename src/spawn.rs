@@ -31,7 +31,9 @@ pub struct Report {
 pub enum Transport {
     ClaudePrint,
     CodexExec,
+    CopilotJson,
     CursorAgent,
+    GeminiStream,
     GrokStream,
     OpenCodeRun,
 }
@@ -41,7 +43,9 @@ impl Transport {
         match self {
             Self::ClaudePrint => "claude-print",
             Self::CodexExec => "codex-exec",
+            Self::CopilotJson => "copilot-json",
             Self::CursorAgent => "cursor-agent",
+            Self::GeminiStream => "gemini-stream",
             Self::GrokStream => "grok-stream",
             Self::OpenCodeRun => "opencode-run",
         }
@@ -804,7 +808,9 @@ mod tests {
         for (agent, transport) in [
             (Agent::Claude, Transport::ClaudePrint),
             (Agent::Codex, Transport::CodexExec),
+            (Agent::Copilot, Transport::CopilotJson),
             (Agent::Cursor, Transport::CursorAgent),
+            (Agent::Gemini, Transport::GeminiStream),
             (Agent::Grok, Transport::GrokStream),
             (Agent::OpenCode, Transport::OpenCodeRun),
         ] {

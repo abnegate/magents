@@ -14,6 +14,8 @@ pub struct Homes {
     pub cursor_app: PathBuf,
     pub opencode: PathBuf,
     pub opencode_config: PathBuf,
+    pub gemini: PathBuf,
+    pub copilot: PathBuf,
     pub magents: PathBuf,
     pub claude_desktop: PathBuf,
 }
@@ -43,6 +45,8 @@ impl Homes {
         let opencode_config = env_path("XDG_CONFIG_HOME")
             .map(|path| path.join("opencode"))
             .unwrap_or_else(|| home.join(".config").join("opencode"));
+        let gemini = env_path("GEMINI_CLI_HOME").unwrap_or_else(|| home.join(".gemini"));
+        let copilot = env_path("COPILOT_HOME").unwrap_or_else(|| home.join(".copilot"));
         let magents = env_path("MAGENTS_HOME").unwrap_or_else(|| {
             dirs::data_dir()
                 .unwrap_or_else(|| home.join(".local").join("share"))
@@ -62,6 +66,8 @@ impl Homes {
             cursor_app,
             opencode,
             opencode_config,
+            gemini,
+            copilot,
             magents,
             claude_desktop,
         }
@@ -98,6 +104,8 @@ impl Homes {
             cursor_app: root.join("cursor-app"),
             opencode: root.join("opencode"),
             opencode_config: root.join("opencode-config").join("opencode"),
+            gemini: root.join("gemini"),
+            copilot: root.join("copilot"),
             magents: root.join("magents"),
             claude_desktop: root.join("claude-desktop"),
         }
@@ -152,6 +160,8 @@ mod tests {
         "XDG_DATA_HOME",
         "MAGENTS_HOME",
         "OPENCODE_DATA",
+        "GEMINI_CLI_HOME",
+        "COPILOT_HOME",
     ];
 
     #[test]
@@ -177,6 +187,8 @@ mod tests {
             std::env::set_var("XDG_CONFIG_HOME", root.join("xdg-config"));
             std::env::set_var("XDG_DATA_HOME", root.join("xdg"));
             std::env::set_var("MAGENTS_HOME", root.join("m"));
+            std::env::set_var("GEMINI_CLI_HOME", root.join("gm"));
+            std::env::set_var("COPILOT_HOME", root.join("cp"));
             std::env::remove_var("OPENCODE_DATA");
         }
         let homes = Homes::from_env();
@@ -192,6 +204,8 @@ mod tests {
             homes.opencode_config,
             root.join("xdg-config").join("opencode")
         );
+        assert_eq!(homes.gemini, root.join("gm"));
+        assert_eq!(homes.copilot, root.join("cp"));
         assert_eq!(homes.magents, root.join("m"));
         assert_eq!(homes.mailbox_dir(), root.join("m").join("mailbox"));
         assert_eq!(homes.spawn_dir(), root.join("m").join("spawns"));
@@ -216,10 +230,14 @@ mod tests {
             std::env::remove_var("CURSOR_CONFIG_DIR");
             std::env::remove_var("CURSOR_DATA_DIR");
             std::env::remove_var("MAGENTS_HOME");
+            std::env::remove_var("GEMINI_CLI_HOME");
+            std::env::remove_var("COPILOT_HOME");
             std::env::set_var("CURSOR_HOME", root.join("legacy-cursor"));
         }
         let homes = Homes::from_env();
         assert_eq!(homes.claude, root.join(".claude"));
+        assert_eq!(homes.gemini, root.join(".gemini"));
+        assert_eq!(homes.copilot, root.join(".copilot"));
         assert_eq!(homes.cursor_config, root.join("legacy-cursor"));
         assert_eq!(homes.cursor, root.join("legacy-cursor"));
         assert_eq!(
@@ -257,6 +275,8 @@ mod tests {
             cursor_app: PathBuf::new(),
             opencode: PathBuf::new(),
             opencode_config: PathBuf::new(),
+            gemini: PathBuf::new(),
+            copilot: PathBuf::new(),
             magents: PathBuf::new(),
             claude_desktop: PathBuf::new(),
         };
@@ -272,6 +292,8 @@ mod tests {
         assert_eq!(homes.cursor, directory.path().join("cursor"));
         assert_eq!(homes.cursor_app, directory.path().join("cursor-app"));
         assert_eq!(homes.opencode_data_home(), directory.path());
+        assert_eq!(homes.gemini, directory.path().join("gemini"));
+        assert_eq!(homes.copilot, directory.path().join("copilot"));
         assert_ne!(homes.cursor_config, homes.cursor);
         assert_ne!(homes.cursor_config, homes.cursor_app);
         assert_ne!(homes.cursor, homes.cursor_app);

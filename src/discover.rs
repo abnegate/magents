@@ -54,6 +54,12 @@ pub fn list_sessions(homes: &Homes, filter: &ListFilter) -> Result<Vec<Session>>
     if filter.agent.is_none() || filter.agent == Some(Agent::OpenCode) {
         sessions.extend(discover_opencode(homes)?);
     }
+    if filter.agent.is_none() || filter.agent == Some(Agent::Gemini) {
+        sessions.extend(discover_gemini(homes)?);
+    }
+    if filter.agent.is_none() || filter.agent == Some(Agent::Copilot) {
+        sessions.extend(discover_copilot(homes)?);
+    }
     merge_spawned(homes, &mut sessions, filter.agent)?;
     let needle = filter
         .query
@@ -996,6 +1002,475 @@ fn discover_opencode_json(homes: &Homes) -> Result<Vec<Session>> {
     Ok(sessions)
 }
 
+fn discover_gemini(homes: &Homes) -> Result<Vec<Session>> {
+    let root = homes.gemini.join("tmp");
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let live_app = named_process_alive("gemini");
+    let mut by_id = HashMap::new();
+    for entry in WalkDir::new(&root).into_iter().flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy();
+        if name == "logs.json" {
+            continue;
+        }
+        let ext = path.extension().and_then(|ext| ext.to_str());
+        if ext != Some("json") && ext != Some("jsonl") {
+            continue;
+        }
+        if !path
+            .components()
+            .any(|component| component.as_os_str() == "chats")
+        {
+            continue;
+        }
+        let Some(parsed) = parse_gemini_session(path) else {
+            continue;
+        };
+        if !crate::model::valid_session_id(Agent::Gemini, &parsed.id) {
+            continue;
+        }
+        let session = Session {
+            agent: Agent::Gemini,
+            session_id: parsed.id.clone(),
+            desktop_id: None,
+            name: None,
+            title: parsed.title,
+            cwd: parsed.cwd,
+            branch: None,
+            live: live_app && recently_active(parsed.last_activity_at),
+            archived: false,
+            pid: None,
+            model: parsed.model,
+            last_activity_at: parsed.last_activity_at,
+            transcript_path: Some(path.to_path_buf()),
+            messaging_socket: None,
+            origin: Some("gemini".into()),
+            tmux: None,
+        };
+        by_id
+            .entry(parsed.id)
+            .and_modify(|existing: &mut Session| {
+                if session.activity_ms() >= existing.activity_ms() {
+                    *existing = session.clone();
+                }
+            })
+            .or_insert(session);
+    }
+    Ok(by_id.into_values().collect())
+}
+
+struct GeminiParsed {
+    id: String,
+    title: Option<String>,
+    cwd: Option<String>,
+    model: Option<String>,
+    last_activity_at: Option<DateTime<Utc>>,
+}
+
+fn parse_gemini_session(path: &Path) -> Option<GeminiParsed> {
+    let raw = fs::read_to_string(path).ok()?;
+    if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+        return parse_gemini_jsonl(&raw);
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(&raw) {
+        return parse_gemini_object(&value);
+    }
+    parse_gemini_jsonl(&raw)
+}
+
+fn parse_gemini_object(value: &Value) -> Option<GeminiParsed> {
+    let id = value
+        .get("sessionId")
+        .or_else(|| value.get("session_id"))
+        .or_else(|| value.get("id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())?
+        .to_string();
+    let title = gemini_title_from_messages(value.get("messages")).or_else(|| {
+        value
+            .get("title")
+            .and_then(Value::as_str)
+            .filter(|title| !title.is_empty())
+            .map(ToOwned::to_owned)
+    });
+    Some(GeminiParsed {
+        id,
+        title,
+        cwd: value
+            .get("cwd")
+            .or_else(|| value.get("projectPath"))
+            .and_then(Value::as_str)
+            .filter(|cwd| !cwd.is_empty())
+            .map(ToOwned::to_owned),
+        model: value
+            .get("model")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        last_activity_at: parse_gemini_time(
+            value
+                .get("lastUpdated")
+                .or_else(|| value.get("lastUpdatedAt"))
+                .or_else(|| value.get("startTime")),
+        ),
+    })
+}
+
+fn parse_gemini_jsonl(raw: &str) -> Option<GeminiParsed> {
+    let mut id = None;
+    let mut cwd = None;
+    let mut model = None;
+    let mut last_activity_at = None;
+    let mut title = None;
+    for line in raw.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if id.is_none() {
+            id = value
+                .get("sessionId")
+                .or_else(|| value.get("session_id"))
+                .or_else(|| value.get("id"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+        }
+        if cwd.is_none() {
+            cwd = value
+                .get("cwd")
+                .or_else(|| value.get("projectPath"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+        }
+        if model.is_none() {
+            model = value
+                .get("model")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+        }
+        last_activity_at = parse_gemini_time(
+            value
+                .get("lastUpdated")
+                .or_else(|| value.get("timestamp"))
+                .or_else(|| value.get("startTime")),
+        )
+        .or(last_activity_at);
+        if title.is_none() {
+            title = gemini_title_from_messages(value.get("messages"))
+                .or_else(|| gemini_message_title(&value));
+        }
+    }
+    Some(GeminiParsed {
+        id: id?,
+        title,
+        cwd,
+        model,
+        last_activity_at,
+    })
+}
+
+fn gemini_title_from_messages(messages: Option<&Value>) -> Option<String> {
+    let items = messages.and_then(Value::as_array)?;
+    items.iter().find_map(gemini_message_title)
+}
+
+fn gemini_message_title(value: &Value) -> Option<String> {
+    let kind = value
+        .get("type")
+        .or_else(|| value.get("role"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if kind != "user" {
+        return None;
+    }
+    let text = gemini_message_text(value)?;
+    Some(text.chars().take(80).collect())
+}
+
+fn gemini_message_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.get("content").and_then(Value::as_str) {
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        return (!text.is_empty()).then_some(text);
+    }
+    if let Some(text) = value.get("message").and_then(Value::as_str) {
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        return (!text.is_empty()).then_some(text);
+    }
+    if let Some(text) = value
+        .get("content")
+        .and_then(|content| content.get("text"))
+        .and_then(Value::as_str)
+    {
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        return (!text.is_empty()).then_some(text);
+    }
+    None
+}
+
+fn parse_gemini_time(value: Option<&Value>) -> Option<DateTime<Utc>> {
+    let value = value?;
+    if let Some(millis_value) = value.as_i64() {
+        return millis(Some(millis_value));
+    }
+    DateTime::parse_from_rfc3339(value.as_str()?)
+        .ok()
+        .map(|time| time.with_timezone(&Utc))
+}
+
+fn discover_copilot(homes: &Homes) -> Result<Vec<Session>> {
+    let root = homes.copilot.join("session-state");
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let store = copilot_store(&homes.copilot);
+    let live_app = named_process_alive("copilot");
+    let mut sessions = Vec::new();
+    let entries = fs::read_dir(&root).map_err(|source| Error::Io {
+        path: root.clone(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| Error::Io {
+            path: root.clone(),
+            source,
+        })?;
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some(session_id) = dir.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !crate::model::valid_session_id(Agent::Copilot, session_id) {
+            continue;
+        }
+        let events = dir.join("events.jsonl");
+        if !events.is_file() {
+            continue;
+        }
+        let workspace = read_simple_yaml(&dir.join("workspace.yaml"));
+        if workspace
+            .get("client_name")
+            .is_some_and(|name| name.contains("autopilot"))
+        {
+            continue;
+        }
+        let meta = store.get(session_id);
+        let cwd = workspace
+            .get("cwd")
+            .cloned()
+            .or_else(|| meta.and_then(|row| row.cwd.clone()));
+        let title = workspace
+            .get("name")
+            .filter(|name| !name.is_empty())
+            .cloned()
+            .or_else(|| meta.and_then(|row| row.summary.clone()))
+            .or_else(|| copilot_title_from_events(&events));
+        let last_activity_at = workspace
+            .get("updated_at")
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|time| time.with_timezone(&Utc))
+            .or_else(|| meta.and_then(|row| row.updated_at))
+            .or_else(|| {
+                events
+                    .metadata()
+                    .ok()
+                    .and_then(|meta| meta.modified().ok())
+                    .map(DateTime::<Utc>::from)
+            });
+        sessions.push(Session {
+            agent: Agent::Copilot,
+            session_id: session_id.to_string(),
+            desktop_id: None,
+            name: None,
+            title,
+            cwd,
+            branch: meta.and_then(|row| row.branch.clone()),
+            live: live_app && recently_active(last_activity_at),
+            archived: false,
+            pid: None,
+            model: None,
+            last_activity_at,
+            transcript_path: Some(events),
+            messaging_socket: None,
+            origin: Some("copilot".into()),
+            tmux: None,
+        });
+    }
+    Ok(sessions)
+}
+
+struct CopilotStoreRow {
+    cwd: Option<String>,
+    branch: Option<String>,
+    summary: Option<String>,
+    updated_at: Option<DateTime<Utc>>,
+}
+
+fn copilot_store(home: &Path) -> HashMap<String, CopilotStoreRow> {
+    let db = home.join("session-store.db");
+    let Ok(connection) =
+        Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return HashMap::new();
+    };
+    let Ok(mut statement) =
+        connection.prepare("SELECT id, cwd, branch, summary, updated_at FROM sessions")
+    else {
+        return HashMap::new();
+    };
+    let Ok(rows) = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+        ))
+    }) else {
+        return HashMap::new();
+    };
+    let mut map = HashMap::new();
+    for row in rows.flatten() {
+        let (id, cwd, branch, summary, updated) = row;
+        map.insert(
+            id,
+            CopilotStoreRow {
+                cwd: cwd.filter(|value| !value.is_empty()),
+                branch: branch.filter(|value| !value.is_empty()),
+                summary: summary.filter(|value| !value.is_empty()),
+                updated_at: updated.and_then(|value| {
+                    DateTime::parse_from_rfc3339(&value)
+                        .ok()
+                        .map(|time| time.with_timezone(&Utc))
+                }),
+            },
+        );
+    }
+    map
+}
+
+fn read_simple_yaml(path: &Path) -> HashMap<String, String> {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let mut map = HashMap::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        map.insert(key.trim().to_string(), yaml_scalar(value.trim()));
+    }
+    map
+}
+
+fn yaml_scalar(value: &str) -> String {
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        if bytes[0] == b'"' && bytes[value.len() - 1] == b'"' {
+            return unescape_double_quoted(&value[1..value.len() - 1]);
+        }
+        if bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'' {
+            return value[1..value.len() - 1].replace("''", "'");
+        }
+    }
+    value.to_string()
+}
+
+fn unescape_double_quoted(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            output.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => output.push('\n'),
+            Some('t') => output.push('\t'),
+            Some('r') => output.push('\r'),
+            Some('b') => output.push('\u{0008}'),
+            Some('f') => output.push('\u{000c}'),
+            Some('a') => output.push('\u{0007}'),
+            Some('e') => output.push('\u{001b}'),
+            Some('v') => output.push('\u{000b}'),
+            Some('0') => output.push('\0'),
+            Some(' ') => output.push(' '),
+            Some('"') => output.push('"'),
+            Some('\\') => output.push('\\'),
+            Some('/') => output.push('/'),
+            Some('u') => push_yaml_hex(&mut output, &mut chars, 4, 'u'),
+            Some('U') => push_yaml_hex(&mut output, &mut chars, 8, 'U'),
+            Some('x') => push_yaml_hex(&mut output, &mut chars, 2, 'x'),
+            Some(escaped) => output.push(escaped),
+            None => output.push('\\'),
+        }
+    }
+    output
+}
+
+fn push_yaml_hex(
+    output: &mut String,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    count: usize,
+    marker: char,
+) {
+    let mut hex = String::with_capacity(count);
+    for _ in 0..count {
+        match chars.peek().copied() {
+            Some(ch) if ch.is_ascii_hexdigit() => {
+                hex.push(ch);
+                chars.next();
+            }
+            _ => {
+                output.push('\\');
+                output.push(marker);
+                output.push_str(&hex);
+                return;
+            }
+        }
+    }
+    if let Some(decoded) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+        output.push(decoded);
+    } else {
+        output.push('\\');
+        output.push(marker);
+        output.push_str(&hex);
+    }
+}
+
+fn copilot_title_from_events(path: &Path) -> Option<String> {
+    let raw = fs::read_to_string(path).ok()?;
+    for line in raw.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("user.message") {
+            continue;
+        }
+        let text = value
+            .pointer("/data/content")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !text.is_empty() {
+            return Some(text.chars().take(80).collect());
+        }
+    }
+    None
+}
+
 fn recently_active(time: Option<DateTime<Utc>>) -> bool {
     time.map(|time| (Utc::now() - time).num_minutes().abs() < 15)
         .unwrap_or(false)
@@ -1064,7 +1539,7 @@ fn millis(value: Option<i64>) -> Option<DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ListFilter, cwd_matches, list_sessions, resolve, split_agent_ref};
+    use super::{ListFilter, cwd_matches, list_sessions, resolve, split_agent_ref, yaml_scalar};
     use crate::homes::Homes;
     use crate::model::Agent;
     use crate::spawn::Transport;
@@ -1083,9 +1558,35 @@ mod tests {
         let (agent, rest) = split_agent_ref("opencode:ses_abc");
         assert_eq!(agent, Some(Agent::OpenCode));
         assert_eq!(rest, "ses_abc");
+        let (agent, rest) = split_agent_ref("gemini:latest");
+        assert_eq!(agent, Some(Agent::Gemini));
+        assert_eq!(rest, "latest");
+        let (agent, rest) = split_agent_ref("copilot:abc");
+        assert_eq!(agent, Some(Agent::Copilot));
+        assert_eq!(rest, "abc");
         let (agent, rest) = split_agent_ref("disaster recovery");
         assert_eq!(agent, None);
         assert_eq!(rest, "disaster recovery");
+    }
+
+    #[test]
+    fn decodes_yaml_scalars() {
+        assert_eq!(yaml_scalar("/tmp/plain"), "/tmp/plain");
+        assert_eq!(yaml_scalar("\"/tmp/quoted cwd\""), "/tmp/quoted cwd");
+        assert_eq!(yaml_scalar("'Return JSON: {}'"), "Return JSON: {}");
+        assert_eq!(yaml_scalar("'it''s quoted'"), "it's quoted");
+        assert_eq!(yaml_scalar("\"say \\\"hi\\\"\\n\\t\""), "say \"hi\"\n\t");
+        assert_eq!(yaml_scalar("\"trailing\\\""), "trailing\\");
+        assert_eq!(yaml_scalar("\"caf\\u00E9\""), "café");
+        assert_eq!(yaml_scalar("\"\\x41\\U0001F600\""), "A😀");
+        assert_eq!(yaml_scalar("\"\\u00\""), "\\u00");
+        assert_eq!(yaml_scalar("\"\\U12\""), "\\U12");
+        assert_eq!(yaml_scalar("\"\\xG\""), "\\xG");
+        assert_eq!(yaml_scalar("\"\\uD800\""), "\\uD800");
+        assert_eq!(
+            yaml_scalar("\"\\r\\b\\f\\a\\e\\v\\0\\ /\\/\""),
+            "\r\u{0008}\u{000c}\u{0007}\u{001b}\u{000b}\0 //"
+        );
     }
 
     #[test]
@@ -1632,5 +2133,446 @@ mod tests {
         let mut permissions = fs::metadata(&desktop).unwrap().permissions();
         permissions.set_mode(0o644);
         fs::set_permissions(&desktop, permissions).unwrap();
+    }
+
+    #[test]
+    fn discovers_gemini_json_and_jsonl_and_skips_logs() {
+        let directory = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(directory.path());
+        let chats = homes.gemini.join("tmp").join("abc123hash").join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        fs::write(
+            chats.join("session-2026-01-12T02-48-bddd4c16.json"),
+            json!({
+                "sessionId": "bddd4c16-a97d-4639-b5cc-e276075dda32",
+                "projectHash": "abc123hash",
+                "startTime": "2026-01-12T02:49:11.948Z",
+                "lastUpdated": "2026-01-12T02:52:11.722Z",
+                "messages": [
+                    {"type": "info", "content": "login"},
+                    {"type": "user", "content": "run the gemini matrix"}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            chats.join("session-jsonl.jsonl"),
+            r#"{"sessionId":"55555555-5555-4555-8555-555555555555","cwd":"/tmp/gemini","model":"gemini-2.5-pro"}
+{"type":"user","content":"jsonl user turn"}
+{"type":"gemini","content":"jsonl assistant"}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            homes
+                .gemini
+                .join("tmp")
+                .join("abc123hash")
+                .join("logs.json"),
+            json!([{"sessionId": "should-not-list", "type": "user", "message": "nope"}])
+                .to_string(),
+        )
+        .unwrap();
+        fs::write(chats.join("not-json.txt"), "ignore").unwrap();
+        fs::write(chats.join("broken.json"), "not-json").unwrap();
+        let checkpoints = homes
+            .gemini
+            .join("tmp")
+            .join("abc123hash")
+            .join("checkpoints");
+        fs::create_dir_all(&checkpoints).unwrap();
+        fs::write(
+            checkpoints.join("outside-chats.json"),
+            json!({
+                "sessionId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                "messages": [{"type": "user", "content": "not under chats"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            chats.join("invalid-id.json"),
+            json!({
+                "sessionId": "-leading-dash",
+                "messages": [{"type": "user", "content": "bad id"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            chats.join("title-only.json"),
+            json!({
+                "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "title": "from title field",
+                "projectPath": "/tmp/from-project",
+                "lastUpdated": 1_700_000_000_000i64
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            chats.join("older-dup.json"),
+            json!({
+                "sessionId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "lastUpdated": "2026-01-01T00:00:00Z",
+                "messages": [{"type": "user", "content": "older dup"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            chats.join("newer-dup.json"),
+            json!({
+                "sessionId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "lastUpdated": "2026-03-01T00:00:00Z",
+                "messages": [{"type": "user", "content": "newer dup"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            chats.join("nested-and-empty.jsonl"),
+            r#"{"session_id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd"}
+{"type":"user","content":"   "}
+{"type":"user","content":{"text":"from nested text"}}
+not-json
+"#,
+        )
+        .unwrap();
+        fs::write(
+            chats.join("message-key.jsonl"),
+            r#"{"id":"ffffffff-ffff-4fff-8fff-ffffffffffff"}
+{"role":"user","message":"from message key"}
+{"type":"user","content":{"text":"   "}}
+{"type":"user"}
+{"type":"user","content":{"other":true}}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            chats.join("object-as-jsonl.json"),
+            r#"{"sessionId":"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"}
+{"type":"user","content":"json object file is jsonl"}
+"#,
+        )
+        .unwrap();
+
+        let sessions = list_sessions(
+            &homes,
+            &ListFilter {
+                agent: Some(Agent::Gemini),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(sessions.len(), 7);
+        let json = sessions
+            .iter()
+            .find(|session| session.session_id == "bddd4c16-a97d-4639-b5cc-e276075dda32")
+            .unwrap();
+        assert_eq!(json.title.as_deref(), Some("run the gemini matrix"));
+        assert_eq!(json.origin.as_deref(), Some("gemini"));
+        assert!(!json.live);
+        let jsonl = sessions
+            .iter()
+            .find(|session| session.session_id == "55555555-5555-4555-8555-555555555555")
+            .unwrap();
+        assert_eq!(jsonl.cwd.as_deref(), Some("/tmp/gemini"));
+        assert_eq!(jsonl.model.as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(jsonl.title.as_deref(), Some("jsonl user turn"));
+        let titled = sessions
+            .iter()
+            .find(|session| session.session_id == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .unwrap();
+        assert_eq!(titled.title.as_deref(), Some("from title field"));
+        assert_eq!(titled.cwd.as_deref(), Some("/tmp/from-project"));
+        assert!(titled.last_activity_at.is_some());
+        let dup = sessions
+            .iter()
+            .find(|session| session.session_id == "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+            .unwrap();
+        assert_eq!(dup.title.as_deref(), Some("newer dup"));
+        let nested = sessions
+            .iter()
+            .find(|session| session.session_id == "dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+            .unwrap();
+        assert_eq!(nested.title.as_deref(), Some("from nested text"));
+        let message_key = sessions
+            .iter()
+            .find(|session| session.session_id == "ffffffff-ffff-4fff-8fff-ffffffffffff")
+            .unwrap();
+        assert_eq!(message_key.title.as_deref(), Some("from message key"));
+        let recovered = sessions
+            .iter()
+            .find(|session| session.session_id == "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
+            .unwrap();
+        assert_eq!(
+            recovered.title.as_deref(),
+            Some("json object file is jsonl")
+        );
+        assert!(
+            !sessions
+                .iter()
+                .any(|session| session.session_id.contains("leading")
+                    || session.session_id.starts_with("ccc"))
+        );
+    }
+
+    #[test]
+    fn discovers_copilot_cli_and_skips_autopilot() {
+        let directory = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(directory.path());
+        let cli_id = "7167c730-5662-49bd-9d80-8a206275968e";
+        let cloud_id = "066af29d-a95a-4389-9220-87ba5438c2bf";
+        let cli = homes.copilot.join("session-state").join(cli_id);
+        fs::create_dir_all(&cli).unwrap();
+        fs::write(
+            cli.join("workspace.yaml"),
+            "id: 7167c730-5662-49bd-9d80-8a206275968e\ncwd: /tmp/copilot-cli\nclient_name: github/cli\nname: Return JSON {}\nupdated_at: 2026-08-29T07:51:40.622Z\n",
+        )
+        .unwrap();
+        fs::write(
+            cli.join("events.jsonl"),
+            r#"{"type":"session.start","data":{"sessionId":"7167c730-5662-49bd-9d80-8a206275968e","context":{"cwd":"/tmp/copilot-cli"}}}
+{"type":"user.message","data":{"content":"Return JSON {}"}}
+{"type":"assistant.message","data":{"content":"{}","toolRequests":[{"name":"view"}]}}
+"#,
+        )
+        .unwrap();
+        let cloud = homes.copilot.join("session-state").join(cloud_id);
+        fs::create_dir_all(&cloud).unwrap();
+        fs::write(
+            cloud.join("workspace.yaml"),
+            "id: 066af29d-a95a-4389-9220-87ba5438c2bf\ncwd: /\nclient_name: github/autopilot\n",
+        )
+        .unwrap();
+        fs::write(
+            cloud.join("events.jsonl"),
+            r#"{"type":"user.message","data":{"content":"cloud should stay hidden"}}
+"#,
+        )
+        .unwrap();
+        fs::write(homes.copilot.join("session-state").join("not-a-dir"), "x").unwrap();
+        fs::create_dir_all(homes.copilot.join("session-state").join("-badid")).unwrap();
+        fs::write(
+            homes
+                .copilot
+                .join("session-state")
+                .join("-badid")
+                .join("events.jsonl"),
+            r#"{"type":"user.message","data":{"content":"invalid id"}}
+"#,
+        )
+        .unwrap();
+        fs::create_dir_all(
+            homes
+                .copilot
+                .join("session-state")
+                .join("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        )
+        .unwrap();
+        let events_only = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let events_dir = homes.copilot.join("session-state").join(events_only);
+        fs::create_dir_all(&events_dir).unwrap();
+        fs::write(
+            events_dir.join("workspace.yaml"),
+            "# comment\n\ncwd: /tmp/from-events\nclient_name: github/cli\nnot-a-pair\n",
+        )
+        .unwrap();
+        fs::write(
+            events_dir.join("events.jsonl"),
+            r#"not-json
+{"type":"assistant.message","data":{"content":"skip"}}
+{"type":"user.message","data":{"content":"   "}}
+{"type":"user.message","data":{"content":"title from events.jsonl"}}
+"#,
+        )
+        .unwrap();
+        let quoted_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+        let quoted_dir = homes.copilot.join("session-state").join(quoted_id);
+        fs::create_dir_all(&quoted_dir).unwrap();
+        fs::write(
+            quoted_dir.join("workspace.yaml"),
+            "cwd: \"/tmp/quoted cwd\"\nclient_name: github/cli\nname: 'Return JSON: {}'\nupdated_at: \"2026-08-29T07:51:40.622Z\"\n",
+        )
+        .unwrap();
+        fs::write(
+            quoted_dir.join("events.jsonl"),
+            r#"{"type":"user.message","data":{"content":"quoted yaml scalars"}}
+"#,
+        )
+        .unwrap();
+        let db = homes.copilot.join("session-store.db");
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute(
+                "CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY,
+                    cwd TEXT,
+                    repository TEXT,
+                    host_type TEXT,
+                    branch TEXT,
+                    summary TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                )",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO sessions (id, cwd, branch, summary, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    cli_id,
+                    "/tmp/copilot-cli",
+                    "main",
+                    "Return JSON {}",
+                    "2026-08-29T07:51:40.622Z"
+                ],
+            )
+            .unwrap();
+
+        let sessions = list_sessions(
+            &homes,
+            &ListFilter {
+                agent: Some(Agent::Copilot),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(sessions.len(), 3);
+        let cli = sessions
+            .iter()
+            .find(|session| session.session_id == cli_id)
+            .unwrap();
+        assert_eq!(cli.cwd.as_deref(), Some("/tmp/copilot-cli"));
+        assert_eq!(cli.branch.as_deref(), Some("main"));
+        assert_eq!(cli.title.as_deref(), Some("Return JSON {}"));
+        assert_eq!(cli.origin.as_deref(), Some("copilot"));
+        assert!(!cli.live);
+        let from_events = sessions
+            .iter()
+            .find(|session| session.session_id == events_only)
+            .unwrap();
+        assert_eq!(from_events.cwd.as_deref(), Some("/tmp/from-events"));
+        assert_eq!(
+            from_events.title.as_deref(),
+            Some("title from events.jsonl")
+        );
+        assert!(from_events.last_activity_at.is_some());
+        let quoted = sessions
+            .iter()
+            .find(|session| session.session_id == quoted_id)
+            .unwrap();
+        assert_eq!(quoted.cwd.as_deref(), Some("/tmp/quoted cwd"));
+        assert_eq!(quoted.title.as_deref(), Some("Return JSON: {}"));
+        assert!(quoted.last_activity_at.is_some());
+
+        let store_miss = Homes::isolated(tempfile::tempdir().unwrap().path());
+        let miss_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+        let miss_dir = store_miss.copilot.join("session-state").join(miss_id);
+        fs::create_dir_all(&miss_dir).unwrap();
+        fs::write(
+            miss_dir.join("events.jsonl"),
+            r#"{"type":"user.message","data":{"content":"no store row"}}
+"#,
+        )
+        .unwrap();
+        rusqlite::Connection::open(store_miss.copilot.join("session-store.db")).unwrap();
+        let query_fail = Homes::isolated(tempfile::tempdir().unwrap().path());
+        let fail_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+        let fail_dir = query_fail.copilot.join("session-state").join(fail_id);
+        fs::create_dir_all(&fail_dir).unwrap();
+        fs::write(
+            fail_dir.join("events.jsonl"),
+            r#"{"type":"user.message","data":{"content":"store query fails"}}
+"#,
+        )
+        .unwrap();
+        let fail_db =
+            rusqlite::Connection::open(query_fail.copilot.join("session-store.db")).unwrap();
+        fail_db
+            .execute_batch(
+                "CREATE TABLE sessions (id TEXT);
+                 CREATE TRIGGER sessions_block BEFORE SELECT ON sessions BEGIN
+                   SELECT RAISE(FAIL, 'blocked');
+                 END;",
+            )
+            .ok();
+        let failed_store = list_sessions(
+            &query_fail,
+            &ListFilter {
+                agent: Some(Agent::Copilot),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            failed_store
+                .iter()
+                .any(|session| session.session_id == fail_id)
+        );
+        let untitled = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+        let untitled_dir = store_miss.copilot.join("session-state").join(untitled);
+        fs::create_dir_all(&untitled_dir).unwrap();
+        fs::write(
+            untitled_dir.join("events.jsonl"),
+            r#"{"type":"assistant.message","data":{"content":"no user turn"}}
+{"type":"user.message","data":{}}
+"#,
+        )
+        .unwrap();
+        let listed = list_sessions(
+            &store_miss,
+            &ListFilter {
+                agent: Some(Agent::Copilot),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().any(|session| session.session_id == miss_id
+            && session.title.as_deref() == Some("no store row")));
+        assert!(
+            listed
+                .iter()
+                .any(|session| session.session_id == untitled && session.title.is_none())
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let blocked = Homes::isolated(tempfile::tempdir().unwrap().path());
+            let root = blocked.copilot.join("session-state");
+            fs::create_dir_all(&root).unwrap();
+            let mut permissions = fs::metadata(&root).unwrap().permissions();
+            permissions.set_mode(0o000);
+            fs::set_permissions(&root, permissions).unwrap();
+            assert!(
+                list_sessions(
+                    &blocked,
+                    &ListFilter {
+                        agent: Some(Agent::Copilot),
+                        include_archived: true,
+                        limit: 0,
+                        ..ListFilter::default()
+                    },
+                )
+                .is_err()
+            );
+            let mut permissions = fs::metadata(&root).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&root, permissions).unwrap();
+        }
     }
 }

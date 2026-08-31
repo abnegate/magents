@@ -28,9 +28,11 @@ const IDENTITY_ENV: &[&str] = &[
     "CODEX_SESSION_ID",
     "CODEX_THREAD_ID",
     "COMPOSER_SESSION_ID",
+    "COPILOT_SESSION_ID",
     "CURSOR_AGENT",
     "CURSOR_PROJECT_DIR",
     "CURSOR_SESSION_ID",
+    "GEMINI_SESSION_ID",
     "GROK_SESSION_ID",
     "OPENCODE_DIRECTORY",
     "OPENCODE_SERVER",
@@ -41,10 +43,12 @@ const IDENTITY_ENV: &[&str] = &[
 const HOME_ENV: &[&str] = &[
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
+    "COPILOT_HOME",
     "CURSOR_APP_SUPPORT",
     "CURSOR_CONFIG_DIR",
     "CURSOR_DATA_DIR",
     "CURSOR_HOME",
+    "GEMINI_CLI_HOME",
     "GROK_HOME",
     "MAGENTS_HOME",
     "OPENCODE_DATA",
@@ -741,6 +745,34 @@ fn launch_new(
                 Transport::OpenCodeRun,
             ))
         }
+        Agent::Gemini => {
+            let session_id = Uuid::new_v4().to_string();
+            let mut command = agent_command(homes, agent, cwd);
+            command
+                .arg("--output-format")
+                .arg("stream-json")
+                .arg("--session-id")
+                .arg(&session_id);
+            Ok((
+                launch(command, agent, message, reporter)?,
+                Some(session_id),
+                Transport::GeminiStream,
+            ))
+        }
+        Agent::Copilot => {
+            let session_id = Uuid::new_v4().to_string();
+            let mut command = agent_command(homes, agent, cwd);
+            command
+                .arg("--output-format")
+                .arg("json")
+                .arg("--session-id")
+                .arg(&session_id);
+            Ok((
+                launch(command, agent, message, reporter)?,
+                Some(session_id),
+                Transport::CopilotJson,
+            ))
+        }
     }
 }
 
@@ -809,6 +841,21 @@ fn launch_resume(
                 .arg(session_id);
             Transport::OpenCodeRun
         }
+        Agent::Gemini => {
+            command
+                .arg("--resume")
+                .arg(session_id)
+                .arg("--output-format")
+                .arg("stream-json");
+            Transport::GeminiStream
+        }
+        Agent::Copilot => {
+            command
+                .arg(format!("--resume={session_id}"))
+                .arg("--output-format")
+                .arg("json");
+            Transport::CopilotJson
+        }
     };
     Ok((
         launch(command, agent, message, reporter)?,
@@ -821,7 +868,9 @@ fn agent_command(homes: &Homes, agent: Agent, cwd: &Path) -> Command {
     let (variable, fallback) = match agent {
         Agent::Claude => ("MAGENTS_CLAUDE_BIN", "claude"),
         Agent::Codex => ("MAGENTS_CODEX_BIN", "codex"),
+        Agent::Copilot => ("MAGENTS_COPILOT_BIN", "copilot"),
         Agent::Cursor => ("MAGENTS_CURSOR_BIN", "cursor-agent"),
+        Agent::Gemini => ("MAGENTS_GEMINI_BIN", "gemini"),
         Agent::Grok => ("MAGENTS_GROK_BIN", "grok"),
         Agent::OpenCode => ("MAGENTS_OPENCODE_BIN", "opencode"),
     };
@@ -856,6 +905,12 @@ fn isolate_environment(command: &mut Command, homes: &Homes, agent: Agent) {
             if let Some(config) = homes.opencode_config.parent() {
                 command.env("XDG_CONFIG_HOME", config);
             }
+        }
+        Agent::Gemini => {
+            command.env("GEMINI_CLI_HOME", &homes.gemini);
+        }
+        Agent::Copilot => {
+            command.env("COPILOT_HOME", &homes.copilot);
         }
     }
 }
@@ -1044,6 +1099,22 @@ fn parse_start(agent: Agent, line: &str) -> Option<String> {
                 return None;
             }
             value.get("sessionID")?.as_str()?
+        }
+        Agent::Gemini => {
+            if value.get("type")?.as_str()? != "init" {
+                return None;
+            }
+            value.get("session_id")?.as_str()?
+        }
+        Agent::Copilot => {
+            if value.get("type")?.as_str()? != "session.start" {
+                return None;
+            }
+            value
+                .pointer("/data/sessionId")
+                .or_else(|| value.get("sessionId"))
+                .or_else(|| value.get("session_id"))
+                .and_then(Value::as_str)?
         }
     };
     valid_session_id(agent, id).then(|| id.to_string())
@@ -1339,7 +1410,9 @@ fn resume_marker(agent: Agent) -> &'static str {
     match agent {
         Agent::Claude => "claude-cli",
         Agent::Codex => "codex-exec",
+        Agent::Copilot => "copilot-cli",
         Agent::Cursor => "cursor-cli",
+        Agent::Gemini => "gemini-cli",
         Agent::Grok => "grok-single",
         Agent::OpenCode => "opencode-run",
     }
@@ -1392,14 +1465,20 @@ mod tests {
         "CLAUDE_SESSION_ID",
         "CODEX_HOME",
         "CODEX_THREAD_ID",
+        "COPILOT_HOME",
+        "COPILOT_SESSION_ID",
         "CURSOR_CONFIG_DIR",
         "CURSOR_DATA_DIR",
         "CURSOR_SESSION_ID",
+        "GEMINI_CLI_HOME",
+        "GEMINI_SESSION_ID",
         "GROK_HOME",
         "GROK_SESSION_ID",
         "MAGENTS_CLAUDE_BIN",
         "MAGENTS_CODEX_BIN",
+        "MAGENTS_COPILOT_BIN",
         "MAGENTS_CURSOR_BIN",
+        "MAGENTS_GEMINI_BIN",
         "MAGENTS_GROK_BIN",
         "MAGENTS_HANDSHAKE_TIMEOUT_MS",
         "MAGENTS_OPENCODE_BIN",
@@ -1427,15 +1506,20 @@ next=''
 for argument in "$@"; do
     if [ "$next" = 'session' ]; then session="$argument"; next=''; fi
     if [ "$argument" = '--session-id' ] || [ "$argument" = '--resume' ]; then next='session'; fi
+    case "$argument" in
+        --resume=*) session="${argument#--resume=}" ;;
+    esac
 done
 printf '%s\n' "$@" > "$MAGENTS_TEST_ARGS"
-printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$CLAUDE_CONFIG_DIR" "$CODEX_HOME" "$CURSOR_CONFIG_DIR" "$CURSOR_DATA_DIR" "$GROK_HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$MAGENTS_HOME" > "$MAGENTS_TEST_ENV"
+printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$CLAUDE_CONFIG_DIR" "$CODEX_HOME" "$CURSOR_CONFIG_DIR" "$CURSOR_DATA_DIR" "$GROK_HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$MAGENTS_HOME" "$GEMINI_CLI_HOME" "$COPILOT_HOME" > "$MAGENTS_TEST_ENV"
 cat > "$MAGENTS_TEST_STDIN"
 case "$MAGENTS_TEST_AGENT" in
     claude|cursor) printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$session" ;;
     codex) printf '%s\n' '{"type":"thread.started","thread_id":"22222222-2222-4222-8222-222222222222"}' ;;
     grok) printf '{"method":"session/update","params":{"sessionId":"%s"}}\n' "$session" ;;
     opencode) printf '%s\n' '{"type":"step_start","sessionID":"ses_fixture_444"}' ;;
+    gemini) printf '{"type":"init","session_id":"%s"}\n' "$session" ;;
+    copilot) printf '{"type":"session.start","data":{"sessionId":"%s"}}\n' "$session" ;;
 esac
 "#;
 
@@ -1495,6 +1579,8 @@ esac
             std::env::set_var("CURSOR_SESSION_ID", "foreign-cursor");
             std::env::set_var("GROK_SESSION_ID", "foreign-grok");
             std::env::set_var("OPENCODE_SESSION_ID", "foreign-opencode");
+            std::env::set_var("GEMINI_SESSION_ID", "foreign-gemini");
+            std::env::set_var("COPILOT_SESSION_ID", "foreign-copilot");
         }
         let secret = "fixture prompt SECRET-5b9d";
         for (agent, variable, expected, transport) in [
@@ -1528,6 +1614,18 @@ esac
                 "run\n--format\njson",
                 Transport::OpenCodeRun,
             ),
+            (
+                Agent::Gemini,
+                "MAGENTS_GEMINI_BIN",
+                "--output-format\nstream-json",
+                Transport::GeminiStream,
+            ),
+            (
+                Agent::Copilot,
+                "MAGENTS_COPILOT_BIN",
+                "--output-format\njson",
+                Transport::CopilotJson,
+            ),
         ] {
             unsafe {
                 std::env::set_var(variable, &binary);
@@ -1554,7 +1652,7 @@ esac
             assert_eq!(fs::read_to_string(&stdin).unwrap(), secret);
             let values = fs::read_to_string(&environment).unwrap();
             let values = values.trim().split('|').collect::<Vec<_>>();
-            assert_eq!(values.len(), 8);
+            assert_eq!(values.len(), 10);
             assert_eq!(values[7], homes.magents.to_string_lossy());
             let expected = match agent {
                 Agent::Claude => vec![(0, homes.claude.as_path())],
@@ -1568,8 +1666,13 @@ esac
                     (5, homes.opencode_data_home()),
                     (6, homes.opencode_config.parent().unwrap()),
                 ],
+                Agent::Gemini => vec![(8, homes.gemini.as_path())],
+                Agent::Copilot => vec![(9, homes.copilot.as_path())],
             };
-            for (index, value) in values[..7].iter().enumerate() {
+            for (index, value) in values.iter().enumerate() {
+                if index == 7 {
+                    continue;
+                }
                 let target = expected.iter().find(|(target, _)| *target == index);
                 match target {
                     Some((_, path)) => assert_eq!(*value, path.to_string_lossy()),
@@ -1578,7 +1681,7 @@ esac
             }
         }
         let records = records(&homes).unwrap();
-        assert_eq!(records.len(), 5);
+        assert_eq!(records.len(), 7);
         assert!(records.iter().all(|record| record.session().is_some()));
     }
 
@@ -1624,6 +1727,34 @@ esac
             .as_deref(),
             Some("ses_o1")
         );
+        assert_eq!(
+            parse_start(Agent::Gemini, r#"{"type":"init","session_id":"gm1"}"#).as_deref(),
+            Some("gm1")
+        );
+        assert_eq!(
+            parse_start(
+                Agent::Copilot,
+                r#"{"type":"session.start","data":{"sessionId":"cp1"}}"#
+            )
+            .as_deref(),
+            Some("cp1")
+        );
+        assert_eq!(
+            parse_start(
+                Agent::Copilot,
+                r#"{"type":"session.start","sessionId":"cp-top"}"#
+            )
+            .as_deref(),
+            Some("cp-top")
+        );
+        assert_eq!(
+            parse_start(
+                Agent::Copilot,
+                r#"{"type":"session.start","session_id":"cp-snake"}"#
+            )
+            .as_deref(),
+            Some("cp-snake")
+        );
         assert!(parse_start(Agent::Codex, r#"{"thread_id":"not-started"}"#).is_none());
         assert!(
             parse_start(
@@ -1650,6 +1781,14 @@ esac
             .is_none()
         );
         assert!(parse_start(Agent::OpenCode, r#"{"sessionID":"bad id"}"#).is_none());
+        assert!(parse_start(Agent::Gemini, r#"{"type":"message","session_id":"gm1"}"#).is_none());
+        assert!(
+            parse_start(
+                Agent::Copilot,
+                r#"{"type":"user.message","data":{"sessionId":"cp1"}}"#
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1719,6 +1858,18 @@ esac
                 "MAGENTS_OPENCODE_BIN",
                 "ses_fixture_444",
                 "--session\nses_fixture_444",
+            ),
+            (
+                Agent::Gemini,
+                "MAGENTS_GEMINI_BIN",
+                "gemini-resume-1",
+                "--resume\ngemini-resume-1",
+            ),
+            (
+                Agent::Copilot,
+                "MAGENTS_COPILOT_BIN",
+                "copilot-resume-1",
+                "--resume=copilot-resume-1",
             ),
         ] {
             unsafe {
@@ -1812,7 +1963,7 @@ esac
         let done = directory.path().join("done");
         test_env::write_executable(
             &binary,
-            "cat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"codex-valid\"}'\nsleep 0.05\nprintf done > \"$MAGENTS_TEST_DONE\"",
+            "cat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"codex-valid\"}'\nsleep 5\nprintf done > \"$MAGENTS_TEST_DONE\"",
         );
         unsafe {
             std::env::set_var("MAGENTS_CODEX_BIN", &binary);
@@ -2578,7 +2729,9 @@ sleep 5
     fn resume_markers_are_stable() {
         assert_eq!(resume_marker(Agent::Claude), "claude-cli");
         assert_eq!(resume_marker(Agent::Codex), "codex-exec");
+        assert_eq!(resume_marker(Agent::Copilot), "copilot-cli");
         assert_eq!(resume_marker(Agent::Cursor), "cursor-cli");
+        assert_eq!(resume_marker(Agent::Gemini), "gemini-cli");
         assert_eq!(resume_marker(Agent::Grok), "grok-single");
         assert_eq!(resume_marker(Agent::OpenCode), "opencode-run");
     }

@@ -7,7 +7,9 @@ use std::path::PathBuf;
 pub enum Agent {
     Claude,
     Codex,
+    Copilot,
     Cursor,
+    Gemini,
     Grok,
     OpenCode,
 }
@@ -17,7 +19,9 @@ impl Agent {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Copilot => "copilot",
             Self::Cursor => "cursor",
+            Self::Gemini => "gemini",
             Self::Grok => "grok",
             Self::OpenCode => "opencode",
         }
@@ -27,7 +31,9 @@ impl Agent {
         match value.trim().to_ascii_lowercase().as_str() {
             "claude" | "claude-code" | "ccd" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
+            "copilot" | "github-copilot" | "gh-copilot" => Some(Self::Copilot),
             "cursor" | "cursor-ide" | "cursor-agent" => Some(Self::Cursor),
+            "gemini" | "gemini-cli" => Some(Self::Gemini),
             "grok" | "grok-code" => Some(Self::Grok),
             "opencode" | "open-code" | "oc" => Some(Self::OpenCode),
             _ => None,
@@ -53,7 +59,12 @@ mod tests {
     fn parses_all_harness_aliases() {
         assert_eq!(Agent::parse("claude-code"), Some(Agent::Claude));
         assert_eq!(Agent::parse("codex"), Some(Agent::Codex));
+        assert_eq!(Agent::parse("github-copilot"), Some(Agent::Copilot));
+        assert_eq!(Agent::parse("gh-copilot"), Some(Agent::Copilot));
+        assert_eq!(Agent::parse("copilot"), Some(Agent::Copilot));
         assert_eq!(Agent::parse("cursor-agent"), Some(Agent::Cursor));
+        assert_eq!(Agent::parse("gemini-cli"), Some(Agent::Gemini));
+        assert_eq!(Agent::parse("gemini"), Some(Agent::Gemini));
         assert_eq!(Agent::parse("grok-code"), Some(Agent::Grok));
         assert_eq!(Agent::parse("open-code"), Some(Agent::OpenCode));
         assert_eq!(Agent::parse("ccd"), Some(Agent::Claude));
@@ -86,10 +97,12 @@ mod caller_tests {
         "CLAUDE_CODE_MESSAGING_SOCKET",
         "CLAUDE_PROJECT_DIR",
         "CLAUDE_SESSION_ID",
+        "COPILOT_SESSION_ID",
         "CURSOR_SESSION_ID",
         "CURSOR_PROJECT_DIR",
         "CURSOR_AGENT",
         "COMPOSER_SESSION_ID",
+        "GEMINI_SESSION_ID",
         "OPENCODE_SESSION_ID",
         "OPENCODE_DIRECTORY",
         "OPENCODE_SERVER",
@@ -188,6 +201,19 @@ mod caller_tests {
         let caller = Caller::from_env();
         assert_eq!(caller.agent, Some(Agent::Codex));
         assert_eq!(caller.session_id.as_deref(), Some("cx"));
+        unsafe { std::env::remove_var("CODEX_HOME") };
+        unsafe { std::env::remove_var("CODEX_SESSION_ID") };
+
+        unsafe { std::env::set_var("GEMINI_SESSION_ID", "gm1") };
+        let caller = Caller::from_env();
+        assert_eq!(caller.agent, Some(Agent::Gemini));
+        assert_eq!(caller.session_id.as_deref(), Some("gm1"));
+        unsafe { std::env::remove_var("GEMINI_SESSION_ID") };
+
+        unsafe { std::env::set_var("COPILOT_SESSION_ID", "cp1") };
+        let caller = Caller::from_env();
+        assert_eq!(caller.agent, Some(Agent::Copilot));
+        assert_eq!(caller.session_id.as_deref(), Some("cp1"));
     }
 }
 
@@ -476,6 +502,22 @@ impl Caller {
                 session_id: std::env::var("CODEX_THREAD_ID")
                     .ok()
                     .or_else(|| std::env::var("CODEX_SESSION_ID").ok()),
+            };
+        }
+        if let Ok(session_id) = std::env::var("GEMINI_SESSION_ID")
+            && !session_id.is_empty()
+        {
+            return Self {
+                agent: Some(Agent::Gemini),
+                session_id: Some(session_id),
+            };
+        }
+        if let Ok(session_id) = std::env::var("COPILOT_SESSION_ID")
+            && !session_id.is_empty()
+        {
+            return Self {
+                agent: Some(Agent::Copilot),
+                session_id: Some(session_id),
             };
         }
         Self {

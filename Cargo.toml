@@ -2,7 +2,7 @@
 name = "magents"
 version = "0.8.0"
 edition = "2024"
-description = "Mates + agents: a shared session bus for Claude Code, Codex, Cursor, Grok, and OpenCode"
+description = "Mates + agents: a shared session bus for Claude Code, Codex, Copilot, Cursor, Gemini, Grok, and OpenCode"
 license = "MIT"
 repository = "https://github.com/abnegate/magents"
 readme = "README.md"

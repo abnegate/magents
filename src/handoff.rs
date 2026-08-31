@@ -171,7 +171,9 @@ mod tests {
         "CLAUDE_PROJECT_DIR",
         "CODEX_HOME",
         "CODEX_THREAD_ID",
+        "COPILOT_SESSION_ID",
         "CURSOR_SESSION_ID",
+        "GEMINI_SESSION_ID",
         "OPENCODE_SESSION_ID",
     ];
 

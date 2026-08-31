@@ -131,6 +131,8 @@ pub fn read_session(session: &Session, limit: usize) -> Result<Transcript> {
         Agent::Codex => read_codex(path)?,
         Agent::Cursor => read_cursor(path)?,
         Agent::OpenCode => read_opencode(session, path)?,
+        Agent::Gemini => read_gemini(path)?,
+        Agent::Copilot => read_copilot(path)?,
     };
     Ok(compact(session.clone(), turns, limit))
 }
@@ -438,6 +440,141 @@ fn unwrap_cursor_user(text: &str) -> String {
     text.to_string()
 }
 
+fn read_gemini(path: &Path) -> Result<Vec<Turn>> {
+    if let Ok(raw) = std::fs::read_to_string(path)
+        && let Ok(value) = serde_json::from_str::<Value>(&raw)
+    {
+        return Ok(gemini_turns_from_messages(value.get("messages")));
+    }
+    let mut turns = Vec::new();
+    for value in jsonl(path)? {
+        if let Some(turn) = gemini_turn(&value) {
+            turns.push(turn);
+        }
+    }
+    Ok(turns)
+}
+
+fn gemini_turns_from_messages(messages: Option<&Value>) -> Vec<Turn> {
+    let Some(items) = messages.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    items.iter().filter_map(gemini_turn).collect()
+}
+
+fn gemini_turn(value: &Value) -> Option<Turn> {
+    let kind = value
+        .get("type")
+        .or_else(|| value.get("role"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let role = match kind {
+        "user" => "user",
+        "gemini" | "model" | "assistant" => "assistant",
+        _ => return None,
+    };
+    let text = gemini_text(value);
+    let tools = gemini_tools(value);
+    if text.is_empty() && tools.is_empty() {
+        return None;
+    }
+    Some(Turn {
+        role: role.to_string(),
+        text,
+        tools,
+    })
+}
+
+fn gemini_text(value: &Value) -> String {
+    if let Some(text) = value.get("content").and_then(Value::as_str) {
+        return text.split_whitespace().collect::<Vec<_>>().join(" ");
+    }
+    if let Some(text) = value.get("message").and_then(Value::as_str) {
+        return text.split_whitespace().collect::<Vec<_>>().join(" ");
+    }
+    if let Some(text) = value
+        .get("content")
+        .and_then(|content| content.get("text"))
+        .and_then(Value::as_str)
+    {
+        return text.split_whitespace().collect::<Vec<_>>().join(" ");
+    }
+    let (text, _) = content_parts(value.get("content"));
+    text
+}
+
+fn gemini_tools(value: &Value) -> Vec<String> {
+    let mut tools = Vec::new();
+    if let Some(name) = value
+        .get("tool")
+        .or_else(|| value.get("toolName"))
+        .or_else(|| value.pointer("/tool_call/name"))
+        .and_then(Value::as_str)
+    {
+        tools.push(name.to_string());
+    }
+    if let Some(items) = value.get("toolCalls").and_then(Value::as_array) {
+        for item in items {
+            if let Some(name) = item.get("name").and_then(Value::as_str) {
+                tools.push(name.to_string());
+            }
+        }
+    }
+    tools
+}
+
+fn read_copilot(path: &Path) -> Result<Vec<Turn>> {
+    let mut turns = Vec::new();
+    for value in jsonl(path)? {
+        let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
+        let data = value.get("data").unwrap_or(&Value::Null);
+        match kind {
+            "user.message" => {
+                let text = data
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !text.is_empty() {
+                    turns.push(Turn {
+                        role: "user".into(),
+                        text,
+                        tools: Vec::new(),
+                    });
+                }
+            }
+            "assistant.message" => {
+                let text = data
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let mut tools = Vec::new();
+                if let Some(requests) = data.get("toolRequests").and_then(Value::as_array) {
+                    for request in requests {
+                        if let Some(name) = request.get("name").and_then(Value::as_str) {
+                            tools.push(name.to_string());
+                        }
+                    }
+                }
+                if !text.is_empty() || !tools.is_empty() {
+                    turns.push(Turn {
+                        role: "assistant".into(),
+                        text,
+                        tools,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(turns)
+}
+
 fn read_claude(path: &Path) -> Result<Vec<Turn>> {
     let mut turns = Vec::new();
     for value in jsonl(path)? {
@@ -711,10 +848,89 @@ mod tests {
         assert!(digest.turns.iter().any(|turn| turn.text.len() <= 283));
         let files = files_touched(&world.homes, "claude:disaster-recovery").unwrap();
         assert!(files.files.iter().any(|path| path == "src/lib.rs"));
+        let gemini = files_touched(&world.homes, "gemini:latest").unwrap();
+        assert!(gemini.files.iter().any(|path| path == "src/gemini.rs"));
+        let copilot = files_touched(&world.homes, "copilot:latest").unwrap();
+        assert!(copilot.files.iter().any(|path| path == "src/copilot.rs"));
         assert!(looks_like_path("src/lib.rs"));
         assert!(looks_like_path("/tmp/x.rs"));
         assert!(!looks_like_path("https://example.com/x.rs"));
         assert!(!looks_like_path("plain"));
+    }
+
+    #[test]
+    fn reads_gemini_and_copilot_layout_variants() {
+        let dir = tempfile::tempdir().unwrap();
+        let pretty = dir.path().join("pretty.json");
+        std::fs::write(
+            &pretty,
+            r#"{
+  "messages": [
+    {"type": "user", "content": "inspect src/pretty_gemini.rs"},
+    {"role": "model", "message": "model via message"},
+    {"type": "assistant", "content": {"text": "nested assistant"}},
+    {"type": "gemini", "content": [{"type": "text", "text": "parts"}], "tool": "Read", "toolCalls": [{"name": "Write"}]},
+    {"type": "info", "content": "skip"},
+    {"type": "user", "content": "   "},
+    {"type": "gemini", "tool_call": {"name": "Bash"}}
+  ]
+}"#,
+        )
+        .unwrap();
+        let turns = super::read_gemini(&pretty).unwrap();
+        assert!(turns.iter().any(|turn| turn.role == "user"));
+        assert!(
+            turns
+                .iter()
+                .any(|turn| turn.role == "assistant" && turn.text.contains("model via message"))
+        );
+        assert!(
+            turns
+                .iter()
+                .any(|turn| turn.text.contains("nested assistant"))
+        );
+        assert!(turns.iter().any(
+            |turn| turn.tools.contains(&"Read".into()) && turn.tools.contains(&"Write".into())
+        ));
+        assert!(
+            turns
+                .iter()
+                .any(|turn| turn.tools.contains(&"Bash".into()) && turn.text.is_empty())
+        );
+        assert!(super::read_gemini(&dir.path().join("missing.json")).is_err());
+        let no_messages = dir.path().join("empty-object.json");
+        std::fs::write(&no_messages, "{}").unwrap();
+        assert!(super::read_gemini(&no_messages).unwrap().is_empty());
+        let jsonl = dir.path().join("journal.jsonl");
+        std::fs::write(
+            &jsonl,
+            r#"{"sessionId":"x"}
+{"type":"user","content":"jsonl user"}
+{"type":"gemini","content":"jsonl assistant","toolName":"Grep"}
+"#,
+        )
+        .unwrap();
+        let jsonl_turns = super::read_gemini(&jsonl).unwrap();
+        assert_eq!(jsonl_turns.len(), 2);
+        assert_eq!(jsonl_turns[1].tools, vec!["Grep".to_string()]);
+
+        let events = dir.path().join("events.jsonl");
+        std::fs::write(
+            &events,
+            r#"{"type":"session.start","data":{}}
+{"type":"user.message","data":{"content":"   "}}
+{"type":"user.message","data":{"content":"copilot user"}}
+{"type":"assistant.message","data":{"content":"","toolRequests":[{"name":"view"},{"id":"skip"}]}}
+{"type":"assistant.message","data":{"content":"plain assistant"}}
+"#,
+        )
+        .unwrap();
+        let copilot = super::read_copilot(&events).unwrap();
+        assert_eq!(copilot.len(), 3);
+        assert_eq!(copilot[0].role, "user");
+        assert_eq!(copilot[1].tools, vec!["view".to_string()]);
+        assert!(copilot[1].text.is_empty());
+        assert_eq!(copilot[2].text, "plain assistant");
     }
 
     #[test]
@@ -941,7 +1157,9 @@ mod tests {
                  INSERT INTO part VALUES ('p1', 'm1', 1, '{\"type\":\"text\",\"text\":\"one\"}');
                  INSERT INTO part VALUES ('p2', 'm1', 2, '{\"type\":\"text\",\"text\":\"two\"}');
                  INSERT INTO part VALUES ('p3', 'm1', 3, '{\"type\":\"note\",\"text\":\"three\"}');
-                 INSERT INTO part VALUES ('p4', 'm1', 4, '{\"type\":\"tool_use\"}');",
+                 INSERT INTO part VALUES ('p4', 'm1', 4, '{\"type\":\"tool_use\"}');
+                 INSERT INTO part VALUES ('p5', 'm1', 5, '{\"type\":\"text\"}');
+                 INSERT INTO part VALUES ('p6', 'm1', 6, '{\"type\":\"note\"}');",
             )
             .unwrap();
         let turns = super::read_opencode_sqlite(&db, "ses_x").unwrap();

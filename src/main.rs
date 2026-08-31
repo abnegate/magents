@@ -12,7 +12,7 @@ use std::path::PathBuf;
 #[command(
     name = "magents",
     version,
-    about = "Mates + agents: shared session bus for Claude, Codex, Cursor, Grok, and OpenCode"
+    about = "Mates + agents: shared session bus for Claude, Codex, Copilot, Cursor, Gemini, Grok, and OpenCode"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -23,7 +23,7 @@ struct Cli {
 enum Command {
     /// Run the stdio MCP server
     Mcp,
-    /// List sessions across Claude, Codex, Cursor, Grok, and OpenCode
+    /// List sessions across Claude, Codex, Copilot, Cursor, Gemini, Grok, and OpenCode
     List {
         #[arg(long)]
         agent: Option<String>,
@@ -184,6 +184,10 @@ enum Command {
         cursor: bool,
         #[arg(long)]
         opencode: bool,
+        #[arg(long)]
+        gemini: bool,
+        #[arg(long)]
+        copilot: bool,
         #[arg(long)]
         all: bool,
     },
@@ -453,15 +457,20 @@ async fn main() -> anyhow::Result<()> {
             codex,
             cursor,
             opencode,
+            gemini,
+            copilot,
             all,
         }) => {
-            let notes = magents::install::install(
-                claude || all,
-                grok || all,
-                codex || all,
-                cursor || all,
-                opencode || all,
-            )?;
+            let notes = magents::install::install_spec(magents::install::InstallSpec {
+                claude: claude || all,
+                grok: grok || all,
+                codex: codex || all,
+                cursor: cursor || all,
+                opencode: opencode || all,
+                gemini: gemini || all,
+                copilot: copilot || all,
+                skip_missing: all,
+            })?;
             for note in notes {
                 println!("{note}");
             }
