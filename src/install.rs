@@ -51,6 +51,7 @@ pub fn install_spec(spec: InstallSpec) -> Result<Vec<String>> {
         spec.grok,
         spec.skip_missing,
         &mut notes,
+        "grok",
         || install_grok(&exe),
         Some(skill_path(
             dirs::home_dir().unwrap_or_default().join(".grok"),
@@ -60,6 +61,7 @@ pub fn install_spec(spec: InstallSpec) -> Result<Vec<String>> {
         spec.claude,
         spec.skip_missing,
         &mut notes,
+        "claude",
         || install_claude(&exe),
         Some(skill_path(
             dirs::home_dir().unwrap_or_default().join(".claude"),
@@ -69,6 +71,7 @@ pub fn install_spec(spec: InstallSpec) -> Result<Vec<String>> {
         spec.codex,
         spec.skip_missing,
         &mut notes,
+        "codex",
         || install_codex(&exe),
         None,
     )?;
@@ -76,6 +79,7 @@ pub fn install_spec(spec: InstallSpec) -> Result<Vec<String>> {
         spec.cursor,
         spec.skip_missing,
         &mut notes,
+        "cursor",
         || install_cursor(&exe),
         Some(skill_path(
             dirs::home_dir().unwrap_or_default().join(".cursor"),
@@ -85,6 +89,7 @@ pub fn install_spec(spec: InstallSpec) -> Result<Vec<String>> {
         spec.opencode,
         spec.skip_missing,
         &mut notes,
+        "opencode",
         || install_opencode(&exe),
         Some(skill_path(
             dirs::home_dir()
@@ -97,6 +102,7 @@ pub fn install_spec(spec: InstallSpec) -> Result<Vec<String>> {
         spec.gemini,
         spec.skip_missing,
         &mut notes,
+        "gemini",
         || install_gemini(&exe),
         Some(skill_path(homes.gemini.clone())),
     )?;
@@ -104,6 +110,7 @@ pub fn install_spec(spec: InstallSpec) -> Result<Vec<String>> {
         spec.copilot,
         spec.skip_missing,
         &mut notes,
+        "copilot",
         || install_copilot(&exe),
         Some(skill_path(homes.copilot.clone())),
     )?;
@@ -118,6 +125,7 @@ fn try_host(
     enabled: bool,
     skip_missing: bool,
     notes: &mut Vec<String>,
+    program: &str,
     install: impl FnOnce() -> Result<String>,
     skill: Option<PathBuf>,
 ) -> Result<()> {
@@ -132,7 +140,7 @@ fn try_host(
             }
             Ok(())
         }
-        Err(error) if skip_missing && missing_binary(&error) => {
+        Err(error) if skip_missing && missing_binary(program, &error) => {
             notes.push(format!("skipped {error}"));
             Ok(())
         }
@@ -140,8 +148,10 @@ fn try_host(
     }
 }
 
-fn missing_binary(error: &Error) -> bool {
-    error.to_string().contains(" not found:")
+fn missing_binary(program: &str, error: &Error) -> bool {
+    error
+        .to_string()
+        .starts_with(&format!("{program} not found:"))
 }
 
 fn install_grok(exe: &Path) -> Result<String> {
@@ -561,6 +571,27 @@ exit 1
             );
             assert!(!home.join(".gemini/skills/magents/SKILL.md").is_file());
             assert!(!home.join(".copilot/skills/magents/SKILL.md").is_file());
+        });
+    }
+
+    #[test]
+    fn install_all_does_not_skip_host_stderr_not_found() {
+        with_home(|_home, bin| {
+            test_env::write_executable(
+                &bin.join("gemini"),
+                "echo 'config not found: magents' >&2; exit 1",
+            );
+            let error = install_spec(InstallSpec {
+                gemini: true,
+                skip_missing: true,
+                ..InstallSpec::default()
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains("mcp add failed"), "{error}");
+            assert!(
+                error.to_string().contains("config not found: magents"),
+                "{error}"
+            );
         });
     }
 
