@@ -2436,7 +2436,7 @@ esac
         let cwd = fs::canonicalize(directory.path()).unwrap();
         let binary = directory.path().join("supervisor");
 
-        test_env::write_executable(&binary, "exit 0");
+        test_env::write_executable(&binary, "IFS= read -r request\nexit 0");
         unsafe { std::env::set_var("MAGENTS_SUPERVISOR_BIN", &binary) };
         let error = request_supervisor(&homes, Agent::Codex, "private prompt", &cwd, None)
             .unwrap_err()
