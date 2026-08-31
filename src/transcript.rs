@@ -1,7 +1,7 @@
 use crate::discover::{ListFilter, list_sessions, resolve};
 use crate::error::{Error, Result};
 use crate::homes::Homes;
-use crate::model::{Agent, SearchHit, Session, Transcript, Turn};
+use crate::model::{Agent, Digest, FilesTouched, SearchHit, Session, Transcript, Turn};
 use serde_json::Value;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -10,6 +10,114 @@ use std::path::Path;
 pub fn read_transcript(homes: &Homes, reference: &str, limit: usize) -> Result<Transcript> {
     let session = resolve(homes, reference)?;
     read_session(&session, limit)
+}
+
+pub fn session_digest(homes: &Homes, reference: &str, limit: usize) -> Result<Digest> {
+    let transcript = read_transcript(homes, reference, if limit == 0 { 12 } else { limit })?;
+    let turns = transcript
+        .turns
+        .into_iter()
+        .map(|mut turn| {
+            turn.text = clip(&turn.text, 280);
+            turn
+        })
+        .collect();
+    Ok(Digest {
+        session: transcript.session.clone(),
+        last_user_request: transcript.last_user_request,
+        last_assistant_action: transcript.last_assistant_action,
+        cwd: transcript.session.cwd.clone(),
+        branch: transcript.session.branch.clone(),
+        turns,
+        inert: true,
+    })
+}
+
+pub fn files_touched(homes: &Homes, reference: &str) -> Result<FilesTouched> {
+    let session = resolve(homes, reference)?;
+    let mut files = std::collections::BTreeSet::new();
+    if let Some(path) = session.transcript_path.as_deref() {
+        collect_files(session.agent, path, &session.session_id, &mut files);
+    }
+    Ok(FilesTouched {
+        session,
+        files: files.into_iter().collect(),
+        inert: true,
+    })
+}
+
+fn collect_files(
+    agent: Agent,
+    path: &Path,
+    session_id: &str,
+    files: &mut std::collections::BTreeSet<String>,
+) {
+    if agent == Agent::OpenCode && path.extension().and_then(|ext| ext.to_str()) == Some("db") {
+        if let Ok(turns) = read_opencode_sqlite(path, session_id) {
+            for turn in turns {
+                collect_paths_from_text(&turn.text, files);
+            }
+        }
+        return;
+    }
+    if let Ok(records) = jsonl(path) {
+        for value in records {
+            collect_paths_from_value(&value, files);
+        }
+    } else if let Ok(raw) = std::fs::read_to_string(path)
+        && let Ok(value) = serde_json::from_str::<Value>(&raw)
+    {
+        collect_paths_from_value(&value, files);
+    }
+}
+
+fn collect_paths_from_value(value: &Value, files: &mut std::collections::BTreeSet<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let key = key.to_ascii_lowercase();
+                if matches!(
+                    key.as_str(),
+                    "path" | "file_path" | "file" | "target" | "target_file" | "filename"
+                ) && let Some(path) = child.as_str()
+                    && looks_like_path(path)
+                {
+                    files.insert(path.to_string());
+                }
+                collect_paths_from_value(child, files);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_paths_from_value(item, files);
+            }
+        }
+        Value::String(text) => collect_paths_from_text(text, files),
+        _ => {}
+    }
+}
+
+fn collect_paths_from_text(text: &str, files: &mut std::collections::BTreeSet<String>) {
+    for token in text.split_whitespace() {
+        let token = token.trim_matches(|ch: char| {
+            matches!(ch, ',' | ';' | ')' | '(' | '"' | '\'' | '`' | '[' | ']')
+        });
+        if looks_like_path(token) && token.contains('/') && token.contains('.') {
+            files.insert(token.to_string());
+        }
+    }
+}
+
+fn looks_like_path(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= 512
+        && !value.contains("://")
+        && !value.contains('\n')
+        && (value.starts_with('/')
+            || value.starts_with("./")
+            || value.starts_with("../")
+            || (value.contains('/') && value.split('/').any(|part| part.contains('.'))))
 }
 
 pub fn read_session(session: &Session, limit: usize) -> Result<Transcript> {
@@ -47,6 +155,7 @@ pub fn search_transcripts(
             live_only: false,
             include_archived,
             limit: 120,
+            ..ListFilter::default()
         },
     )?;
     let mut hits = Vec::new();
@@ -592,6 +701,23 @@ mod tests {
     }
 
     #[test]
+    fn digest_and_files_from_tool_input() {
+        use super::{files_touched, looks_like_path, session_digest};
+        use crate::handoff_tests::World;
+
+        let world = World::new();
+        let digest = session_digest(&world.homes, "claude:disaster-recovery", 0).unwrap();
+        assert!(digest.inert);
+        assert!(digest.turns.iter().any(|turn| turn.text.len() <= 283));
+        let files = files_touched(&world.homes, "claude:disaster-recovery").unwrap();
+        assert!(files.files.iter().any(|path| path == "src/lib.rs"));
+        assert!(looks_like_path("src/lib.rs"));
+        assert!(looks_like_path("/tmp/x.rs"));
+        assert!(!looks_like_path("https://example.com/x.rs"));
+        assert!(!looks_like_path("plain"));
+    }
+
+    #[test]
     fn content_parts_variants() {
         let (text, tools) = content_parts(Some(&json!("just a string")));
         assert_eq!(text, "just a string");
@@ -698,11 +824,96 @@ mod tests {
         let jsonl = dir.path().join("empty.jsonl");
         std::fs::write(&jsonl, "\nnot-json\n").unwrap();
         assert!(super::jsonl(&jsonl).unwrap().is_empty());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let blocked = dir.path().join("blocked.jsonl");
+            std::fs::write(&blocked, "{}\n").unwrap();
+            let mut permissions = std::fs::metadata(&blocked).unwrap().permissions();
+            permissions.set_mode(0o000);
+            std::fs::set_permissions(&blocked, permissions).unwrap();
+            assert!(super::jsonl(&blocked).is_err());
+            let mut permissions = std::fs::metadata(&blocked).unwrap().permissions();
+            permissions.set_mode(0o644);
+            std::fs::set_permissions(&blocked, permissions).unwrap();
+        }
         assert!(super::scan_file(&jsonl, "needle").is_none());
         assert!(
             super::read_opencode_json_tree(&dir.path().join("nope.json"), "x")
                 .unwrap()
                 .is_empty()
         );
+
+        let world = crate::handoff_tests::World::new();
+        let opencode = super::files_touched(&world.homes, "opencode:ses_testopencode0001").unwrap();
+        assert!(opencode.inert);
+
+        let json = dir.path().join("blob.json");
+        std::fs::write(
+            &json,
+            r#"{"file_path":"src/main.rs","items":[{"target_file":"./lib.rs"}]}"#,
+        )
+        .unwrap();
+        let mut files = std::collections::BTreeSet::new();
+        super::collect_files(Agent::Claude, &json, "x", &mut files);
+        assert!(files.contains("src/main.rs"));
+        assert!(files.contains("./lib.rs"));
+
+        let cursor = dir.path().join("cursor.jsonl");
+        std::fs::write(
+            &cursor,
+            r#"{"role":"system","message":{"content":[{"type":"text","text":"skip"}]}}
+{"role":"assistant","message":{"content":[]}}
+{"role":"user","message":{"content":[{"type":"text","text":"hello"}]}}
+"#,
+        )
+        .unwrap();
+        let turns = super::read_cursor(&cursor).unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].role, "user");
+
+        let storage = dir.path().join("storage");
+        let session_json = storage.join("session").join("proj").join("ses_tree.json");
+        std::fs::create_dir_all(session_json.parent().unwrap()).unwrap();
+        std::fs::write(&session_json, "{}").unwrap();
+        let messages = storage.join("message").join("ses_tree");
+        std::fs::create_dir_all(&messages).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&messages).unwrap().permissions();
+            permissions.set_mode(0o000);
+            std::fs::set_permissions(&messages, permissions).unwrap();
+            assert!(super::read_opencode_json_tree(&session_json, "ses_tree").is_err());
+            let mut permissions = std::fs::metadata(&messages).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&messages, permissions).unwrap();
+            let blocked = messages.join("one.json");
+            std::fs::write(&blocked, r#"{"role":"user"}"#).unwrap();
+            let mut permissions = std::fs::metadata(&blocked).unwrap().permissions();
+            permissions.set_mode(0o000);
+            std::fs::set_permissions(&blocked, permissions).unwrap();
+            assert!(super::read_opencode_json_tree(&session_json, "ses_tree").is_err());
+            let mut permissions = std::fs::metadata(&blocked).unwrap().permissions();
+            permissions.set_mode(0o644);
+            std::fs::set_permissions(&blocked, permissions).unwrap();
+        }
+
+        let db = dir.path().join("parts.db");
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+                 CREATE TABLE part (id TEXT, message_id TEXT, time_created INTEGER, data TEXT);
+                 INSERT INTO message VALUES ('m0', 'ses_x', 1, '{\"role\":\"user\"}');
+                 INSERT INTO message VALUES ('m1', 'ses_x', 2, '{\"role\":\"assistant\"}');
+                 INSERT INTO part VALUES ('p1', 'm1', 1, '{\"type\":\"text\",\"text\":\"one\"}');
+                 INSERT INTO part VALUES ('p2', 'm1', 2, '{\"type\":\"text\",\"text\":\"two\"}');
+                 INSERT INTO part VALUES ('p3', 'm1', 3, '{\"type\":\"note\",\"text\":\"three\"}');",
+            )
+            .unwrap();
+        let turns = super::read_opencode_sqlite(&db, "ses_x").unwrap();
+        assert!(turns.iter().any(|turn| turn.text.contains("one")));
+        assert!(turns.iter().any(|turn| turn.text.contains("two")));
     }
 }

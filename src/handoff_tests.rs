@@ -2,7 +2,7 @@ use crate::deliver::deliver_live;
 use crate::discover::{ListFilter, list_sessions, resolve};
 use crate::error::Error;
 use crate::homes::Homes;
-use crate::mailbox::{self, compose};
+use crate::mailbox::{self, InboxQuery, compose};
 use crate::memory::{create_memory, search_memories};
 use crate::model::{Agent, Caller};
 use crate::transcript::{read_transcript, search_transcripts};
@@ -135,7 +135,7 @@ fn write_claude(homes: &Homes) {
             .join("tmp-dr")
             .join(format!("{CLAUDE_ID}.jsonl")),
         r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"run the 109 point matrix"}]}}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"starting verification"},{"type":"tool_use","name":"Bash"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"starting verification of src/lib.rs"},{"type":"tool_use","name":"Read","input":{"file_path":"src/lib.rs"}}]}}
 {"type":"user","isMeta":true,"message":{"role":"user","content":[{"type":"text","text":"ignore me"}]}}
 {"type":"progress"}
 {"type":"assistant","message":{"role":"assistant","content":[]}}
@@ -599,6 +599,7 @@ fn all_agents() -> ListFilter {
         live_only: false,
         include_archived: false,
         limit: 0,
+        ..ListFilter::default()
     }
 }
 
@@ -650,7 +651,7 @@ fn reads_compact_handoff_for_each_agent() {
         claude
             .turns
             .iter()
-            .any(|turn| turn.tools.contains(&"Bash".into()))
+            .any(|turn| turn.tools.contains(&"Read".into()))
     );
     assert!(claude.inert);
 
@@ -822,12 +823,11 @@ fn mailbox_roundtrip_and_cursor_reports_supervised_failure() {
             agent: Some(Agent::Cursor),
             session_id: Some(session.session_id.clone()),
         },
-        None,
-        None,
+        InboxQuery::default(),
     )
     .unwrap();
-    assert_eq!(inbox.len(), 1);
-    assert!(inbox[0].message.contains("billing.rs"));
+    assert_eq!(inbox.items.len(), 1);
+    assert!(inbox.items[0].message.contains("billing.rs"));
 }
 
 #[test]
@@ -943,6 +943,7 @@ fn filters_limits_latest_ambiguous_and_desktop() {
             live_only: true,
             include_archived: false,
             limit: 1,
+            ..ListFilter::default()
         },
     )
     .unwrap();
@@ -959,6 +960,7 @@ fn filters_limits_latest_ambiguous_and_desktop() {
             live_only: false,
             include_archived: true,
             limit: 0,
+            ..ListFilter::default()
         },
     )
     .unwrap();
@@ -976,6 +978,7 @@ fn filters_limits_latest_ambiguous_and_desktop() {
             live_only: false,
             include_archived: false,
             limit: 20,
+            ..ListFilter::default()
         },
     )
     .unwrap();
@@ -989,6 +992,7 @@ fn filters_limits_latest_ambiguous_and_desktop() {
             live_only: false,
             include_archived: true,
             limit: 1,
+            ..ListFilter::default()
         },
     )
     .unwrap();
@@ -1049,6 +1053,7 @@ fn cursor_headers_without_table() {
             live_only: false,
             include_archived: true,
             limit: 0,
+            ..ListFilter::default()
         },
     )
     .unwrap();
@@ -1092,6 +1097,7 @@ fn fallback_rollout_without_sessions_dir() {
             live_only: false,
             include_archived: true,
             limit: 0,
+            ..ListFilter::default()
         },
     )
     .unwrap();
@@ -1152,6 +1158,7 @@ fn empty_homes_and_cursor_without_db() {
             live_only: false,
             include_archived: true,
             limit: 0,
+            ..ListFilter::default()
         },
     )
     .unwrap();
@@ -1210,6 +1217,7 @@ fn opencode_json_parent_and_archived() {
             live_only: false,
             include_archived: true,
             limit: 0,
+            ..ListFilter::default()
         },
     )
     .unwrap();
@@ -1224,4 +1232,139 @@ fn opencode_json_parent_and_archived() {
             .iter()
             .any(|session| session.session_id == "ses_child")
     );
+}
+
+#[test]
+fn digest_files_cwd_branch_identify_and_reply() {
+    use crate::discover::identify;
+    use crate::mailbox::{self, InboxQuery};
+    use crate::notes::{get_note, put_note};
+    use crate::test_env;
+    use crate::transcript::{files_touched, session_digest};
+
+    const KEYS: &[&str] = &[
+        "GROK_SESSION_ID",
+        "CLAUDE_CODE_MESSAGING_SOCKET",
+        "CLAUDE_PROJECT_DIR",
+        "CLAUDE_SESSION_ID",
+        "CURSOR_SESSION_ID",
+        "CURSOR_PROJECT_DIR",
+        "CURSOR_AGENT",
+        "COMPOSER_SESSION_ID",
+        "OPENCODE_SESSION_ID",
+        "OPENCODE_DIRECTORY",
+        "OPENCODE_SERVER",
+        "OPENCODE_SESSION",
+        "CODEX_HOME",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+    ];
+    let _guard = test_env::lock(KEYS);
+    for key in KEYS {
+        unsafe { std::env::remove_var(key) };
+    }
+
+    let world = World::new();
+    let digest = session_digest(&world.homes, "claude:disaster-recovery", 8).unwrap();
+    assert!(digest.inert);
+    assert_eq!(digest.cwd.as_deref(), Some("/tmp/dr"));
+    assert!(
+        digest
+            .last_user_request
+            .as_deref()
+            .unwrap()
+            .contains("109 point matrix")
+    );
+
+    let files = files_touched(&world.homes, "claude:disaster-recovery").unwrap();
+    assert!(files.files.iter().any(|path| path == "src/lib.rs"));
+
+    let here = list_sessions(
+        &world.homes,
+        &ListFilter {
+            cwd: Some("/tmp/dr".into()),
+            branch: Some("fix/dr".into()),
+            include_archived: true,
+            limit: 0,
+            ..ListFilter::default()
+        },
+    )
+    .unwrap();
+    assert!(here.iter().any(|session| session.session_id == CLAUDE_ID));
+    let none = list_sessions(
+        &world.homes,
+        &ListFilter {
+            cwd: Some("/tmp/dr".into()),
+            branch: Some("no-such-branch".into()),
+            include_archived: true,
+            limit: 0,
+            ..ListFilter::default()
+        },
+    )
+    .unwrap();
+    assert!(none.is_empty());
+
+    unsafe { std::env::set_var("CLAUDE_PROJECT_DIR", "/tmp/dr") };
+    let who = identify(&world.homes);
+    assert_eq!(who.agent, Some(Agent::Claude));
+    assert_eq!(who.session_id.as_deref(), Some(CLAUDE_ID));
+    unsafe { std::env::remove_var("CLAUDE_PROJECT_DIR") };
+
+    let mail = mailbox::send(
+        &world.homes,
+        &Caller {
+            agent: Some(Agent::Claude),
+            session_id: Some(CLAUDE_ID.into()),
+        },
+        "cursor:Test rounds",
+        "please reply",
+    )
+    .unwrap();
+    assert!(mail.queued);
+    let replied = mailbox::reply(
+        &world.homes,
+        &Caller {
+            agent: Some(Agent::Cursor),
+            session_id: Some(CURSOR_ID.into()),
+        },
+        "done",
+        Some(&mail.mail_id),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(replied.to.session_id, CLAUDE_ID);
+    let inbox = mailbox::inbox(
+        &world.homes,
+        &Caller {
+            agent: Some(Agent::Claude),
+            session_id: Some(CLAUDE_ID.into()),
+        },
+        InboxQuery::default(),
+    )
+    .unwrap();
+    assert!(inbox.items.iter().any(|item| item.message == "done"));
+
+    let cwd = world.homes.magents.to_str().unwrap();
+    std::fs::create_dir_all(cwd).unwrap();
+    put_note(
+        &world.homes,
+        "shared plan",
+        Some(cwd),
+        &Caller {
+            agent: None,
+            session_id: None,
+        },
+    )
+    .unwrap();
+    let note = get_note(
+        &world.homes,
+        Some(cwd),
+        &Caller {
+            agent: None,
+            session_id: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(note.content, "shared plan");
 }

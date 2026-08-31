@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use crate::homes::Homes;
-use crate::model::{Agent, MemoryCreated, MemoryHit};
+use crate::model::{Agent, MemoryCreated, MemoryHit, MemoryRead};
 use crate::transcript::scan_file;
 use chrono::Utc;
 use std::fs::{self, OpenOptions};
@@ -62,6 +62,164 @@ pub fn create_memory(
             "{agent} has no first-party memory store"
         ))),
     }
+}
+
+pub fn read_memory(
+    homes: &Homes,
+    agent: Agent,
+    file: Option<&str>,
+    project: Option<&str>,
+    cwd: Option<&str>,
+    path: Option<&str>,
+    limit: usize,
+) -> Result<MemoryRead> {
+    let limit = if limit == 0 { 8000 } else { limit.min(32_000) };
+    let (path, file, project) = resolve_read(homes, agent, file, project, cwd, path)?;
+    let raw = fs::read_to_string(&path).map_err(|source| Error::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let truncated = raw.chars().count() > limit;
+    let content = if truncated {
+        raw.chars().take(limit).collect::<String>() + "..."
+    } else {
+        raw
+    };
+    Ok(MemoryRead {
+        agent,
+        path,
+        file,
+        project,
+        content,
+        truncated,
+        inert: true,
+    })
+}
+
+fn resolve_read(
+    homes: &Homes,
+    agent: Agent,
+    file: Option<&str>,
+    project: Option<&str>,
+    cwd: Option<&str>,
+    path: Option<&str>,
+) -> Result<(PathBuf, String, Option<String>)> {
+    if let Some(path) = path.map(str::trim).filter(|value| !value.is_empty()) {
+        return resolve_explicit_path(homes, agent, path);
+    }
+    let file = memory_filename(file.ok_or_else(|| Error::msg("file or path is required"))?)?;
+    let (path, project) = match agent {
+        Agent::Claude => {
+            let slug = match (project, cwd) {
+                (Some(project), _) if !project.trim().is_empty() => project_component(project)?,
+                (_, Some(cwd)) if !cwd.trim().is_empty() => encode_claude_cwd(cwd)?,
+                _ => return Err(Error::msg("project or cwd is required for Claude")),
+            };
+            (
+                homes
+                    .claude
+                    .join("projects")
+                    .join(&slug)
+                    .join("memory")
+                    .join(&file),
+                Some(slug),
+            )
+        }
+        Agent::Codex => (homes.codex.join("memories").join(&file), None),
+        Agent::Grok => {
+            let (path, project) = match project {
+                Some(project) if !project.trim().is_empty() => {
+                    let project = project_component(project)?;
+                    (
+                        homes.grok.join("memory").join(&project).join(&file),
+                        Some(project),
+                    )
+                }
+                _ => (homes.grok.join("memory").join(&file), Some("global".into())),
+            };
+            (path, project)
+        }
+        Agent::Cursor | Agent::OpenCode => {
+            return Err(Error::msg(format!(
+                "{agent} has no first-party memory store"
+            )));
+        }
+    };
+    if !path.is_file() {
+        return Err(Error::msg(format!(
+            "memory file not found: {}",
+            path.display()
+        )));
+    }
+    Ok((path, file, project))
+}
+
+fn resolve_explicit_path(
+    homes: &Homes,
+    agent: Agent,
+    path: &str,
+) -> Result<(PathBuf, String, Option<String>)> {
+    let requested = PathBuf::from(path);
+    let canonical = requested.canonicalize().map_err(|source| Error::Io {
+        path: requested,
+        source,
+    })?;
+    if canonical.extension().and_then(|ext| ext.to_str()) != Some("md") {
+        return Err(Error::msg("path must be a markdown memory file"));
+    }
+    let roots = memory_roots(homes, agent)?;
+    let Some(root) = roots.iter().find(|root| canonical.starts_with(root)) else {
+        return Err(Error::msg("path is outside the memory root"));
+    };
+    let file = canonical
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::msg("path must be a markdown memory file"))?
+        .to_string();
+    let project = match agent {
+        Agent::Claude => canonical
+            .strip_prefix(homes.claude.join("projects"))
+            .ok()
+            .and_then(|rest| rest.components().next())
+            .and_then(|component| component.as_os_str().to_str())
+            .map(ToOwned::to_owned),
+        Agent::Grok => {
+            let relative = canonical.strip_prefix(root).ok();
+            match relative.and_then(|path| path.parent()) {
+                Some(parent) if parent.as_os_str().is_empty() => Some("global".into()),
+                Some(parent) => parent
+                    .components()
+                    .next()
+                    .and_then(|component| component.as_os_str().to_str())
+                    .map(ToOwned::to_owned)
+                    .or(Some("global".into())),
+                None => Some("global".into()),
+            }
+        }
+        _ => None,
+    };
+    Ok((canonical, file, project))
+}
+
+fn memory_roots(homes: &Homes, agent: Agent) -> Result<Vec<PathBuf>> {
+    let roots = match agent {
+        Agent::Claude => vec![homes.claude.join("projects")],
+        Agent::Codex => vec![homes.codex.join("memories")],
+        Agent::Grok => vec![homes.grok.join("memory")],
+        Agent::Cursor | Agent::OpenCode => {
+            return Err(Error::msg(format!(
+                "{agent} has no first-party memory store"
+            )));
+        }
+    };
+    let canonical: Vec<PathBuf> = roots
+        .into_iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .collect();
+    if canonical.is_empty() {
+        return Err(Error::msg("memory root is unavailable"));
+    }
+    Ok(canonical)
 }
 
 fn memory_filename(file: &str) -> Result<String> {
@@ -1095,6 +1253,7 @@ mod tests {
                 Ok(())
             }
         }
+        assert!(FailingWrite.flush().is_ok());
 
         struct FlushFails;
         impl Write for FlushFails {
@@ -1220,5 +1379,297 @@ mod tests {
         let mut permissions = fs::metadata(&memories).unwrap().permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(&memories, permissions).unwrap();
+    }
+
+    #[test]
+    fn read_memory_by_file_path_and_rejects_escape() {
+        use super::read_memory;
+
+        let dir = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(dir.path());
+        let created = create_memory(
+            &homes,
+            Agent::Codex,
+            "READ_MEMORY_NEEDLE dedicated db\n",
+            Some("read-me.md"),
+            None,
+            None,
+        )
+        .unwrap();
+        let by_file = read_memory(
+            &homes,
+            Agent::Codex,
+            Some("read-me.md"),
+            None,
+            None,
+            None,
+            8000,
+        )
+        .unwrap();
+        assert!(by_file.inert);
+        assert!(!by_file.truncated);
+        assert!(by_file.content.contains("READ_MEMORY_NEEDLE"));
+        assert_eq!(by_file.file, "read-me.md");
+
+        let by_path = read_memory(
+            &homes,
+            Agent::Codex,
+            None,
+            None,
+            None,
+            Some(created.path.to_str().unwrap()),
+            8,
+        )
+        .unwrap();
+        assert!(by_path.truncated);
+        assert!(by_path.content.ends_with("..."));
+
+        let claude = create_memory(
+            &homes,
+            Agent::Claude,
+            "claude read note",
+            Some("topic.md"),
+            Some("tmp-dr"),
+            None,
+        )
+        .unwrap();
+        let read = read_memory(
+            &homes,
+            Agent::Claude,
+            Some("topic.md"),
+            Some("tmp-dr"),
+            None,
+            None,
+            0,
+        )
+        .unwrap();
+        assert_eq!(read.project.as_deref(), Some("tmp-dr"));
+        let via_path = read_memory(
+            &homes,
+            Agent::Claude,
+            None,
+            None,
+            None,
+            Some(claude.path.to_str().unwrap()),
+            100,
+        )
+        .unwrap();
+        assert_eq!(via_path.file, "topic.md");
+
+        let grok = create_memory(
+            &homes,
+            Agent::Grok,
+            "grok read note",
+            Some("g.md"),
+            Some("tmp-edge"),
+            None,
+        )
+        .unwrap();
+        let grok_read = read_memory(
+            &homes,
+            Agent::Grok,
+            None,
+            None,
+            None,
+            Some(grok.path.to_str().unwrap()),
+            100,
+        )
+        .unwrap();
+        assert_eq!(grok_read.project.as_deref(), Some("tmp-edge"));
+
+        let missing =
+            read_memory(&homes, Agent::Codex, Some("nope.md"), None, None, None, 10).unwrap_err();
+        assert!(missing.to_string().contains("not found"));
+
+        let outside = dir.path().join("outside.md");
+        fs::write(&outside, "secret\n").unwrap();
+        let err = read_memory(
+            &homes,
+            Agent::Codex,
+            None,
+            None,
+            None,
+            Some(outside.to_str().unwrap()),
+            10,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("outside the memory root"));
+
+        let err =
+            read_memory(&homes, Agent::Cursor, Some("note.md"), None, None, None, 10).unwrap_err();
+        assert!(err.to_string().contains("no first-party memory store"));
+
+        let err = read_memory(&homes, Agent::Claude, None, None, None, None, 10).unwrap_err();
+        assert!(err.to_string().contains("file or path is required"));
+
+        create_memory(
+            &homes,
+            Agent::Grok,
+            "global read note",
+            Some("global-read.md"),
+            None,
+            None,
+        )
+        .unwrap();
+        let global = read_memory(
+            &homes,
+            Agent::Grok,
+            Some("global-read.md"),
+            None,
+            None,
+            None,
+            100,
+        )
+        .unwrap();
+        assert_eq!(global.project.as_deref(), Some("global"));
+        assert!(global.content.contains("global read note"));
+
+        let via_cwd = create_memory(
+            &homes,
+            Agent::Claude,
+            "cwd read note",
+            Some("cwd-topic.md"),
+            None,
+            Some("/tmp/dr"),
+        )
+        .unwrap();
+        let cwd_read = read_memory(
+            &homes,
+            Agent::Claude,
+            Some("cwd-topic.md"),
+            None,
+            Some("/tmp/dr"),
+            None,
+            100,
+        )
+        .unwrap();
+        assert_eq!(cwd_read.path, via_cwd.path);
+
+        let grok_file = read_memory(
+            &homes,
+            Agent::Grok,
+            Some("g.md"),
+            Some("tmp-edge"),
+            None,
+            None,
+            100,
+        )
+        .unwrap();
+        assert_eq!(grok_file.project.as_deref(), Some("tmp-edge"));
+
+        let grok_global_path = read_memory(
+            &homes,
+            Agent::Grok,
+            None,
+            None,
+            None,
+            Some(global.path.to_str().unwrap()),
+            100,
+        )
+        .unwrap();
+        assert_eq!(grok_global_path.project.as_deref(), Some("global"));
+
+        let missing_path = dir.path().join("missing.md");
+        let err = read_memory(
+            &homes,
+            Agent::Codex,
+            None,
+            None,
+            None,
+            Some(missing_path.to_str().unwrap()),
+            10,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("failed to read"), "{err}");
+
+        let txt = dir.path().join("note.txt");
+        fs::write(&txt, "nope").unwrap();
+        let err = read_memory(
+            &homes,
+            Agent::Codex,
+            None,
+            None,
+            None,
+            Some(txt.to_str().unwrap()),
+            10,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("markdown"), "{err}");
+
+        let err = read_memory(
+            &homes,
+            Agent::OpenCode,
+            None,
+            None,
+            None,
+            Some(created.path.to_str().unwrap()),
+            10,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no first-party memory store"));
+
+        let empty_roots = Homes::isolated(dir.path().join("empty-roots"));
+        let stray = dir.path().join("empty-roots").join("stray.md");
+        fs::create_dir_all(stray.parent().unwrap()).unwrap();
+        fs::write(&stray, "x").unwrap();
+        let err = read_memory(
+            &empty_roots,
+            Agent::Codex,
+            None,
+            None,
+            None,
+            Some(stray.to_str().unwrap()),
+            10,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("memory root is unavailable"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&created.path).unwrap().permissions();
+            permissions.set_mode(0o000);
+            fs::set_permissions(&created.path, permissions).unwrap();
+            let err = read_memory(
+                &homes,
+                Agent::Codex,
+                Some("read-me.md"),
+                None,
+                None,
+                None,
+                10,
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("failed to read"));
+            let mut permissions = fs::metadata(&created.path).unwrap().permissions();
+            permissions.set_mode(0o644);
+            fs::set_permissions(&created.path, permissions).unwrap();
+        }
+
+        let long = format!("# {}\n", "A".repeat(80));
+        let stamped = create_memory(&homes, Agent::Codex, &long, None, None, None).unwrap();
+        assert!(stamped.file.len() <= 67, "{}", stamped.file);
+
+        let root = homes.codex.join("memories");
+        let err =
+            super::write_memory_file(&root.join(".git").join("x.md"), &root, "nope").unwrap_err();
+        assert!(err.to_string().contains(".git"));
+
+        fs::write(root.join("blocked"), "file").unwrap();
+        let err = super::write_memory_file(&root.join("blocked").join("x.md"), &root, "nope")
+            .unwrap_err();
+        assert!(err.to_string().contains("failed to read"), "{err}");
+
+        let err = read_memory(
+            &homes,
+            Agent::Claude,
+            Some("topic.md"),
+            None,
+            Some("/tmp/foo/../etc"),
+            None,
+            10,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("cwd is not a valid"), "{err}");
     }
 }

@@ -329,6 +329,9 @@ fn request_supervisor(
         ));
     }
     drop(stdin);
+    if let Some(provider) = providers.first() {
+        let _ = crate::spawn::write_live(homes, &session, child.id(), provider.pid, provider.group);
+    }
     thread::spawn(move || {
         let mut child = child;
         let _ = child.wait();
@@ -1445,6 +1448,11 @@ case "$MAGENTS_TEST_CONTROL" in
         ;;
     close) exit 0 ;;
     truncated) printf '%s' '{}' ; exit 0 ;;
+    error-then-provider)
+        printf '{"control":"error","version":1}\n'
+        group=$(ps -o pgid= -p "$provider" | tr -d ' ')
+        printf '{"control":"provider","version":1,"supervisor":%s,"provider":%s,"group":%s}\n' "$$" "$provider" "$group"
+        ;;
     *) printf '%s' "$MAGENTS_TEST_CONTROL" ;;
 esac
 printf '%s' "$MAGENTS_TEST_REPLY"
@@ -1612,6 +1620,21 @@ esac
             Some("ses_o1")
         );
         assert!(parse_start(Agent::Codex, r#"{"thread_id":"not-started"}"#).is_none());
+        assert!(
+            parse_start(
+                Agent::Claude,
+                r#"{"type":"user","subtype":"init","session_id":"c1"}"#
+            )
+            .is_none()
+        );
+        assert!(parse_start(Agent::Codex, r#"{"type":"other","thread_id":"cx"}"#).is_none());
+        assert!(
+            parse_start(
+                Agent::Grok,
+                r#"{"method":"other","params":{"sessionId":"g1"}}"#
+            )
+            .is_none()
+        );
         assert!(parse_start(Agent::Grok, r#"{"params":{"sessionId":"g1"}}"#).is_none());
         assert!(parse_start(Agent::Claude, "not-json").is_none());
         assert!(
@@ -1890,6 +1913,78 @@ esac
             false,
         );
         assert!(!supervisor_session_alive(u32::MAX));
+
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("trap '' TERM; exec /bin/sleep 30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        super::isolate_supervisor(&mut command);
+        let mut child = command.spawn().unwrap();
+        thread::sleep(Duration::from_millis(30));
+        let pid = child.id();
+        terminate_provider(Provider { pid, group: pid }, pid, true);
+        let _ = child.wait();
+        assert!(!pid_alive(pid));
+    }
+
+    #[test]
+    fn stubborn_supervisor_cancel_and_invalid_json_after_control() {
+        let _guard = test_env::lock(ENV);
+        let directory = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(directory.path());
+        let cwd = fs::canonicalize(directory.path()).unwrap();
+        let binary = directory.path().join("supervisor");
+        test_env::write_executable(&binary, "IFS= read -r request\ntrap '' TERM\nsleep 5");
+        unsafe {
+            std::env::set_var("MAGENTS_SUPERVISOR_BIN", &binary);
+            std::env::set_var("MAGENTS_HANDSHAKE_TIMEOUT_MS", "30");
+        }
+        let error = request_supervisor(&homes, Agent::Codex, "private prompt", &cwd, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("timed out") || error.contains("invalid"),
+            "{error}"
+        );
+
+        test_env::write_executable(&binary, SUPERVISOR_SCRIPT);
+        unsafe {
+            std::env::set_var("MAGENTS_TEST_CONTROL", "auto");
+            std::env::set_var("MAGENTS_TEST_REPLY", "not-json\n");
+            std::env::remove_var("MAGENTS_HANDSHAKE_TIMEOUT_MS");
+        }
+        let error = request_supervisor(&homes, Agent::Codex, "private prompt", &cwd, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("invalid") || error.contains("startup"),
+            "{error}"
+        );
+
+        let reply = serde_json::to_string(&Reply {
+            accepted: true,
+            status: Some(Status::Starting),
+            session: Some(resumed_session(
+                Agent::Codex,
+                "codex-valid",
+                &cwd,
+                Transport::CodexExec,
+            )),
+            error: None,
+        })
+        .unwrap()
+            + "\n";
+        unsafe {
+            std::env::set_var("MAGENTS_TEST_CONTROL", "error-then-provider");
+            std::env::set_var("MAGENTS_TEST_REPLY", reply);
+        }
+        let error = request_supervisor(&homes, Agent::Codex, "private prompt", &cwd, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid control sequence"), "{error}");
     }
 
     #[test]

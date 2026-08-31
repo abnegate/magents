@@ -75,6 +75,14 @@ impl Homes {
         self.magents.join("spawns")
     }
 
+    pub fn notes_dir(&self) -> PathBuf {
+        self.magents.join("notes")
+    }
+
+    pub fn live_dir(&self) -> PathBuf {
+        self.spawn_dir().join("live")
+    }
+
     pub fn opencode_data_home(&self) -> &Path {
         self.opencode.parent().unwrap_or_else(|| Path::new("."))
     }
@@ -187,6 +195,8 @@ mod tests {
         assert_eq!(homes.magents, root.join("m"));
         assert_eq!(homes.mailbox_dir(), root.join("m").join("mailbox"));
         assert_eq!(homes.spawn_dir(), root.join("m").join("spawns"));
+        assert_eq!(homes.notes_dir(), root.join("m").join("notes"));
+        assert_eq!(homes.live_dir(), root.join("m").join("spawns").join("live"));
 
         unsafe {
             std::env::set_var("OPENCODE_DATA", root.join("legacy").join("opencode"));

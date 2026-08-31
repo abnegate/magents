@@ -409,6 +409,51 @@ mod tests {
     }
 
     #[test]
+    fn send_user_turn_handles_discovery_without_ids_and_timeout() {
+        let (_dir, socket) = temp_socket();
+        serve(socket.clone(), |request| {
+            let id = echo_id(request);
+            match request["method"].as_str() {
+                Some("initialize") => vec![
+                    json!({ "type": "client-discovery-request" }),
+                    json!({ "type": "request", "method": "ping" }),
+                    json!({
+                        "type": "response",
+                        "requestId": id,
+                        "result": { "clientId": "c-timeout" }
+                    }),
+                ],
+                Some("thread-follower-start-turn") => vec![json!({
+                    "type": "response",
+                    "requestId": id,
+                    "result": { "turn": { "status": "in_progress" } }
+                })],
+                _ => Vec::new(),
+            }
+        });
+        send_user_turn(&socket, "thread-1", "ok").unwrap();
+
+        let (_dir, silent) = temp_socket();
+        thread::spawn({
+            let silent = silent.clone();
+            move || {
+                let listener = UnixListener::bind(&silent).unwrap();
+                let (stream, _) = listener.accept().unwrap();
+                thread::sleep(Duration::from_secs(6));
+                drop(stream);
+            }
+        });
+        thread::sleep(Duration::from_millis(50));
+        let error = send_user_turn(&silent, "t", "m").unwrap_err();
+        assert!(
+            error.to_string().contains("timeout")
+                || error.to_string().contains("socket closed")
+                || error.to_string().contains("failed to read"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn encode_frame_rejects_giant_payload() {
         let huge = "x".repeat((8 * 1024 * 1024) + 1);
         let error = encode_frame(&json!(huge)).unwrap_err();

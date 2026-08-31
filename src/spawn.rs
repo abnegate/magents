@@ -1,6 +1,7 @@
 use crate::error::{Error, Result};
 use crate::homes::Homes;
-use crate::model::{Agent, Caller, Session, valid_session_id};
+use crate::homes::pid_alive;
+use crate::model::{Agent, Caller, Session, StopReport, valid_session_id};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
@@ -131,6 +132,144 @@ pub fn records(homes: &Homes) -> Result<Vec<Record>> {
 
 pub fn sessions(homes: &Homes) -> Result<Vec<Session>> {
     Ok(records(homes)?.iter().filter_map(Record::session).collect())
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Live {
+    pub agent: Agent,
+    pub session_id: String,
+    pub supervisor: u32,
+    pub provider: u32,
+    pub group: u32,
+}
+
+pub fn write_live(
+    homes: &Homes,
+    session: &Session,
+    supervisor: u32,
+    provider: u32,
+    group: u32,
+) -> Result<PathBuf> {
+    let directory = homes.live_dir();
+    fs::create_dir_all(&directory).map_err(|source| Error::Io {
+        path: directory.clone(),
+        source,
+    })?;
+    #[cfg(unix)]
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).map_err(|source| {
+        Error::Io {
+            path: directory.clone(),
+            source,
+        }
+    })?;
+    let path = live_path(homes, session.agent, &session.session_id);
+    let live = Live {
+        agent: session.agent,
+        session_id: session.session_id.clone(),
+        supervisor,
+        provider,
+        group,
+    };
+    fs::write(&path, serde_json::to_vec(&live)?).map_err(|source| Error::Io {
+        path: path.clone(),
+        source,
+    })?;
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&path)
+            .map_err(|source| Error::Io {
+                path: path.clone(),
+                source,
+            })?
+            .permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&path, permissions).map_err(|source| Error::Io {
+            path: path.clone(),
+            source,
+        })?;
+    }
+    Ok(path)
+}
+
+pub fn stop(homes: &Homes, reference: &str) -> Result<StopReport> {
+    let session = crate::discover::resolve(homes, reference)?;
+    let path = live_path(homes, session.agent, &session.session_id);
+    if !path.is_file() {
+        return Err(Error::msg("no magents supervisor for that session"));
+    }
+    let raw = fs::read_to_string(&path).map_err(|source| Error::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let live: Live = serde_json::from_str(&raw)?;
+    let mut signaled = Vec::new();
+    let supervisor_alive = pid_alive(live.supervisor);
+    let provider_alive = live.provider != live.supervisor && pid_alive(live.provider);
+    if !supervisor_alive && !provider_alive {
+        let _ = fs::remove_file(&path);
+        return Ok(StopReport {
+            stopped: true,
+            already_exited: true,
+            session,
+            signaled,
+        });
+    }
+    if supervisor_alive {
+        signal_pid(live.supervisor);
+        signaled.push("supervisor".into());
+    }
+    if provider_alive {
+        signal_pid(live.provider);
+        signaled.push("provider".into());
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
+    while std::time::Instant::now() < deadline
+        && (pid_alive(live.supervisor)
+            || (live.provider != live.supervisor && pid_alive(live.provider)))
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    if pid_alive(live.supervisor) {
+        force_pid(live.supervisor);
+    }
+    if live.provider != live.supervisor && pid_alive(live.provider) {
+        force_pid(live.provider);
+    }
+    let _ = fs::remove_file(&path);
+    Ok(StopReport {
+        stopped: true,
+        already_exited: false,
+        session,
+        signaled,
+    })
+}
+
+fn live_path(homes: &Homes, agent: Agent, session_id: &str) -> PathBuf {
+    homes
+        .live_dir()
+        .join(format!("{}-{session_id}.json", agent.as_str()))
+}
+
+fn signal_pid(pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
+fn force_pid(pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
 }
 
 pub(crate) fn record(
@@ -612,6 +751,139 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Status::Starting).unwrap(),
             "\"starting\""
+        );
+    }
+
+    #[test]
+    fn stop_supervised_process_and_stale_live() {
+        use super::{stop, write_live};
+        use crate::homes::pid_alive;
+        use std::process::{Command, Stdio};
+
+        let directory = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(directory.path());
+        let session = record(
+            &homes,
+            Agent::Codex,
+            "stop-me",
+            directory.path(),
+            Transport::CodexExec,
+        )
+        .unwrap();
+        let err = stop(&homes, "codex:stop-me").unwrap_err();
+        assert!(err.to_string().contains("no magents supervisor"));
+
+        write_live(&homes, &session, 0, 0, 0).unwrap();
+        let stale = stop(&homes, "codex:stop-me").unwrap();
+        assert!(stale.already_exited);
+        assert!(stale.signaled.is_empty());
+
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        write_live(&homes, &session, pid, pid, pid).unwrap();
+        let stopped = stop(&homes, "codex:stop-me").unwrap();
+        assert!(stopped.stopped);
+        assert!(!stopped.already_exited);
+        assert!(stopped.signaled.contains(&"supervisor".into()));
+        let _ = child.wait();
+        assert!(!pid_alive(pid));
+    }
+
+    #[test]
+    fn write_live_and_stop_cover_error_and_force_paths() {
+        use super::{live_path, stop, write_live};
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Command, Stdio};
+
+        let directory = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(directory.path());
+        let session = record(
+            &homes,
+            Agent::Codex,
+            "live-io",
+            directory.path(),
+            Transport::CodexExec,
+        )
+        .unwrap();
+
+        let blocked = Homes::isolated(directory.path().join("blocked"));
+        std::fs::create_dir_all(&blocked.magents).unwrap();
+        std::fs::write(blocked.spawn_dir(), "not-a-dir").unwrap();
+        assert!(write_live(&blocked, &session, 1, 2, 3).is_err());
+
+        let path = live_path(&homes, session.agent, &session.session_id);
+        std::fs::create_dir_all(&path).unwrap();
+        assert!(write_live(&homes, &session, 1, 2, 3).is_err());
+        std::fs::remove_dir_all(&path).unwrap();
+
+        write_live(&homes, &session, 0, 0, 0).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o000);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        assert!(stop(&homes, "codex:live-io").is_err());
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o644);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        let mut orphan = Command::new("/bin/sh")
+            .args(["-c", "trap '' TERM; exec /bin/sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        write_live(&homes, &session, 0, orphan.id(), 0).unwrap();
+        let stopped = stop(&homes, "codex:live-io").unwrap();
+        assert!(stopped.signaled.contains(&"provider".into()));
+        let _ = orphan.wait();
+
+        let mut supervisor = Command::new("/bin/sh")
+            .args(["-c", "trap '' TERM; exec /bin/sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut provider = Command::new("/bin/sh")
+            .args(["-c", "trap '' TERM; exec /bin/sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        write_live(
+            &homes,
+            &session,
+            supervisor.id(),
+            provider.id(),
+            supervisor.id(),
+        )
+        .unwrap();
+        let stopped = stop(&homes, "codex:live-io").unwrap();
+        assert!(stopped.signaled.contains(&"supervisor".into()));
+        assert!(stopped.signaled.contains(&"provider".into()));
+        let _ = supervisor.wait();
+        let _ = provider.wait();
+
+        let registry = Homes::isolated(directory.path().join("registry-io"));
+        std::fs::create_dir_all(&registry.magents).unwrap();
+        std::fs::write(registry.spawn_dir(), "not-a-dir").unwrap();
+        assert!(
+            record(
+                &registry,
+                Agent::Codex,
+                "blocked-record",
+                directory.path(),
+                Transport::CodexExec,
+            )
+            .is_err()
         );
     }
 }
