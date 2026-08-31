@@ -169,6 +169,8 @@ magents get-note --cwd /path/to/repo
 magents whoami
 ```
 
+Pass `--output json` on any command for stable machine-readable stdout.
+
 `magents` with no args on a piped stdin starts the MCP server, so hosts can
 launch `magents` without `mcp` if they prefer.
 

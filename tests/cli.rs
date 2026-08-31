@@ -132,7 +132,9 @@ impl Harness {
     }
 
     fn json(&self, args: &[&str]) -> Value {
-        let output = self.command(args).output().unwrap();
+        let mut with_output = vec!["--output", "json"];
+        with_output.extend(args);
+        let output = self.command(&with_output).output().unwrap();
         assert!(
             output.status.success(),
             "magents {args:?} failed: {}",
@@ -582,6 +584,8 @@ fn cli_lists_reads_searches_and_mails_across_harnesses() {
 
     let handed = harness
         .command(&[
+            "--output",
+            "json",
             "handoff",
             "cursor:109 point",
             "--reason",
@@ -741,7 +745,7 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
 
     for (agent, variable, origin) in cases {
         let prompt = format!("independent {agent} task SECRET-PROMPT");
-        let mut command = harness.command(&["spawn", agent, "--cwd", cwd_text]);
+        let mut command = harness.command(&["--output", "json", "spawn", agent, "--cwd", cwd_text]);
         let artifacts = configure_stub(
             &mut command,
             &harness,
@@ -895,7 +899,13 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
     }
 
     let message = "follow up through exact ID SECRET-MESSAGE";
-    let mut command = harness.command(&["send", &format!("codex:{CODEX_SPAWN_ID}"), message]);
+    let mut command = harness.command(&[
+        "--output",
+        "json",
+        "send",
+        &format!("codex:{CODEX_SPAWN_ID}"),
+        message,
+    ]);
     let artifacts = configure_stub(
         &mut command,
         &harness,
