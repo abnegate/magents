@@ -1,8 +1,9 @@
 use clap::{Parser, Subcommand};
-use magents::discover::{ListFilter, list_sessions, resolve};
+use magents::discover::{ListFilter, identify, list_sessions, resolve};
 use magents::homes::Homes;
+use magents::mailbox::InboxQuery;
 use magents::model::{Agent, Caller};
-use magents::{deliver, mailbox, memory, transcript};
+use magents::{mailbox, memory, notes, spawn, transcript};
 use std::io::{IsTerminal, Read};
 use std::path::Path;
 use std::path::PathBuf;
@@ -34,6 +35,10 @@ enum Command {
         archived: bool,
         #[arg(short = 'n', long, default_value_t = 20)]
         limit: usize,
+        #[arg(long)]
+        cwd: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
     },
     /// Look up one session
     Get { reference: String },
@@ -71,6 +76,29 @@ enum Command {
         cwd: Option<String>,
         content: String,
     },
+    /// Read one Claude, Codex, or Grok memory file
+    ReadMemory {
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        file: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        cwd: Option<String>,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(short = 'n', long, default_value_t = 8000)]
+        limit: usize,
+    },
+    /// Compact inert session summary
+    Digest {
+        reference: String,
+        #[arg(short = 'n', long, default_value_t = 12)]
+        limit: usize,
+    },
+    /// File paths a session touched
+    Files { reference: String },
     /// Start a new headless persisted session for independent work
     Spawn {
         agent: String,
@@ -82,6 +110,18 @@ enum Command {
     },
     /// Queue a message for another session
     Send { to: String, message: String },
+    /// Reply to the latest inbox mail, or a mail_id
+    Reply {
+        message: String,
+        #[arg(long)]
+        mail_id: Option<String>,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Stop a magents-supervised session
+    Stop { reference: String },
     /// Hand this work to another live agent with compact state
     Handoff {
         to: Option<String>,
@@ -94,7 +134,44 @@ enum Command {
         session: Option<String>,
         #[arg(long)]
         agent: Option<String>,
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        unread: bool,
     },
+    /// Mark inbox mail as read
+    Ack {
+        #[arg(long)]
+        through: Option<String>,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Wait briefly for new inbox mail
+    AwaitReply {
+        #[arg(long)]
+        from: Option<String>,
+        #[arg(long, default_value_t = 5)]
+        timeout: u32,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Read the magents-owned shared note for a cwd
+    GetNote {
+        #[arg(long)]
+        cwd: Option<String>,
+    },
+    /// Write the magents-owned shared note for a cwd
+    PutNote {
+        content: String,
+        #[arg(long)]
+        cwd: Option<String>,
+    },
+    /// Who this process would run as
+    Whoami,
     /// Register magents as an MCP server with local agents
     Install {
         #[arg(long)]
@@ -168,6 +245,8 @@ async fn main() -> anyhow::Result<()> {
             live,
             archived,
             limit,
+            cwd,
+            branch,
         }) => {
             let sessions = list_sessions(
                 &Homes::from_env(),
@@ -177,6 +256,8 @@ async fn main() -> anyhow::Result<()> {
                     live_only: live,
                     include_archived: archived,
                     limit,
+                    cwd,
+                    branch,
                 },
             )?;
             println!("{}", serde_json::to_string_pretty(&sessions)?);
@@ -233,6 +314,33 @@ async fn main() -> anyhow::Result<()> {
             )?;
             println!("{}", serde_json::to_string_pretty(&created)?);
         }
+        Some(Command::ReadMemory {
+            agent,
+            file,
+            project,
+            cwd,
+            path,
+            limit,
+        }) => {
+            let read = memory::read_memory(
+                &Homes::from_env(),
+                parse_agent(&agent)?,
+                file.as_deref(),
+                project.as_deref(),
+                cwd.as_deref(),
+                path.as_deref(),
+                limit,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&read)?);
+        }
+        Some(Command::Digest { reference, limit }) => {
+            let digest = transcript::session_digest(&Homes::from_env(), &reference, limit)?;
+            println!("{}", serde_json::to_string_pretty(&digest)?);
+        }
+        Some(Command::Files { reference }) => {
+            let files = transcript::files_touched(&Homes::from_env(), &reference)?;
+            println!("{}", serde_json::to_string_pretty(&files)?);
+        }
         Some(Command::Spawn {
             agent,
             prompt_file,
@@ -244,41 +352,100 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Some(Command::Send { to, message }) => {
-            let homes = Homes::from_env();
-            let session = resolve(&homes, &to)?;
-            let caller = Caller::from_env();
-            let delivered = deliver::deliver_live(&homes, &session, &message)?;
-            let mail = mailbox::compose(
-                &caller,
-                session.agent,
-                session.session_id.clone(),
-                message,
-                delivered.clone(),
-            );
-            mailbox::post(&homes, &mail)?;
-            println!(
-                "{}",
-                serde_json::json!({
-                    "queued": true,
-                    "to": session,
-                    "delivered": delivered,
-                    "mail_id": mail.id
-                })
-            );
+            let report = mailbox::send(&Homes::from_env(), &Caller::from_env(), &to, &message)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Some(Command::Reply {
+            message,
+            mail_id,
+            session,
+            agent,
+        }) => {
+            let report = mailbox::reply(
+                &Homes::from_env(),
+                &Caller::from_env(),
+                &message,
+                mail_id.as_deref(),
+                session.as_deref(),
+                agent.as_deref().and_then(Agent::parse),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Some(Command::Stop { reference }) => {
+            let report = spawn::stop(&Homes::from_env(), &reference)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Some(Command::Handoff { to, reason }) => {
             let report =
                 magents::handoff::run(&Homes::from_env(), to.as_deref(), reason.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        Some(Command::Inbox { session, agent }) => {
+        Some(Command::Inbox {
+            session,
+            agent,
+            since,
+            unread,
+        }) => {
             let mail = mailbox::inbox(
                 &Homes::from_env(),
                 &Caller::from_env(),
+                InboxQuery {
+                    session_id: session,
+                    agent: agent.as_deref().and_then(Agent::parse),
+                    since,
+                    unread_only: unread,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&mail)?);
+        }
+        Some(Command::Ack {
+            through,
+            session,
+            agent,
+        }) => {
+            let report = mailbox::ack(
+                &Homes::from_env(),
+                &Caller::from_env(),
+                through.as_deref(),
                 session.as_deref(),
                 agent.as_deref().and_then(Agent::parse),
             )?;
-            println!("{}", serde_json::to_string_pretty(&mail)?);
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Some(Command::AwaitReply {
+            from,
+            timeout,
+            session,
+            agent,
+        }) => {
+            let report = mailbox::await_reply(
+                &Homes::from_env(),
+                &Caller::from_env(),
+                from.as_deref(),
+                Some(timeout),
+                session.as_deref(),
+                agent.as_deref().and_then(Agent::parse),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Some(Command::GetNote { cwd }) => {
+            let note = notes::get_note(&Homes::from_env(), cwd.as_deref(), &Caller::from_env())?;
+            println!("{}", serde_json::to_string_pretty(&note)?);
+        }
+        Some(Command::PutNote { content, cwd }) => {
+            let note = notes::put_note(
+                &Homes::from_env(),
+                &content,
+                cwd.as_deref(),
+                &Caller::from_env(),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&note)?);
+        }
+        Some(Command::Whoami) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&identify(&Homes::from_env()))?
+            );
         }
         Some(Command::Install {
             claude,
@@ -436,6 +603,8 @@ mod tests {
             .to_string();
         assert!(help.contains("spawn"));
         assert!(help.contains("create-memory"));
+        assert!(help.contains("digest"));
+        assert!(help.contains("await-reply"));
         assert!(!help.contains("__supervise"));
     }
 

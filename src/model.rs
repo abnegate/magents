@@ -317,6 +317,99 @@ pub struct MemoryCreated {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MemoryRead {
+    pub agent: Agent,
+    pub path: PathBuf,
+    pub file: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub content: String,
+    pub truncated: bool,
+    pub inert: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Identity {
+    pub agent: Option<Agent>,
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<Session>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InboxReport {
+    pub items: Vec<Mail>,
+    pub unread: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acked_through: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AckReport {
+    pub acked_through: String,
+    pub unread: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AwaitReport {
+    pub status: String,
+    pub waited_ms: u64,
+    pub items: Vec<Mail>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SendReport {
+    pub queued: bool,
+    pub to: Session,
+    pub delivered: Vec<String>,
+    pub mail_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Digest {
+    pub session: Session,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_user_request: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_assistant_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    pub turns: Vec<Turn>,
+    pub inert: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FilesTouched {
+    pub session: Session,
+    pub files: Vec<String>,
+    pub inert: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Note {
+    pub cwd: String,
+    pub path: PathBuf,
+    pub content: String,
+    pub exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StopReport {
+    pub stopped: bool,
+    pub already_exited: bool,
+    pub session: Session,
+    pub signaled: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Mail {
     pub id: String,
     pub ts: DateTime<Utc>,

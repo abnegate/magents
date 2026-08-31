@@ -437,4 +437,50 @@ exit 1
             assert!(error.to_string().contains("mcp must be an object"));
         });
     }
+
+    #[test]
+    fn json_and_replace_error_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let unreadable = dir.path().join("secret.json");
+        fs::write(&unreadable, r#"{"ok":true}"#).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&unreadable).unwrap().permissions();
+            permissions.set_mode(0o000);
+            fs::set_permissions(&unreadable, permissions).unwrap();
+            assert!(read_json_object(&unreadable).is_err());
+            let mut permissions = fs::metadata(&unreadable).unwrap().permissions();
+            permissions.set_mode(0o644);
+            fs::set_permissions(&unreadable, permissions).unwrap();
+        }
+
+        let dest = dir.path().join("as-dir.json");
+        fs::create_dir_all(&dest).unwrap();
+        assert!(write_json(&dest, &json!({})).is_err());
+        let skill = dir.path().join("skill-dir");
+        fs::create_dir_all(&skill).unwrap();
+        assert!(write_skill(skill).is_err());
+        let blocked = dir.path().join("blocked-parent");
+        fs::write(&blocked, "not a directory").unwrap();
+        assert!(write_json(&blocked.join("x.json"), &json!({})).is_err());
+        assert!(write_skill(blocked.join("SKILL.md")).is_err());
+
+        with_home(|home, bin| {
+            test_env::write_executable(
+                &bin.join("claude"),
+                r#"
+echo already exists >&2
+exit 1
+"#,
+            );
+            let error = install(true, false, false, false, false).unwrap_err();
+            assert!(error.to_string().contains("already exists"));
+
+            test_env::write_executable(&bin.join("grok"), "echo added magents");
+            fs::create_dir_all(home.join(".grok")).unwrap();
+            fs::write(home.join(".grok").join("skills"), "not-a-dir").unwrap();
+            assert!(install(false, true, false, false, false).is_err());
+        });
+    }
 }

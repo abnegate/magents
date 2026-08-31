@@ -9,6 +9,7 @@ pub mod mailbox;
 pub mod mcp;
 pub mod memory;
 pub mod model;
+pub mod notes;
 pub mod runtime;
 pub mod spawn;
 pub mod transcript;
@@ -53,6 +54,16 @@ pub(crate) mod test_env {
             .map(|key| (key, std::env::var_os(key)))
             .collect();
         Guard { _lock: lock, saved }
+    }
+
+    #[test]
+    fn recovers_from_poisoned_env_lock() {
+        let handle = std::thread::spawn(|| {
+            let _guard = lock(&[]);
+            panic!("poison the env lock");
+        });
+        assert!(handle.join().is_err());
+        let _guard = lock(&[]);
     }
 
     pub fn write_executable(path: &std::path::Path, script: &str) {

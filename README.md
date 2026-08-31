@@ -41,7 +41,7 @@ an approval bypass.
 
 | Tool | Purpose |
 |---|---|
-| `list_sessions` | Live and recent Claude / Codex / Cursor / Grok / OpenCode sessions |
+| `list_sessions` | Live and recent sessions; filter by `cwd` / `branch` |
 | `get_session` | Lookup by id, title, live name, pid, or `agent:ref` |
 | `read_transcript` | Compact inert handoff (last request, last action, recent turns) |
 | `search_transcripts` | Full-text search across those transcripts |
@@ -50,8 +50,16 @@ an approval bypass.
 | `spawn_session` | Start a new headless persisted session for independent work |
 | `send_message` | Deliver a user turn to an existing chat (mailbox always; native or supervised resume path) |
 | `handoff` | Compact this session and inject it into another live chat (omit `to` to pick) |
-| `inbox` | Read messages addressed to this session |
-| `whoami` | Detect which agent spawned this MCP connection |
+| `inbox` | Read mail for this session (`since`, `unread_only`); `{ items, unread, acked_through }` |
+| `ack` | Mark inbox mail as read through a `mail_id` (or all current) |
+| `await_reply` | Wait briefly for new inbox mail (default 5s, max 30s) |
+| `reply` | Send to the author of the latest inbox mail (or a `mail_id`) |
+| `session_digest` | Compact last request / action / cwd / branch / clipped turns |
+| `files_touched` | Paths another session edited, from inert transcript tool inputs |
+| `stop_session` | Stop a magents-supervised spawn or resume |
+| `read_memory` | Read one Claude / Codex / Grok memory markdown file |
+| `get_note` / `put_note` | Magents-owned shared scratch for a working directory |
+| `whoami` | Detect this connection; resolve session via env, socket, or unique cwd |
 
 Refs can be prefixed: `claude:disaster recovery`, `grok:latest`, `codex:<uuid>`,
 `cursor:latest`, `opencode:<id>`.
@@ -134,16 +142,27 @@ Restart the agent session (or refresh `/mcps`) so the tools appear.
 ```bash
 magents list --live
 magents list --agent grok --query edge
+magents list --cwd /path/to/repo --branch main
 magents get 'claude:disaster recovery'
 magents read grok:latest -n 20
+magents digest grok:latest
+magents files grok:latest
 magents search "dedicated databases" --agent claude
 magents search-memories "dedicated databases" --agent claude
 magents create-memory --agent claude --project tmp-dr --file dedicated-db-gaps.md "the note body"
+magents read-memory --agent claude --project tmp-dr --file dedicated-db-gaps.md
 magents spawn codex --prompt-file /path/to/task.md --cwd /path/to/isolated-worktree
 magents spawn claude --cwd /path/to/isolated-worktree < /path/to/task.md
 magents send grok:latest "handoff: the DR runbook is in docs/RUNBOOK.md"
+magents reply "done — see the digest" --mail-id <id>
+magents stop grok:latest
 magents handoff grok:latest --reason "continuing in grok"
-magents inbox --session 01a04b43-bee6-7d13-9362-62111aa1fc51 --agent grok
+magents inbox --session 01a04b43-bee6-7d13-9362-62111aa1fc51 --agent grok --unread
+magents ack --session 01a04b43-bee6-7d13-9362-62111aa1fc51 --agent grok
+magents await-reply --from grok:latest --timeout 5
+magents put-note --cwd /path/to/repo "current plan: finish digest"
+magents get-note --cwd /path/to/repo
+magents whoami
 ```
 
 `magents` with no args on a piped stdin starts the MCP server, so hosts can
@@ -216,10 +235,10 @@ Live Claude sessions come from `~/.claude/sessions/<pid>.json`. Live Grok sessio
 
 ```bash
 cargo test --locked --all-targets
-cargo llvm-cov --locked --all-targets --ignore-filename-regex 'src/main.rs|/rustlib/' --fail-under-lines 95
+cargo llvm-cov --locked --all-targets --ignore-filename-regex 'src/main.rs|/rustlib/' --fail-under-lines 98
 ```
 
-CI runs format, clippy (`-D warnings`), the full test suite, and the 95% line-coverage gate. That covers parser units, isolated-home integration (list / read / search / search-memories / create-memory / mailbox for every harness, supervised spawn commands, Claude UDS inject against a fake socket, OpenCode / Grok / Codex / tmux live-inject argv), MCP tool handlers, and CLI end-to-end (`list`, `get`, `read`, `search`, `search-memories`, `create-memory`, `spawn`, `send`, `inbox`, `install`).
+CI runs format, clippy (`-D warnings`), the full test suite, and the 98% line-coverage gate. That covers parser units, isolated-home integration (list / read / search / search-memories / create-memory / mailbox for every harness, supervised spawn commands, Claude UDS inject against a fake socket, OpenCode / Grok / Codex / tmux live-inject argv), MCP tool handlers, and CLI end-to-end (`list`, `get`, `read`, `search`, `search-memories`, `create-memory`, `spawn`, `send`, `inbox`, `install`).
 
 ## Requirements
 

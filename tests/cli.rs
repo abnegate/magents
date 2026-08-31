@@ -247,7 +247,7 @@ fn write_tree(root: &Path) {
             .join("claude/projects/tmp-dr")
             .join(format!("{CLAUDE_ID}.jsonl")),
         r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"run the 109 point matrix"}]}}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"starting verification"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"starting verification of src/lib.rs"},{"type":"tool_use","name":"Read","input":{"file_path":"src/lib.rs"}}]}}
 "#,
     );
     write(
@@ -381,12 +381,89 @@ fn cli_lists_reads_searches_and_mails_across_harnesses() {
     assert_eq!(sent["delivered"], serde_json::json!(["cursor-cli-failed"]));
 
     let inbox = harness.json(&["inbox", "--agent", "cursor", "--session", CURSOR_ID]);
-    assert_eq!(inbox.as_array().unwrap().len(), 1);
+    assert_eq!(inbox["items"].as_array().unwrap().len(), 1);
     assert!(
-        inbox[0]["message"]
+        inbox["items"][0]["message"]
             .as_str()
             .unwrap()
             .contains("matrix is in cloud/docs")
+    );
+    assert_eq!(inbox["unread"], 1);
+
+    let digest = harness.json(&["digest", "claude:disaster-recovery", "-n", "8"]);
+    assert!(
+        digest["last_user_request"]
+            .as_str()
+            .unwrap()
+            .contains("109 point matrix")
+    );
+    let files = harness.json(&["files", "claude:disaster-recovery"]);
+    assert!(
+        files["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path == "src/lib.rs")
+    );
+
+    let acked = harness.json(&[
+        "ack",
+        "--agent",
+        "cursor",
+        "--session",
+        CURSOR_ID,
+        "--through",
+        inbox["items"][0]["id"].as_str().unwrap(),
+    ]);
+    assert_eq!(acked["unread"], 0);
+    let unread = harness.json(&[
+        "inbox",
+        "--agent",
+        "cursor",
+        "--session",
+        CURSOR_ID,
+        "--unread",
+    ]);
+    assert!(unread["items"].as_array().unwrap().is_empty());
+
+    let note_cwd = harness.root.join("scratch-cwd");
+    fs::create_dir_all(&note_cwd).unwrap();
+    let put = harness.json(&[
+        "put-note",
+        "--cwd",
+        note_cwd.to_str().unwrap(),
+        "shared scratch",
+    ]);
+    assert_eq!(put["content"], "shared scratch");
+    let got = harness.json(&["get-note", "--cwd", note_cwd.to_str().unwrap()]);
+    assert_eq!(got["content"], "shared scratch");
+
+    let memory = harness.json(&[
+        "read-memory",
+        "--agent",
+        "claude",
+        "--project",
+        "tmp-dr",
+        "--file",
+        "MEMORY.md",
+    ]);
+    assert!(
+        memory["content"]
+            .as_str()
+            .unwrap()
+            .contains("CLAUDE_MEMORY_NEEDLE")
+    );
+
+    let who = harness.json(&["whoami"]);
+    assert!(who["agent"].is_null());
+
+    let listed = harness.json(&["list", "--cwd", "/tmp/dr", "-n", "20"]);
+    assert!(
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["session_id"] == CLAUDE_ID)
     );
 
     let live = harness.json(&["list", "--live", "--agent", "claude", "-n", "5"]);
@@ -732,7 +809,7 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
         assert_eq!(resolved["cwd"], cwd_text);
         assert_eq!(resolved["live"], false);
         let inbox = harness.json(&["inbox", "--agent", agent, "--session", session_id]);
-        assert!(inbox.as_array().unwrap().is_empty());
+        assert!(inbox["items"].as_array().unwrap().is_empty());
 
         assert!(!artifacts.join("done").exists());
         let agent_pid = wait_for(&artifacts.join("agent-pid"), Duration::from_secs(2));
@@ -791,8 +868,8 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
         message
     );
     let inbox = harness.json(&["inbox", "--agent", "codex", "--session", CODEX_SPAWN_ID]);
-    assert_eq!(inbox.as_array().unwrap().len(), 1);
-    assert_eq!(inbox[0]["message"], message);
+    assert_eq!(inbox["items"].as_array().unwrap().len(), 1);
+    assert_eq!(inbox["items"][0]["message"], message);
     wait_for(&artifacts.join("done"), Duration::from_secs(3));
 }
 

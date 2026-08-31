@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use crate::homes::{Homes, named_process_alive, pid_alive};
-use crate::model::{Agent, Session};
+use crate::model::{Agent, Caller, Identity, Session};
 use chrono::{DateTime, TimeZone, Utc};
 use regex::Regex;
 use rusqlite::Connection;
@@ -19,6 +19,8 @@ pub struct ListFilter {
     pub live_only: bool,
     pub include_archived: bool,
     pub limit: usize,
+    pub cwd: Option<String>,
+    pub branch: Option<String>,
 }
 
 impl Default for ListFilter {
@@ -29,6 +31,8 @@ impl Default for ListFilter {
             live_only: false,
             include_archived: false,
             limit: 20,
+            cwd: None,
+            branch: None,
         }
     }
 }
@@ -66,6 +70,16 @@ pub fn list_sessions(homes: &Homes, filter: &ListFilter) -> Result<Vec<Session>>
         }
         if let Some(needle) = &needle
             && !session.haystack().contains(needle)
+        {
+            return false;
+        }
+        if let Some(cwd) = &filter.cwd
+            && !cwd_matches(session.cwd.as_deref(), cwd)
+        {
+            return false;
+        }
+        if let Some(branch) = &filter.branch
+            && session.branch.as_deref() != Some(branch.as_str())
         {
             return false;
         }
@@ -114,10 +128,9 @@ pub fn resolve(homes: &Homes, reference: &str) -> Result<Session> {
     let (agent, rest) = split_agent_ref(reference);
     let filter = ListFilter {
         agent,
-        query: None,
-        live_only: false,
         include_archived: true,
         limit: 0,
+        ..ListFilter::default()
     };
     let sessions = list_sessions(homes, &filter)?;
     if rest.eq_ignore_ascii_case("latest") || rest.eq_ignore_ascii_case("self") {
@@ -165,6 +178,117 @@ pub fn resolve(homes: &Homes, reference: &str) -> Result<Session> {
             matches: matches.iter().map(Session::label).collect(),
         }),
     }
+}
+
+pub fn identify(homes: &Homes) -> Identity {
+    let caller = Caller::from_env();
+    let env_cwd = env_project_dir();
+
+    if let (Some(agent), Some(session_id)) = (caller.agent, caller.session_id.as_deref())
+        && !session_id.is_empty()
+        && let Ok(session) = resolve(homes, &format!("{agent}:{session_id}"))
+    {
+        return identity_from_session(session);
+    }
+
+    let live = list_sessions(
+        homes,
+        &ListFilter {
+            agent: caller.agent,
+            live_only: true,
+            include_archived: false,
+            limit: 0,
+            ..ListFilter::default()
+        },
+    )
+    .unwrap_or_default();
+
+    if let Ok(socket) = std::env::var("CLAUDE_CODE_MESSAGING_SOCKET") {
+        let path = PathBuf::from(&socket);
+        let matches: Vec<Session> = live
+            .iter()
+            .filter(|session| session.messaging_socket.as_deref() == Some(path.as_path()))
+            .cloned()
+            .collect();
+        if matches.len() == 1 {
+            return identity_from_session(matches.into_iter().next().unwrap());
+        }
+    }
+
+    if let (Some(agent), Some(cwd)) = (caller.agent, env_cwd.as_deref()) {
+        let matches: Vec<Session> = live
+            .iter()
+            .filter(|session| session.agent == agent && cwd_matches(session.cwd.as_deref(), cwd))
+            .cloned()
+            .collect();
+        if matches.len() == 1 {
+            return identity_from_session(matches.into_iter().next().unwrap());
+        }
+    }
+
+    if let Some(agent) = caller.agent {
+        let matches: Vec<Session> = live
+            .into_iter()
+            .filter(|session| session.agent == agent)
+            .collect();
+        if matches.len() == 1 {
+            return identity_from_session(matches.into_iter().next().unwrap());
+        }
+    }
+
+    Identity {
+        agent: caller.agent,
+        session_id: caller.session_id,
+        cwd: env_cwd,
+        branch: None,
+        session: None,
+    }
+}
+
+fn identity_from_session(session: Session) -> Identity {
+    Identity {
+        agent: Some(session.agent),
+        session_id: Some(session.session_id.clone()),
+        cwd: session.cwd.clone(),
+        branch: session.branch.clone(),
+        session: Some(session),
+    }
+}
+
+fn env_project_dir() -> Option<String> {
+    for key in [
+        "CLAUDE_PROJECT_DIR",
+        "CURSOR_PROJECT_DIR",
+        "OPENCODE_DIRECTORY",
+    ] {
+        if let Ok(value) = std::env::var(key)
+            && !value.trim().is_empty()
+        {
+            return Some(value);
+        }
+    }
+    std::env::current_dir()
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+pub(crate) fn cwd_matches(session_cwd: Option<&str>, wanted: &str) -> bool {
+    let Some(session_cwd) = session_cwd else {
+        return false;
+    };
+    let wanted = normalize_cwd(wanted);
+    let session = normalize_cwd(session_cwd);
+    session == wanted
+        || session.starts_with(&format!("{wanted}/"))
+        || wanted.starts_with(&format!("{session}/"))
+}
+
+fn normalize_cwd(value: &str) -> String {
+    let trimmed = value.trim().trim_end_matches('/');
+    std::fs::canonicalize(trimmed)
+        .unwrap_or_else(|_| PathBuf::from(trimmed))
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn split_agent_ref(reference: &str) -> (Option<Agent>, &str) {
@@ -940,7 +1064,7 @@ fn millis(value: Option<i64>) -> Option<DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ListFilter, list_sessions, resolve, split_agent_ref};
+    use super::{ListFilter, cwd_matches, list_sessions, resolve, split_agent_ref};
     use crate::homes::Homes;
     use crate::model::Agent;
     use crate::spawn::Transport;
@@ -1019,6 +1143,7 @@ mod tests {
                 include_archived: true,
                 limit: 0,
                 query: None,
+                ..ListFilter::default()
             },
         )
         .unwrap();
@@ -1148,5 +1273,364 @@ mod tests {
             session.transcript_path.as_deref(),
             Some(transcript.as_path())
         );
+    }
+
+    #[test]
+    fn cwd_matches_canonical_and_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("repo").join("crate");
+        fs::create_dir_all(&nested).unwrap();
+        let root = dir.path().join("repo");
+        assert!(cwd_matches(
+            Some(nested.to_str().unwrap()),
+            root.to_str().unwrap()
+        ));
+        assert!(cwd_matches(
+            Some(root.to_str().unwrap()),
+            nested.to_str().unwrap()
+        ));
+        assert!(!cwd_matches(None, root.to_str().unwrap()));
+        assert!(!cwd_matches(Some("/no/such/cwd"), "/also/missing"));
+    }
+
+    #[test]
+    fn identify_socket_unique_live_and_discovery_errors() {
+        use super::identify;
+        use crate::handoff_tests::World;
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Command, Stdio};
+
+        const KEYS: &[&str] = &[
+            "GROK_SESSION_ID",
+            "CLAUDE_CODE_MESSAGING_SOCKET",
+            "CLAUDE_PROJECT_DIR",
+            "CLAUDE_SESSION_ID",
+            "CURSOR_SESSION_ID",
+            "CURSOR_PROJECT_DIR",
+            "CURSOR_AGENT",
+            "COMPOSER_SESSION_ID",
+            "OPENCODE_SESSION_ID",
+            "OPENCODE_DIRECTORY",
+            "OPENCODE_SERVER",
+            "OPENCODE_SESSION",
+            "CODEX_HOME",
+            "CODEX_THREAD_ID",
+            "CODEX_SESSION_ID",
+        ];
+        let _guard = test_env::lock(KEYS);
+        for key in KEYS {
+            unsafe { std::env::remove_var(key) };
+        }
+
+        let world = World::new();
+        let pid = std::process::id();
+        let socket = world.homes.claude.join("identify.sock");
+        fs::write(
+            world
+                .homes
+                .claude
+                .join("sessions")
+                .join(format!("{pid}.json")),
+            json!({
+                "pid": pid,
+                "sessionId": "11111111-1111-4111-8111-111111111111",
+                "cwd": "/tmp/dr",
+                "messagingSocketPath": socket,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("CLAUDE_CODE_MESSAGING_SOCKET", &socket);
+        }
+        let who = identify(&world.homes);
+        assert_eq!(
+            who.session_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+
+        unsafe {
+            std::env::remove_var("CLAUDE_CODE_MESSAGING_SOCKET");
+            std::env::set_var("CLAUDE_PROJECT_DIR", "/tmp/unrelated-identify-cwd");
+        }
+        let who = identify(&world.homes);
+        assert_eq!(
+            who.session_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+        unsafe { std::env::remove_var("CLAUDE_PROJECT_DIR") };
+
+        fs::write(
+            world.homes.claude.join("sessions").join("000001.json"),
+            json!({ "pid": pid, "cwd": "/tmp/no-id" }).to_string(),
+        )
+        .unwrap();
+
+        let mut child = Command::new("sleep")
+            .arg("8")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let extra = "33333333-3333-4333-8333-333333333333";
+        fs::write(
+            world
+                .homes
+                .claude
+                .join("sessions")
+                .join(format!("{}.json", child.id())),
+            json!({ "pid": child.id(), "sessionId": extra }).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            world.homes.claude_desktop.join("local_merge.json"),
+            json!({
+                "sessionId": "desktop-merge",
+                "cliSessionId": extra,
+                "cwd": "/tmp/merged",
+                "lastActivityAt": chrono::Utc::now().timestamp_millis()
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let sessions = list_sessions(
+            &world.homes,
+            &ListFilter {
+                agent: Some(Agent::Claude),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            sessions.iter().any(|session| session.session_id == extra
+                && session.cwd.as_deref() == Some("/tmp/merged"))
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let storage = world
+            .homes
+            .opencode
+            .join("storage")
+            .join("session")
+            .join("proj");
+        fs::create_dir_all(&storage).unwrap();
+        fs::write(storage.join("bad.json"), "not-json").unwrap();
+        fs::write(storage.join("noid.json"), "{}").unwrap();
+        let _ = list_sessions(
+            &world.homes,
+            &ListFilter {
+                agent: Some(Agent::OpenCode),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        );
+
+        let sessions_dir = world.homes.claude.join("sessions");
+        let mut permissions = fs::metadata(&sessions_dir).unwrap().permissions();
+        permissions.set_mode(0o000);
+        fs::set_permissions(&sessions_dir, permissions).unwrap();
+        assert!(list_sessions(&world.homes, &ListFilter::default()).is_err());
+        let mut permissions = fs::metadata(&sessions_dir).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&sessions_dir, permissions).unwrap();
+
+        let projects = world.homes.cursor.join("projects");
+        if let Some(transcripts) = fs::read_dir(&projects).ok().and_then(|entries| {
+            entries.flatten().find_map(|entry| {
+                let path = entry.path().join("agent-transcripts");
+                path.is_dir().then_some(path)
+            })
+        }) {
+            let mut permissions = fs::metadata(&transcripts).unwrap().permissions();
+            permissions.set_mode(0o000);
+            fs::set_permissions(&transcripts, permissions).unwrap();
+            assert!(
+                list_sessions(
+                    &world.homes,
+                    &ListFilter {
+                        agent: Some(Agent::Cursor),
+                        include_archived: true,
+                        limit: 0,
+                        ..ListFilter::default()
+                    }
+                )
+                .is_err()
+            );
+            let mut permissions = fs::metadata(&transcripts).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&transcripts, permissions).unwrap();
+        }
+
+        let isolated = Homes::isolated(tempfile::tempdir().unwrap().path());
+        fs::create_dir_all(isolated.cursor.join("projects")).unwrap();
+        let mut permissions = fs::metadata(isolated.cursor.join("projects"))
+            .unwrap()
+            .permissions();
+        permissions.set_mode(0o000);
+        fs::set_permissions(isolated.cursor.join("projects"), permissions).unwrap();
+        assert!(
+            list_sessions(
+                &isolated,
+                &ListFilter {
+                    agent: Some(Agent::Cursor),
+                    include_archived: true,
+                    limit: 0,
+                    ..ListFilter::default()
+                }
+            )
+            .is_err()
+        );
+        let mut permissions = fs::metadata(isolated.cursor.join("projects"))
+            .unwrap()
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(isolated.cursor.join("projects"), permissions).unwrap();
+
+        let transcripts = isolated
+            .cursor
+            .join("projects")
+            .join("ws")
+            .join("agent-transcripts");
+        fs::create_dir_all(&transcripts).unwrap();
+        fs::write(transcripts.join("not-a-session.txt"), "skip").unwrap();
+        fs::create_dir_all(transcripts.join("missing-jsonl")).unwrap();
+        let _ = list_sessions(
+            &isolated,
+            &ListFilter {
+                agent: Some(Agent::Cursor),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        );
+
+        let json_home = Homes::isolated(tempfile::tempdir().unwrap().path());
+        let storage = json_home
+            .opencode
+            .join("storage")
+            .join("session")
+            .join("proj");
+        fs::create_dir_all(&storage).unwrap();
+        fs::write(storage.join("bad.json"), "not-json").unwrap();
+        fs::write(storage.join("noid.json"), "{}").unwrap();
+        let _ = list_sessions(
+            &json_home,
+            &ListFilter {
+                agent: Some(Agent::OpenCode),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        );
+
+        let grok = Homes::isolated(tempfile::tempdir().unwrap().path());
+        let summary = grok.grok.join("sessions").join("s1").join("summary.json");
+        fs::create_dir_all(summary.parent().unwrap()).unwrap();
+        fs::write(&summary, "not-json").unwrap();
+        let mut permissions = fs::metadata(&summary).unwrap().permissions();
+        permissions.set_mode(0o000);
+        fs::set_permissions(&summary, permissions).unwrap();
+        let _ = list_sessions(
+            &grok,
+            &ListFilter {
+                agent: Some(Agent::Grok),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        );
+        let mut permissions = fs::metadata(&summary).unwrap().permissions();
+        permissions.set_mode(0o644);
+        fs::set_permissions(&summary, permissions).unwrap();
+
+        let empty_db = Homes::isolated(tempfile::tempdir().unwrap().path());
+        fs::create_dir_all(&empty_db.opencode).unwrap();
+        rusqlite::Connection::open(empty_db.opencode.join("opencode.db")).unwrap();
+        assert!(
+            list_sessions(
+                &empty_db,
+                &ListFilter {
+                    agent: Some(Agent::OpenCode),
+                    include_archived: true,
+                    limit: 0,
+                    ..ListFilter::default()
+                }
+            )
+            .is_err()
+        );
+
+        use std::os::unix::ffi::OsStrExt;
+        let weird = isolated
+            .cursor
+            .join("projects")
+            .join("ws")
+            .join("agent-transcripts")
+            .join(std::ffi::OsStr::from_bytes(&[0xff, 0xfe]));
+        let _ = fs::create_dir(&weird);
+        let sessions_dir = isolated.claude.join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let _ = fs::write(
+            sessions_dir.join(std::ffi::OsStr::from_bytes(&[0xff, 0xfe])),
+            "{}",
+        );
+        let _ = list_sessions(
+            &isolated,
+            &ListFilter {
+                agent: Some(Agent::Cursor),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        );
+        let _ = list_sessions(
+            &isolated,
+            &ListFilter {
+                agent: Some(Agent::Claude),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        );
+
+        let workspace = isolated
+            .cursor_app
+            .join("User")
+            .join("workspaceStorage")
+            .join("ws1");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("workspace.json"), "not-json").unwrap();
+        let _ = list_sessions(
+            &isolated,
+            &ListFilter {
+                agent: Some(Agent::Cursor),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        );
+
+        fs::create_dir_all(&world.homes.claude_desktop).unwrap();
+        let desktop = world.homes.claude_desktop.join("local_locked.json");
+        fs::write(&desktop, r#"{"sessionId":"locked"}"#).unwrap();
+        let mut permissions = fs::metadata(&desktop).unwrap().permissions();
+        permissions.set_mode(0o000);
+        fs::set_permissions(&desktop, permissions).unwrap();
+        let _ = list_sessions(
+            &world.homes,
+            &ListFilter {
+                agent: Some(Agent::Claude),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        );
+        let mut permissions = fs::metadata(&desktop).unwrap().permissions();
+        permissions.set_mode(0o644);
+        fs::set_permissions(&desktop, permissions).unwrap();
     }
 }

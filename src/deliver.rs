@@ -537,14 +537,9 @@ fi
         let mut live = session(Agent::Claude, "c1");
         live.messaging_socket = Some(dir.path().join("missing.sock"));
         live.tmux = Some("magents:0.0".into());
-        let delivered = deliver_with(
-            &homes,
-            &live,
-            "typed",
-            |_, _, _| -> crate::error::Result<String> {
-                panic!("supervisor resume must not run after tmux succeeds")
-            },
-        )
+        let delivered = deliver_with(&homes, &live, "typed", |_, _, _| {
+            Err(Error::msg("resume must not run after tmux"))
+        })
         .unwrap();
         assert_eq!(delivered.len(), 2, "{delivered:?}");
         assert_eq!(delivered[0], "claude-uds-failed");
@@ -701,21 +696,22 @@ exit 1
                 stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
                 let mut buffer = Vec::new();
                 for _ in 0..2 {
-                    while buffer.len() < 4 {
+                    let request = loop {
+                        if buffer.len() >= 4 {
+                            let length =
+                                u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize;
+                            let total = 4 + length;
+                            if buffer.len() >= total {
+                                let request: serde_json::Value =
+                                    serde_json::from_slice(&buffer[4..total]).unwrap();
+                                buffer.drain(..total);
+                                break request;
+                            }
+                        }
                         let mut chunk = [0u8; 8192];
                         let read = stream.read(&mut chunk).unwrap();
                         buffer.extend_from_slice(&chunk[..read]);
-                    }
-                    let length = u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize;
-                    let total = 4 + length;
-                    while buffer.len() < total {
-                        let mut chunk = [0u8; 8192];
-                        let read = stream.read(&mut chunk).unwrap();
-                        buffer.extend_from_slice(&chunk[..read]);
-                    }
-                    let request: serde_json::Value =
-                        serde_json::from_slice(&buffer[4..total]).unwrap();
-                    buffer.drain(..total);
+                    };
                     let id = request["requestId"].clone();
                     let payload = serde_json::json!({
                         "type": "response",
@@ -735,9 +731,7 @@ exit 1
             &homes,
             &session(Agent::Codex, "thread-1"),
             "ipc hi",
-            |_, _, _| -> crate::error::Result<String> {
-                panic!("supervisor resume must not run after Codex IPC succeeds")
-            },
+            |_, _, _| Err(Error::msg("resume must not run after Codex IPC")),
         )
         .unwrap();
         assert_eq!(delivered, vec!["codex-ipc".to_string()]);
@@ -906,5 +900,96 @@ exit 1
         live.messaging_socket = Some(socket);
         let delivered = deliver_live(&homes, &live, "ack").unwrap();
         assert_eq!(delivered, vec!["claude-uds".to_string()]);
+    }
+
+    #[test]
+    fn claude_uds_connects_to_non_socket_file() {
+        let (dir, homes) = isolated();
+        fs::create_dir_all(homes.claude.join("sessions")).unwrap();
+        fs::write(
+            homes
+                .claude
+                .join("sessions")
+                .join(format!("{}.key", std::process::id())),
+            r#"{"peerToken":"x","procStart":"now"}"#,
+        )
+        .unwrap();
+        let path = dir.path().join("not-a-socket");
+        fs::write(&path, "regular-file").unwrap();
+        let mut live = session(Agent::Claude, "c1");
+        live.messaging_socket = Some(path);
+        let delivered = deliver_with(&homes, &live, "hi", |_, _, _| {
+            Err(Error::msg("resume unavailable"))
+        })
+        .unwrap();
+        assert!(delivered.iter().any(|item| item == "claude-uds-failed"));
+    }
+
+    #[test]
+    fn tmux_load_buffer_stdin_write_failure() {
+        let _guard = test_env::lock(ENV);
+        let (dir, homes) = isolated();
+        let stub = dir.path().join("tmux");
+        test_env::write_executable(&stub, "exit 0");
+        unsafe { std::env::set_var("MAGENTS_TMUX_BIN", &stub) };
+        let mut live = session(Agent::Claude, "c1");
+        live.tmux = Some("magents:0.0".into());
+        live.messaging_socket = None;
+        let delivered = deliver_with(
+            &homes,
+            &live,
+            &"typed-secret".repeat(64 * 1024),
+            |_, _, _| Err(Error::msg("resume unavailable")),
+        )
+        .unwrap();
+        assert!(
+            delivered.iter().any(|item| item.contains("tmux")),
+            "{delivered:?}"
+        );
+    }
+
+    #[test]
+    fn claude_uds_write_fails_when_peer_disconnects() {
+        let (dir, homes) = isolated();
+        fs::create_dir_all(homes.claude.join("sessions")).unwrap();
+        fs::write(
+            homes
+                .claude
+                .join("sessions")
+                .join(format!("{}.key", std::process::id())),
+            r#"{"peerToken":"x","procStart":"now"}"#,
+        )
+        .unwrap();
+        let socket = dir.path().join("drop.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            drop(stream);
+        });
+        wait_listener(&socket);
+        let mut live = session(Agent::Claude, "c1");
+        live.messaging_socket = Some(socket);
+        let delivered = deliver_with(&homes, &live, "hi", |_, _, _| {
+            Err(Error::msg("resume unavailable"))
+        })
+        .unwrap();
+        assert!(delivered.iter().any(|item| item == "claude-uds-failed"));
+    }
+
+    #[test]
+    fn pid_key_lookup_and_wait_timeout() {
+        let (dir, homes) = isolated();
+        fs::create_dir_all(homes.claude.join("sessions")).unwrap();
+        fs::write(
+            homes.claude.join("sessions").join("9.session.key"),
+            r#"{"peerToken":"pid-key","procStart":"now"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            super::token_from_pid_key(&homes, 9).as_deref(),
+            Some("pid-key")
+        );
+        assert!(super::token_from_pid_key(&homes, 8).is_none());
+        assert!(wait_for(&dir.path().join("missing.log"), Duration::from_millis(40)).is_empty());
     }
 }

@@ -222,23 +222,21 @@ mod tests {
 
     fn read_value(stream: &mut UnixStream, buffer: &mut Vec<u8>) -> Value {
         stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-        while buffer.len() < 4 {
+        loop {
+            if buffer.len() >= 4 {
+                let length = u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize;
+                let total = 4 + length;
+                if buffer.len() >= total {
+                    let payload = buffer[4..total].to_vec();
+                    buffer.drain(..total);
+                    return serde_json::from_slice(&payload).unwrap();
+                }
+            }
             let mut chunk = [0u8; 8192];
             let read = stream.read(&mut chunk).unwrap();
             assert!(read > 0, "client closed");
             buffer.extend_from_slice(&chunk[..read]);
         }
-        let length = u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize;
-        let total = 4 + length;
-        while buffer.len() < total {
-            let mut chunk = [0u8; 8192];
-            let read = stream.read(&mut chunk).unwrap();
-            assert!(read > 0, "client closed mid-frame");
-            buffer.extend_from_slice(&chunk[..read]);
-        }
-        let payload = buffer[4..total].to_vec();
-        buffer.drain(..total);
-        serde_json::from_slice(&payload).unwrap()
     }
 
     fn write_value(stream: &mut UnixStream, value: &Value) {
@@ -401,10 +399,53 @@ mod tests {
         let error = send_user_turn(&socket, "t", "m").unwrap_err();
         let message = error.to_string();
         assert!(
-            message.contains("socket closed")
-                || message.contains("failed to read")
-                || message.contains("timeout"),
+            message.contains("socket closed") || message.contains("failed to read"),
             "{message}"
+        );
+    }
+
+    #[test]
+    fn send_user_turn_handles_discovery_without_ids_and_timeout() {
+        let (_dir, socket) = temp_socket();
+        serve(socket.clone(), |request| {
+            let id = echo_id(request);
+            match request["method"].as_str() {
+                Some("initialize") => vec![
+                    json!({ "type": "client-discovery-request" }),
+                    json!({ "type": "request", "method": "ping" }),
+                    json!({
+                        "type": "response",
+                        "requestId": id,
+                        "result": { "clientId": "c-timeout" }
+                    }),
+                ],
+                Some("thread-follower-start-turn") => vec![json!({
+                    "type": "response",
+                    "requestId": id,
+                    "result": { "turn": { "status": "in_progress" } }
+                })],
+                _ => Vec::new(),
+            }
+        });
+        send_user_turn(&socket, "thread-1", "ok").unwrap();
+
+        let (_dir, silent) = temp_socket();
+        thread::spawn({
+            let silent = silent.clone();
+            move || {
+                let listener = UnixListener::bind(&silent).unwrap();
+                let (stream, _) = listener.accept().unwrap();
+                thread::sleep(Duration::from_secs(6));
+                drop(stream);
+            }
+        });
+        thread::sleep(Duration::from_millis(50));
+        let error = send_user_turn(&silent, "t", "m").unwrap_err();
+        assert!(
+            error.to_string().contains("timeout")
+                || error.to_string().contains("socket closed")
+                || error.to_string().contains("failed to read"),
+            "{error}"
         );
     }
 

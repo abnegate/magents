@@ -328,6 +328,13 @@ fn request_supervisor(
             "failed to accept magents supervisor startup response",
         ));
     }
+    if let Some(provider) = providers.first()
+        && let Err(error) =
+            crate::spawn::write_live(homes, &session, child.id(), provider.pid, provider.group)
+    {
+        cancel_supervisor(&mut child, group, &mut stdin, &providers);
+        return Err(error);
+    }
     drop(stdin);
     thread::spawn(move || {
         let mut child = child;
@@ -1363,9 +1370,10 @@ fn resumed_session(agent: Agent, session_id: &str, cwd: &Path, transport: Transp
 mod tests {
     use super::{
         MAX_START_LINE, Output, PROTOCOL_VERSION, ParentSignal, Provider, Reply, SupervisorControl,
-        isolate_provider, parse_start, receive_exchange, request_supervisor, resume, resume_marker,
-        resumed_session, settle_accepted, supervise_request, supervisor_session_alive,
-        terminate_provider, validate_control, watch_start,
+        isolate_provider, parse_start, prepare_request_with, receive_exchange, request_supervisor,
+        resume, resume_marker, resumed_session, settle_accepted, supervise_request,
+        supervisor_session_alive, terminate_child, terminate_provider, validate_control,
+        watch_start,
     };
     use crate::error::Error;
     use crate::homes::{Homes, pid_alive};
@@ -1445,6 +1453,11 @@ case "$MAGENTS_TEST_CONTROL" in
         ;;
     close) exit 0 ;;
     truncated) printf '%s' '{}' ; exit 0 ;;
+    error-then-provider)
+        printf '{"control":"error","version":1}\n'
+        group=$(ps -o pgid= -p "$provider" | tr -d ' ')
+        printf '{"control":"provider","version":1,"supervisor":%s,"provider":%s,"group":%s}\n' "$$" "$provider" "$group"
+        ;;
     *) printf '%s' "$MAGENTS_TEST_CONTROL" ;;
 esac
 printf '%s' "$MAGENTS_TEST_REPLY"
@@ -1612,6 +1625,21 @@ esac
             Some("ses_o1")
         );
         assert!(parse_start(Agent::Codex, r#"{"thread_id":"not-started"}"#).is_none());
+        assert!(
+            parse_start(
+                Agent::Claude,
+                r#"{"type":"user","subtype":"init","session_id":"c1"}"#
+            )
+            .is_none()
+        );
+        assert!(parse_start(Agent::Codex, r#"{"type":"other","thread_id":"cx"}"#).is_none());
+        assert!(
+            parse_start(
+                Agent::Grok,
+                r#"{"method":"other","params":{"sessionId":"g1"}}"#
+            )
+            .is_none()
+        );
         assert!(parse_start(Agent::Grok, r#"{"params":{"sessionId":"g1"}}"#).is_none());
         assert!(parse_start(Agent::Claude, "not-json").is_none());
         assert!(
@@ -1724,12 +1752,10 @@ esac
             std::env::set_var("MAGENTS_CODEX_BIN", &binary);
             std::env::set_var("MAGENTS_STARTUP_TIMEOUT_MS", "50");
         }
-        let error =
-            match supervise_request(&homes, Agent::Codex, &cwd, None, "private prompt-SECRET") {
-                Ok(_) => panic!("startup unexpectedly succeeded"),
-                Err(error) => error,
-            };
-        let error = error.to_string();
+        let error = supervise_request(&homes, Agent::Codex, &cwd, None, "private prompt-SECRET")
+            .err()
+            .unwrap()
+            .to_string();
         assert!(error.contains("timed out"));
         assert!(!error.contains("private"));
         assert!(!error.contains("token"));
@@ -1755,10 +1781,10 @@ esac
         }
         let started = Instant::now();
 
-        let error = match supervise_request(&homes, Agent::Codex, &cwd, None, "private prompt") {
-            Ok(_) => panic!("startup unexpectedly succeeded"),
-            Err(error) => error.to_string(),
-        };
+        let error = supervise_request(&homes, Agent::Codex, &cwd, None, "private prompt")
+            .err()
+            .unwrap()
+            .to_string();
 
         assert!(error.contains("timed out"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(3));
@@ -1844,16 +1870,16 @@ esac
         );
         unsafe { std::env::set_var("MAGENTS_CODEX_BIN", &binary) };
 
-        let error = match supervise_request(
+        let error = supervise_request(
             &homes,
             Agent::Codex,
             &cwd,
             Some("expected-id"),
             "private prompt",
-        ) {
-            Ok(_) => panic!("resume unexpectedly succeeded"),
-            Err(error) => error.to_string(),
-        };
+        )
+        .err()
+        .unwrap()
+        .to_string();
 
         assert!(error.contains("different session id"), "{error}");
     }
@@ -1890,6 +1916,78 @@ esac
             false,
         );
         assert!(!supervisor_session_alive(u32::MAX));
+
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("trap '' TERM; exec /bin/sleep 30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        super::isolate_supervisor(&mut command);
+        let mut child = command.spawn().unwrap();
+        thread::sleep(Duration::from_millis(30));
+        let pid = child.id();
+        terminate_provider(Provider { pid, group: pid }, pid, true);
+        let _ = child.wait();
+        assert!(!pid_alive(pid));
+    }
+
+    #[test]
+    fn stubborn_supervisor_cancel_and_invalid_json_after_control() {
+        let _guard = test_env::lock(ENV);
+        let directory = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(directory.path());
+        let cwd = fs::canonicalize(directory.path()).unwrap();
+        let binary = directory.path().join("supervisor");
+        test_env::write_executable(&binary, "IFS= read -r request\ntrap '' TERM\nsleep 5");
+        unsafe {
+            std::env::set_var("MAGENTS_SUPERVISOR_BIN", &binary);
+            std::env::set_var("MAGENTS_HANDSHAKE_TIMEOUT_MS", "30");
+        }
+        let error = request_supervisor(&homes, Agent::Codex, "private prompt", &cwd, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("timed out") || error.contains("invalid"),
+            "{error}"
+        );
+
+        test_env::write_executable(&binary, SUPERVISOR_SCRIPT);
+        unsafe {
+            std::env::set_var("MAGENTS_TEST_CONTROL", "auto");
+            std::env::set_var("MAGENTS_TEST_REPLY", "not-json\n");
+            std::env::remove_var("MAGENTS_HANDSHAKE_TIMEOUT_MS");
+        }
+        let error = request_supervisor(&homes, Agent::Codex, "private prompt", &cwd, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("invalid") || error.contains("startup"),
+            "{error}"
+        );
+
+        let reply = serde_json::to_string(&Reply {
+            accepted: true,
+            status: Some(Status::Starting),
+            session: Some(resumed_session(
+                Agent::Codex,
+                "codex-valid",
+                &cwd,
+                Transport::CodexExec,
+            )),
+            error: None,
+        })
+        .unwrap()
+            + "\n";
+        unsafe {
+            std::env::set_var("MAGENTS_TEST_CONTROL", "error-then-provider");
+            std::env::set_var("MAGENTS_TEST_REPLY", reply);
+        }
+        let error = request_supervisor(&homes, Agent::Codex, "private prompt", &cwd, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid control sequence"), "{error}");
     }
 
     #[test]
@@ -2285,6 +2383,14 @@ esac
         unsafe {
             libc::kill(-supervisor, libc::SIGTERM);
         }
+
+        let blocked = Homes::isolated(directory.path().join("blocked-live"));
+        fs::create_dir_all(blocked.spawn_dir()).unwrap();
+        std::os::unix::fs::symlink("/usr/bin", blocked.live_dir()).unwrap();
+        let error = request_supervisor(&blocked, Agent::Codex, "private prompt", &cwd, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("failed to read"), "{error}");
     }
 
     #[test]
@@ -2320,6 +2426,152 @@ esac
         let (supervisor, provider) = process.trim().split_once(':').unwrap();
         assert!(!pid_alive(supervisor.parse().unwrap()));
         assert!(!pid_alive(provider.parse().unwrap()));
+    }
+
+    #[test]
+    fn supervisor_write_control_and_accept_failures() {
+        let _guard = test_env::lock(ENV);
+        let directory = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(directory.path());
+        let cwd = fs::canonicalize(directory.path()).unwrap();
+        let binary = directory.path().join("supervisor");
+
+        test_env::write_executable(&binary, "IFS= read -r request\nexit 0");
+        unsafe { std::env::set_var("MAGENTS_SUPERVISOR_BIN", &binary) };
+        let error = request_supervisor(&homes, Agent::Codex, "private prompt", &cwd, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no control"), "{error}");
+
+        test_env::write_executable(
+            &binary,
+            r#"IFS= read -r request
+printf '%s\n' '{"control":"provider","version":1,"supervisor":1,"provider":2,"group":2}'
+printf '%s\n' '{"accepted":false}'
+"#,
+        );
+        let error = request_supervisor(&homes, Agent::Codex, "private prompt", &cwd, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("mismatched provider"), "{error}");
+
+        let reply = serde_json::to_string(&Reply {
+            accepted: true,
+            status: Some(Status::Starting),
+            session: Some(resumed_session(
+                Agent::Codex,
+                "codex-valid",
+                &cwd,
+                Transport::CodexExec,
+            )),
+            error: None,
+        })
+        .unwrap();
+        test_env::write_executable(
+            &binary,
+            r#"IFS= read -r request
+(sleep 5) &
+provider=$!
+group=$(ps -o pgid= -p "$provider" | tr -d ' ')
+printf '{"control":"provider","version":1,"supervisor":%s,"provider":%s,"group":%s}\n' "$$" "$provider" "$group"
+printf '%s\n' "$MAGENTS_TEST_REPLY"
+exec <&-
+sleep 5
+"#,
+        );
+        unsafe { std::env::set_var("MAGENTS_TEST_REPLY", reply) };
+        let error = request_supervisor(&homes, Agent::Codex, "private prompt", &cwd, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("failed to accept"), "{error}");
+    }
+
+    #[test]
+    fn reporter_failure_terminates_cursor_and_provider() {
+        let _guard = test_env::lock(ENV);
+        let directory = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(directory.path());
+        let cwd = fs::canonicalize(directory.path()).unwrap();
+        let binary = directory.path().join("agent");
+        test_env::write_executable(&binary, SCRIPT);
+        unsafe {
+            std::env::set_var("MAGENTS_CURSOR_BIN", &binary);
+            std::env::set_var("MAGENTS_CODEX_BIN", &binary);
+            std::env::set_var("MAGENTS_TEST_AGENT", "codex");
+            std::env::set_var("MAGENTS_TEST_ARGS", directory.path().join("args"));
+            std::env::set_var("MAGENTS_TEST_STDIN", directory.path().join("stdin"));
+            std::env::set_var("MAGENTS_TEST_ENV", directory.path().join("environment"));
+        }
+        let mut fail = |_provider: Provider| Err(Error::msg("reporter failed"));
+        let cursor = prepare_request_with(
+            &homes,
+            Agent::Cursor,
+            &cwd,
+            None,
+            "private prompt",
+            Some(&mut fail),
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(cursor.contains("reporter failed"), "{cursor}");
+
+        let mut fail = |_provider: Provider| Err(Error::msg("reporter failed"));
+        let launch = prepare_request_with(
+            &homes,
+            Agent::Codex,
+            &cwd,
+            None,
+            "private prompt",
+            Some(&mut fail),
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(launch.contains("reporter failed"), "{launch}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ownership_overflow_reaps_exited_and_stubborn_untrusted() {
+        assert!(!super::provider_owned(
+            Provider {
+                pid: 1,
+                group: u32::MAX,
+            },
+            1,
+        ));
+        assert!(!super::provider_owned(
+            Provider { pid: 1, group: 1 },
+            u32::MAX,
+        ));
+
+        let mut child = Command::new("/usr/bin/true")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let group = child.id();
+        child.wait().unwrap();
+        terminate_child(&mut child, group);
+
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "trap '' TERM; exec /bin/sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        isolate_provider(&mut command);
+        let mut child = command.spawn().unwrap();
+        let provider = Provider {
+            pid: child.id(),
+            group: child.id(),
+        };
+        let session = u32::try_from(unsafe { libc::getsid(child.id() as i32) }).unwrap();
+        terminate_provider(provider, session, false);
+        let _ = child.wait();
+        assert!(!pid_alive(provider.pid));
     }
 
     #[test]

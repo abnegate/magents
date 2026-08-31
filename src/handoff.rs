@@ -70,6 +70,7 @@ pub fn pick_peer(homes: &Homes, from: &Session) -> Result<Session> {
             live_only: true,
             include_archived: false,
             limit: 0,
+            ..ListFilter::default()
         },
     )?;
     let mut peers: Vec<Session> = live
@@ -159,7 +160,7 @@ mod tests {
     use crate::discover::resolve;
     use crate::handoff_tests::World;
     use crate::homes::Homes;
-    use crate::mailbox;
+    use crate::mailbox::{self, InboxQuery};
     use crate::model::{Agent, Caller, Session, Transcript, Turn};
     use crate::test_env;
     use crate::transcript::read_transcript;
@@ -254,13 +255,26 @@ mod tests {
                 agent: Some(Agent::Cursor),
                 session_id: Some(report.to.session_id.clone()),
             },
-            None,
-            None,
+            InboxQuery::default(),
         )
         .unwrap();
-        assert_eq!(inbox.len(), 1);
-        assert!(inbox[0].message.contains("magents-handoff"));
-        assert!(inbox[0].message.contains("dedicated databases"));
+        assert_eq!(inbox.items.len(), 1);
+        assert!(inbox.items[0].message.contains("magents-handoff"));
+        assert!(inbox.items[0].message.contains("dedicated databases"));
+    }
+
+    #[test]
+    fn run_picks_a_live_peer_when_to_is_omitted() {
+        let _guard = test_env::lock(ENV);
+        unsafe {
+            std::env::set_var("GROK_SESSION_ID", "01testgrok0000000000000000");
+            std::env::remove_var("CLAUDE_SESSION_ID");
+            std::env::remove_var("CLAUDE_PROJECT_DIR");
+        }
+        let world = World::new();
+        let report = run(&world.homes, None, Some("auto peer")).unwrap();
+        assert_ne!(report.to.agent, Agent::Grok);
+        assert_eq!(report.reason, "auto peer");
     }
 
     #[test]
@@ -303,6 +317,20 @@ mod tests {
         let homes = Homes::isolated(dir.path());
         let error = pick_peer(&homes, &session()).unwrap_err();
         assert!(error.to_string().contains("no other live session"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let projects = homes.cursor.join("projects");
+            std::fs::create_dir_all(&projects).unwrap();
+            let mut permissions = std::fs::metadata(&projects).unwrap().permissions();
+            permissions.set_mode(0o000);
+            std::fs::set_permissions(&projects, permissions).unwrap();
+            assert!(pick_peer(&homes, &session()).is_err());
+            let mut permissions = std::fs::metadata(&projects).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&projects, permissions).unwrap();
+        }
     }
 
     #[test]
