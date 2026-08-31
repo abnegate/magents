@@ -66,7 +66,7 @@ pub fn create_memory(
 
 fn memory_filename(file: &str) -> Result<String> {
     let file = file.trim();
-    if file.is_empty() || file.contains("..") || file.contains('/') || file.contains('\\') {
+    if file.is_empty() || file.contains('/') || file.contains('\\') {
         return Err(Error::msg("file must be a markdown basename"));
     }
     let name = if file.ends_with(".md") {
@@ -130,7 +130,6 @@ fn project_component(project: &str) -> Result<String> {
     if project.is_empty()
         || project == "."
         || project.eq_ignore_ascii_case(".git")
-        || project.contains("..")
         || project.contains('/')
         || project.contains('\\')
         || path.components().count() != 1
@@ -148,6 +147,13 @@ fn encode_claude_cwd(cwd: &str) -> Result<String> {
     let cwd = cwd.trim().trim_end_matches(['/', '\\']);
     if cwd.is_empty() {
         return Err(Error::msg("cwd is required"));
+    }
+    if Path::new(cwd)
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+        || cwd.split(['/', '\\']).any(|part| part == "..")
+    {
+        return Err(Error::msg("cwd is not a valid Claude project path"));
     }
     let slug: String = cwd
         .chars()
@@ -264,11 +270,21 @@ fn write_memory_file(path: &Path, root: &Path, content: &str) -> Result<()> {
             });
         }
     };
-    file.write_all(content.as_bytes())
-        .map_err(|source| Error::Io {
+    write_exclusive_contents(path, &mut file, content)
+}
+
+fn write_exclusive_contents(path: &Path, file: &mut impl Write, content: &str) -> Result<()> {
+    if let Err(source) = file
+        .write_all(content.as_bytes())
+        .and_then(|_| file.flush())
+    {
+        let _ = fs::remove_file(path);
+        return Err(Error::Io {
             path: path.to_path_buf(),
             source,
-        })
+        });
+    }
+    Ok(())
 }
 
 fn include(filter: Option<Agent>, agent: Agent) -> bool {
@@ -1013,6 +1029,115 @@ mod tests {
                 "{project:?} -> {err}"
             );
         }
+    }
+
+    #[test]
+    fn create_memory_accepts_consecutive_dots_in_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(dir.path());
+        let grok = create_memory(
+            &homes,
+            Agent::Grok,
+            "dotted project note",
+            Some("note..v2.md"),
+            Some("foo..bar"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(grok.file, "note..v2.md");
+        assert_eq!(grok.project.as_deref(), Some("foo..bar"));
+        assert_eq!(
+            grok.path,
+            homes
+                .grok
+                .join("memory")
+                .join("foo..bar")
+                .join("note..v2.md")
+        );
+        assert_eq!(
+            fs::read_to_string(&grok.path).unwrap(),
+            "dotted project note"
+        );
+
+        let claude = create_memory(
+            &homes,
+            Agent::Claude,
+            "dotted cwd note",
+            Some("cwd..note.md"),
+            None,
+            Some("/Users/foo..bar/proj"),
+        )
+        .unwrap();
+        assert_eq!(claude.project.as_deref(), Some("-Users-foo..bar-proj"));
+        assert_eq!(claude.file, "cwd..note.md");
+        assert_eq!(
+            claude.path,
+            homes
+                .claude
+                .join("projects")
+                .join("-Users-foo..bar-proj")
+                .join("memory")
+                .join("cwd..note.md")
+        );
+    }
+
+    #[test]
+    fn create_memory_removes_destination_when_write_fails() {
+        use super::write_exclusive_contents;
+        use std::io::{self, Write};
+
+        struct FailingWrite;
+        impl Write for FailingWrite {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("disk full"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        struct FlushFails;
+        impl Write for FlushFails {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::other("flush failed"))
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        for (mut writer, label) in [
+            (Box::new(FailingWrite) as Box<dyn Write>, "write"),
+            (Box::new(FlushFails) as Box<dyn Write>, "flush"),
+        ] {
+            let path = dir.path().join(format!("{label}.md"));
+            fs::write(&path, "partial").unwrap();
+            let err = write_exclusive_contents(&path, &mut writer, "hello").unwrap_err();
+            assert!(
+                err.to_string().contains("failed to read"),
+                "{label} -> {err}"
+            );
+            assert!(
+                !path.exists(),
+                "{label} should remove the destination so create_new can retry"
+            );
+        }
+
+        let homes = Homes::isolated(dir.path());
+        let created = create_memory(
+            &homes,
+            Agent::Codex,
+            "retry after failed write",
+            Some("write.md"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&created.path).unwrap(),
+            "retry after failed write"
+        );
     }
 
     #[test]
