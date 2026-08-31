@@ -23,6 +23,8 @@ const GROK_ID: &str = "01testgrok0000000000000000";
 const CODEX_ID: &str = "01testcodex000000000000000";
 const OPENCODE_ID: &str = "ses_testopencode0001";
 const OPENCODE_CHILD: &str = "ses_testchild0000001";
+const GEMINI_ID: &str = "55555555-5555-4555-8555-555555555555";
+const COPILOT_ID: &str = "66666666-6666-4666-8666-666666666666";
 
 pub(crate) struct World {
     _dir: TempDir,
@@ -38,6 +40,8 @@ impl World {
         write_codex(&homes);
         write_cursor(&homes);
         write_opencode_sqlite(&homes);
+        write_gemini(&homes);
+        write_copilot(&homes);
         Self { _dir: dir, homes }
     }
 }
@@ -592,6 +596,47 @@ fn write_opencode_json_only(root: &Path) {
     );
 }
 
+fn write_gemini(homes: &Homes) {
+    write(
+        &homes
+            .gemini
+            .join("tmp")
+            .join("projhash")
+            .join("chats")
+            .join("session-2026-01-12T00-00-55555555.json"),
+        &json!({
+            "sessionId": GEMINI_ID,
+            "projectHash": "projhash",
+            "startTime": "2026-01-12T00:00:00.000Z",
+            "lastUpdated": Utc::now().to_rfc3339(),
+            "cwd": "/tmp/gemini",
+            "messages": [
+                {"type": "user", "content": "run the gemini dedicated databases check"},
+                {"type": "gemini", "content": "inspecting src/gemini.rs", "toolName": "Read"}
+            ]
+        })
+        .to_string(),
+    );
+}
+
+fn write_copilot(homes: &Homes) {
+    let dir = homes.copilot.join("session-state").join(COPILOT_ID);
+    write(
+        &dir.join("workspace.yaml"),
+        &format!(
+            "id: {COPILOT_ID}\ncwd: /tmp/copilot\nclient_name: github/cli\nname: Copilot CLI check\nupdated_at: {}\n",
+            Utc::now().to_rfc3339()
+        ),
+    );
+    write(
+        &dir.join("events.jsonl"),
+        r#"{"type":"session.start","data":{"sessionId":"66666666-6666-4666-8666-666666666666"}}
+{"type":"user.message","data":{"content":"check the copilot dedicated databases leak"}}
+{"type":"assistant.message","data":{"content":"viewing src/copilot.rs","toolRequests":[{"name":"view","arguments":{"path":"src/copilot.rs"}}]}}
+"#,
+    );
+}
+
 fn all_agents() -> ListFilter {
     ListFilter {
         agent: None,
@@ -616,6 +661,8 @@ fn lists_every_harness_and_skips_subagents() {
     assert!(ids.contains(&(Agent::Codex, CODEX_ID)));
     assert!(ids.contains(&(Agent::Cursor, CURSOR_ID)));
     assert!(ids.contains(&(Agent::OpenCode, OPENCODE_ID)));
+    assert!(ids.contains(&(Agent::Gemini, GEMINI_ID)));
+    assert!(ids.contains(&(Agent::Copilot, COPILOT_ID)));
     assert!(!ids.iter().any(|(_, id)| *id == CURSOR_SUB_ID));
     assert!(!ids.iter().any(|(_, id)| *id == OPENCODE_CHILD));
 }
@@ -706,6 +753,36 @@ fn reads_compact_handoff_for_each_agent() {
             .unwrap()
             .contains("all checks passed")
     );
+
+    let gemini = read_transcript(&world.homes, "gemini:dedicated databases", 20).unwrap();
+    assert!(
+        gemini
+            .last_user_request
+            .as_deref()
+            .unwrap()
+            .contains("gemini dedicated databases")
+    );
+    assert!(
+        gemini
+            .turns
+            .iter()
+            .any(|turn| turn.tools.contains(&"Read".into()))
+    );
+
+    let copilot = read_transcript(&world.homes, "copilot:Copilot CLI", 20).unwrap();
+    assert!(
+        copilot
+            .last_user_request
+            .as_deref()
+            .unwrap()
+            .contains("copilot dedicated databases")
+    );
+    assert!(
+        copilot
+            .turns
+            .iter()
+            .any(|turn| turn.tools.contains(&"view".into()))
+    );
 }
 
 #[test]
@@ -727,6 +804,24 @@ fn searches_across_harnesses() {
     let zone =
         search_transcripts(&world.homes, "zone-dev", Some(Agent::OpenCode), false, 10).unwrap();
     assert_eq!(zone.len(), 1);
+    let gemini = search_transcripts(
+        &world.homes,
+        "gemini dedicated",
+        Some(Agent::Gemini),
+        false,
+        10,
+    )
+    .unwrap();
+    assert_eq!(gemini.len(), 1);
+    let copilot = search_transcripts(
+        &world.homes,
+        "copilot dedicated",
+        Some(Agent::Copilot),
+        false,
+        10,
+    )
+    .unwrap();
+    assert_eq!(copilot.len(), 1);
     let limited = search_transcripts(&world.homes, "109 point", None, false, 1).unwrap();
     assert_eq!(limited.len(), 1);
 }

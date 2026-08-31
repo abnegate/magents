@@ -17,6 +17,8 @@ const CURSOR_SPAWN_ID: &str = "33333333-3333-4333-8333-333333333333";
 const CURSOR_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const GROK_ID: &str = "01testgrok0000000000000000";
 const OPENCODE_SPAWN_ID: &str = "ses_spawned_opencode";
+const GEMINI_ID: &str = "55555555-5555-4555-8555-555555555555";
+const COPILOT_ID: &str = "66666666-6666-4666-8666-666666666666";
 
 const AGENT_STUB: &str = r#"
 if [ "$1" = 'create-chat' ]; then
@@ -26,11 +28,13 @@ fi
 printf '%s\n' "$@" > "$MAGENTS_TEST_ARGS"
 printf '%s\n' "$$" > "$MAGENTS_TEST_AGENT_PID"
 printf '%s\n' "$PPID" > "$MAGENTS_TEST_SUPERVISOR_PID"
-printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
     "${CLAUDE_CONFIG_DIR-}" "${CODEX_HOME-}" "${CURSOR_CONFIG_DIR-}" "${CURSOR_DATA_DIR-}" \
     "${GROK_HOME-}" "${XDG_DATA_HOME-}" "${XDG_CONFIG_HOME-}" "$MAGENTS_HOME" \
     "${CLAUDE_SESSION_ID-}" \
     "${CODEX_SESSION_ID-}" "${CURSOR_SESSION_ID-}" "${OPENCODE_SESSION_ID-}" \
+    "${GEMINI_CLI_HOME-}" "${COPILOT_HOME-}" \
+    "${GEMINI_SESSION_ID-}" "${COPILOT_SESSION_ID-}" \
     > "$MAGENTS_TEST_ENV"
 cat > "$MAGENTS_TEST_STDIN"
 case "${MAGENTS_TEST_MODE-}" in
@@ -52,6 +56,9 @@ for argument in "$@"; do
     if [ "$next" = 'session' ]; then session="$argument"; next=''; fi
     if [ "$argument" = '--session-id' ] || [ "$argument" = '--resume' ] || [ "$argument" = '--session' ]; then next='session'; fi
     if [ "$previous" = 'resume' ] && [ -z "$session" ]; then session="$argument"; fi
+    case "$argument" in
+        --resume=*) session="${argument#--resume=}" ;;
+    esac
     previous="$argument"
 done
 case "$MAGENTS_TEST_AGENT" in
@@ -59,6 +66,8 @@ case "$MAGENTS_TEST_AGENT" in
     codex) printf '%s\n' '{"type":"thread.started","thread_id":"22222222-2222-4222-8222-222222222222"}' ;;
     grok) printf '{"method":"session/update","params":{"sessionId":"%s"}}\n' "$session" ;;
     opencode) printf '%s\n' '{"type":"step_start","sessionID":"ses_spawned_opencode"}' ;;
+    gemini) printf '{"type":"init","session_id":"%s"}\n' "$session" ;;
+    copilot) printf '{"type":"session.start","data":{"sessionId":"%s"}}\n' "$session" ;;
 esac
 index=0
 while [ "$index" -lt 300 ]; do
@@ -96,6 +105,8 @@ impl Harness {
             .env("MAGENTS_HOME", self.root.join("magents"))
             .env("XDG_CONFIG_HOME", self.root.join("opencode-config"))
             .env("XDG_DATA_HOME", &self.root)
+            .env("GEMINI_CLI_HOME", self.root.join("gemini"))
+            .env("COPILOT_HOME", self.root.join("copilot"))
             .args(args);
         for key in [
             "CLAUDE_CODE_MESSAGING_SOCKET",
@@ -108,6 +119,8 @@ impl Harness {
             "CURSOR_PROJECT_DIR",
             "CURSOR_SESSION_ID",
             "GROK_SESSION_ID",
+            "GEMINI_SESSION_ID",
+            "COPILOT_SESSION_ID",
             "OPENCODE_DIRECTORY",
             "OPENCODE_SERVER",
             "OPENCODE_SESSION",
@@ -310,6 +323,32 @@ fn write_tree(root: &Path) {
         &root.join("grok/memory/tmp-edge/MEMORY.md"),
         "GROK_WORKSPACE_MEMORY_NEEDLE workspace notes\nMEMORY_NEEDLE\n",
     );
+    write(
+        &root
+            .join("gemini/tmp/projhash/chats")
+            .join("session-2026-01-12T00-00-55555555.json"),
+        &format!(
+            r#"{{"sessionId":"{GEMINI_ID}","cwd":"/tmp/gemini","lastUpdated":"2026-08-29T00:00:00Z","messages":[{{"type":"user","content":"run the gemini dedicated databases check"}},{{"type":"gemini","content":"inspecting src/gemini.rs","toolName":"Read"}}]}}"#
+        ),
+    );
+    write(
+        &root
+            .join("copilot/session-state")
+            .join(COPILOT_ID)
+            .join("workspace.yaml"),
+        &format!(
+            "id: {COPILOT_ID}\ncwd: /tmp/copilot\nclient_name: github/cli\nname: Copilot CLI check\nupdated_at: 2026-08-29T00:00:00Z\n"
+        ),
+    );
+    write(
+        &root
+            .join("copilot/session-state")
+            .join(COPILOT_ID)
+            .join("events.jsonl"),
+        r#"{"type":"user.message","data":{"content":"check the copilot dedicated databases leak"}}
+{"type":"assistant.message","data":{"content":"viewing src/copilot.rs","toolRequests":[{"name":"view","arguments":{"path":"src/copilot.rs"}}]}}
+"#,
+    );
 }
 
 #[test]
@@ -328,6 +367,8 @@ fn cli_lists_reads_searches_and_mails_across_harnesses() {
     assert!(agents.contains(&"grok".into()));
     assert!(agents.contains(&"cursor".into()));
     assert!(agents.contains(&"opencode".into()));
+    assert!(agents.contains(&"gemini".into()));
+    assert!(agents.contains(&"copilot".into()));
 
     let claude = harness.json(&["get", "claude:disaster-recovery"]);
     assert_eq!(claude["session_id"], CLAUDE_ID);
@@ -356,6 +397,21 @@ fn cli_lists_reads_searches_and_mails_across_harnesses() {
             .as_str()
             .unwrap()
             .contains("dedicated databases")
+    );
+
+    let gemini = harness.json(&["read", "gemini:dedicated databases", "-n", "10"]);
+    assert!(
+        gemini["last_user_request"]
+            .as_str()
+            .unwrap()
+            .contains("gemini dedicated databases")
+    );
+    let copilot = harness.json(&["read", "copilot:Copilot CLI", "-n", "10"]);
+    assert!(
+        copilot["last_user_request"]
+            .as_str()
+            .unwrap()
+            .contains("copilot dedicated databases")
     );
 
     let hits = harness.json(&["search", "109 point"]);
@@ -679,6 +735,8 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
         ("cursor", "MAGENTS_CURSOR_BIN", "cursor-agent"),
         ("grok", "MAGENTS_GROK_BIN", "grok-stream"),
         ("opencode", "MAGENTS_OPENCODE_BIN", "opencode-run"),
+        ("gemini", "MAGENTS_GEMINI_BIN", "gemini-stream"),
+        ("copilot", "MAGENTS_COPILOT_BIN", "copilot-json"),
     ];
 
     for (agent, variable, origin) in cases {
@@ -765,6 +823,8 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
                 "/dev/stdin",
             ],
             "opencode" => vec!["run", "--format", "json", "--dir", cwd_text],
+            "gemini" => vec!["--output-format", "stream-json", "--session-id", session_id],
+            "copilot" => vec!["--output-format", "json", "--session-id", session_id],
             _ => unreachable!(),
         };
         assert_eq!(args, expected, "{agent} argv changed");
@@ -775,7 +835,6 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
         assert!(!child_prompt.contains("<magents-reply-to"));
         let environment = wait_for(&artifacts.join("environment"), Duration::from_secs(2));
         let environment = environment.trim_end().split('|').collect::<Vec<_>>();
-        assert_eq!(environment.len(), 12, "{agent}: {environment:?}");
         assert_eq!(
             environment[7],
             harness.root.join("magents").to_str().unwrap()
@@ -792,9 +851,15 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
                 (5, harness.root.clone()),
                 (6, harness.root.join("opencode-config")),
             ],
+            "gemini" => vec![(12, harness.root.join("gemini"))],
+            "copilot" => vec![(13, harness.root.join("copilot"))],
             _ => unreachable!(),
         };
-        for index in 0..7 {
+        assert_eq!(environment.len(), 16, "{agent}: {environment:?}");
+        for index in 0..14 {
+            if index == 7 || (8..=11).contains(&index) {
+                continue;
+            }
             let expected = expected_homes
                 .iter()
                 .find(|(target, _)| *target == index)
@@ -802,7 +867,8 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
                 .unwrap_or("");
             assert_eq!(environment[index], expected, "{agent}: {environment:?}");
         }
-        assert!(environment[8..].iter().all(|value| value.is_empty()));
+        assert!(environment[8..=11].iter().all(|value| value.is_empty()));
+        assert!(environment[14..].iter().all(|value| value.is_empty()));
 
         let resolved = harness.json(&["get", &format!("{agent}:{session_id}")]);
         assert_eq!(resolved["session_id"], session_id);

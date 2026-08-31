@@ -58,9 +58,9 @@ pub fn create_memory(
         Agent::Claude => create_claude(homes, content, &file, project, cwd),
         Agent::Codex => create_codex(homes, content, &file),
         Agent::Grok => create_grok(homes, content, &file, project),
-        Agent::Cursor | Agent::OpenCode => Err(Error::msg(format!(
-            "{agent} has no first-party memory store"
-        ))),
+        Agent::Cursor | Agent::OpenCode | Agent::Gemini | Agent::Copilot => Err(Error::msg(
+            format!("{agent} has no first-party memory store"),
+        )),
     }
 }
 
@@ -139,7 +139,7 @@ fn resolve_read(
             };
             (path, project)
         }
-        Agent::Cursor | Agent::OpenCode => {
+        Agent::Cursor | Agent::OpenCode | Agent::Gemini | Agent::Copilot => {
             return Err(Error::msg(format!(
                 "{agent} has no first-party memory store"
             )));
@@ -206,7 +206,7 @@ fn memory_roots(homes: &Homes, agent: Agent) -> Result<Vec<PathBuf>> {
         Agent::Claude => vec![homes.claude.join("projects")],
         Agent::Codex => vec![homes.codex.join("memories")],
         Agent::Grok => vec![homes.grok.join("memory")],
-        Agent::Cursor | Agent::OpenCode => {
+        Agent::Cursor | Agent::OpenCode | Agent::Gemini | Agent::Copilot => {
             return Err(Error::msg(format!(
                 "{agent} has no first-party memory store"
             )));
@@ -613,6 +613,11 @@ mod tests {
             &homes.opencode.join("memory").join("MEMORY.md"),
             "opencode note needle",
         );
+        write(&homes.gemini.join("GEMINI.md"), "gemini note needle");
+        write(
+            &homes.copilot.join("memory").join("MEMORY.md"),
+            "copilot note needle",
+        );
         write(
             &homes
                 .claude
@@ -629,6 +634,16 @@ mod tests {
         );
         assert!(
             search_memories(&homes, "needle", Some(Agent::OpenCode), 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            search_memories(&homes, "needle", Some(Agent::Gemini), 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            search_memories(&homes, "needle", Some(Agent::Copilot), 10)
                 .unwrap()
                 .is_empty()
         );
@@ -749,6 +764,16 @@ mod tests {
         );
         assert!(
             search_memories(&homes, "shared agent needle", Some(Agent::OpenCode), 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            search_memories(&homes, "shared agent needle", Some(Agent::Gemini), 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            search_memories(&homes, "shared agent needle", Some(Agent::Copilot), 10)
                 .unwrap()
                 .is_empty()
         );
@@ -1132,7 +1157,12 @@ mod tests {
     fn create_memory_rejects_cursor_opencode_overwrite_and_escapes() {
         let dir = tempfile::tempdir().unwrap();
         let homes = Homes::isolated(dir.path());
-        for agent in [Agent::Cursor, Agent::OpenCode] {
+        for agent in [
+            Agent::Cursor,
+            Agent::OpenCode,
+            Agent::Gemini,
+            Agent::Copilot,
+        ] {
             let err = create_memory(&homes, agent, "should fail", Some("note.md"), None, None)
                 .unwrap_err();
             assert!(
@@ -1505,6 +1535,20 @@ mod tests {
 
         let err =
             read_memory(&homes, Agent::Cursor, Some("note.md"), None, None, None, 10).unwrap_err();
+        assert!(err.to_string().contains("no first-party memory store"));
+        let err =
+            read_memory(&homes, Agent::Gemini, Some("note.md"), None, None, None, 10).unwrap_err();
+        assert!(err.to_string().contains("no first-party memory store"));
+        let err = read_memory(
+            &homes,
+            Agent::Copilot,
+            Some("note.md"),
+            None,
+            None,
+            None,
+            10,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("no first-party memory store"));
 
         let err = read_memory(&homes, Agent::Claude, None, None, None, None, 10).unwrap_err();

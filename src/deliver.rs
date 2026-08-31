@@ -113,6 +113,22 @@ where
             &mut delivered,
             &mut resume,
         ),
+        Agent::Gemini => record_resume(
+            homes,
+            session,
+            message,
+            "gemini-cli",
+            &mut delivered,
+            &mut resume,
+        ),
+        Agent::Copilot => record_resume(
+            homes,
+            session,
+            message,
+            "copilot-cli",
+            &mut delivered,
+            &mut resume,
+        ),
     }
     Ok(delivered)
 }
@@ -411,7 +427,9 @@ mod tests {
         for (agent, id, marker) in [
             (Agent::Claude, "claude-id", "claude-cli"),
             (Agent::Codex, "codex-id", "codex-exec"),
+            (Agent::Copilot, "copilot-id", "copilot-cli"),
             (Agent::Cursor, "cursor-id", "cursor-cli"),
+            (Agent::Gemini, "gemini-id", "gemini-cli"),
             (Agent::Grok, "grok-id", "grok-single"),
             (Agent::OpenCode, "opencode-id", "opencode-run"),
         ] {

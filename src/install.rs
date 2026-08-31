@@ -12,6 +12,8 @@ pub fn install(
     codex: bool,
     cursor: bool,
     opencode: bool,
+    gemini: bool,
+    copilot: bool,
 ) -> Result<Vec<String>> {
     let exe = std::env::current_exe().map_err(|source| Error::Io {
         path: PathBuf::from("magents"),
@@ -66,6 +68,28 @@ pub fn install(
                 .join("SKILL.md"),
         )?);
     }
+    if gemini {
+        notes.push(install_gemini(&exe)?);
+        notes.push(write_skill(
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(".gemini")
+                .join("skills")
+                .join("magents")
+                .join("SKILL.md"),
+        )?);
+    }
+    if copilot {
+        notes.push(install_copilot(&exe)?);
+        notes.push(write_skill(
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(".copilot")
+                .join("skills")
+                .join("magents")
+                .join("SKILL.md"),
+        )?);
+    }
     Ok(notes)
 }
 
@@ -111,6 +135,32 @@ fn install_codex(exe: &Path) -> Result<String> {
         "mcp",
     ];
     add_or_replace("codex", &add, &["mcp", "remove", "magents"])
+}
+
+fn install_gemini(exe: &Path) -> Result<String> {
+    let add = [
+        "mcp",
+        "add",
+        "-s",
+        "user",
+        "magents",
+        "--",
+        exe.to_str().unwrap_or("magents"),
+        "mcp",
+    ];
+    add_or_replace("gemini", &add, &["mcp", "remove", "-s", "user", "magents"])
+}
+
+fn install_copilot(exe: &Path) -> Result<String> {
+    let add = [
+        "mcp",
+        "add",
+        "magents",
+        "--",
+        exe.to_str().unwrap_or("magents"),
+        "mcp",
+    ];
+    add_or_replace("copilot", &add, &["mcp", "remove", "magents"])
 }
 
 fn add_or_replace(program: &str, add: &[&str], remove: &[&str]) -> Result<String> {
@@ -281,7 +331,7 @@ mod tests {
 
     #[test]
     fn install_none_is_empty() {
-        let notes = install(false, false, false, false, false).unwrap();
+        let notes = install(false, false, false, false, false, false, false).unwrap();
         assert!(notes.is_empty());
     }
 
@@ -293,7 +343,7 @@ mod tests {
             let opencode = home.join(".config").join("opencode").join("opencode.json");
             fs::create_dir_all(opencode.parent().unwrap()).unwrap();
             fs::write(&opencode, "{}\n").unwrap();
-            let notes = install(false, false, false, true, true).unwrap();
+            let notes = install(false, false, false, true, true, false, false).unwrap();
             assert!(notes.iter().any(|note| note.contains("mcp.json")));
             let cursor_raw = fs::read_to_string(&cursor).unwrap();
             assert!(cursor_raw.contains("magents"));
@@ -340,7 +390,7 @@ echo already exists >&2
 exit 1
 "#,
             );
-            let notes = install(true, false, false, false, false).unwrap();
+            let notes = install(true, false, false, false, false, false, false).unwrap();
             assert!(
                 notes.iter().any(|note| note.contains("added magents")),
                 "{notes:?}"
@@ -355,7 +405,7 @@ exit 1
             test_env::write_executable(&bin.join("grok"), "echo added magents");
             test_env::write_executable(&bin.join("claude"), "echo added magents");
             test_env::write_executable(&bin.join("codex"), "exit 0");
-            let notes = install(true, true, true, false, false).unwrap();
+            let notes = install(true, true, true, false, false, false, false).unwrap();
             assert!(notes.iter().any(|note| note.contains("added magents")));
             assert!(
                 notes
@@ -368,9 +418,32 @@ exit 1
     }
 
     #[test]
+    fn install_gemini_and_copilot_with_stubs() {
+        with_home(|home, bin| {
+            test_env::write_executable(&bin.join("gemini"), "echo added gemini magents");
+            test_env::write_executable(&bin.join("copilot"), "echo added copilot magents");
+            let notes = install(false, false, false, false, false, true, true).unwrap();
+            assert!(
+                notes
+                    .iter()
+                    .any(|note| note.contains("added gemini magents")),
+                "{notes:?}"
+            );
+            assert!(
+                notes
+                    .iter()
+                    .any(|note| note.contains("added copilot magents")),
+                "{notes:?}"
+            );
+            assert!(home.join(".gemini/skills/magents/SKILL.md").is_file());
+            assert!(home.join(".copilot/skills/magents/SKILL.md").is_file());
+        });
+    }
+
+    #[test]
     fn install_cli_host_missing_binary() {
         with_home(|_home, _bin| {
-            let error = install(false, true, false, false, false).unwrap_err();
+            let error = install(false, true, false, false, false, false, false).unwrap_err();
             assert!(error.to_string().contains("grok not found"));
         });
     }
@@ -379,7 +452,7 @@ exit 1
     fn install_cli_host_failure() {
         with_home(|_home, bin| {
             test_env::write_executable(&bin.join("claude"), "echo boom >&2; exit 1");
-            let error = install(true, false, false, false, false).unwrap_err();
+            let error = install(true, false, false, false, false, false, false).unwrap_err();
             assert!(error.to_string().contains("claude mcp add failed"));
         });
     }
@@ -411,7 +484,7 @@ exit 1
             let path = home.join(".cursor").join("mcp.json");
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, r#"{"mcpServers":[]}"#).unwrap();
-            let error = install(false, false, false, true, false).unwrap_err();
+            let error = install(false, false, false, true, false, false, false).unwrap_err();
             assert!(error.to_string().contains("mcpServers must be an object"));
         });
     }
@@ -433,7 +506,7 @@ exit 1
             let path = home.join(".config").join("opencode").join("opencode.json");
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, r#"{"mcp":[]}"#).unwrap();
-            let error = install(false, false, false, false, true).unwrap_err();
+            let error = install(false, false, false, false, true, false, false).unwrap_err();
             assert!(error.to_string().contains("mcp must be an object"));
         });
     }
@@ -474,13 +547,13 @@ echo already exists >&2
 exit 1
 "#,
             );
-            let error = install(true, false, false, false, false).unwrap_err();
+            let error = install(true, false, false, false, false, false, false).unwrap_err();
             assert!(error.to_string().contains("already exists"));
 
             test_env::write_executable(&bin.join("grok"), "echo added magents");
             fs::create_dir_all(home.join(".grok")).unwrap();
             fs::write(home.join(".grok").join("skills"), "not-a-dir").unwrap();
-            assert!(install(false, true, false, false, false).is_err());
+            assert!(install(false, true, false, false, false, false, false).is_err());
         });
     }
 }
