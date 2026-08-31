@@ -352,7 +352,10 @@ fn run(program: &str, args: &[&str]) -> Result<String> {
                 )))
             }
         }
-        Err(error) => Err(Error::msg(format!("{program} not found: {error}"))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(Error::msg(format!("{program} not found: {error}")))
+        }
+        Err(error) => Err(Error::msg(format!("{program} mcp add failed: {error}"))),
     }
 }
 
@@ -558,6 +561,29 @@ exit 1
             );
             assert!(!home.join(".gemini/skills/magents/SKILL.md").is_file());
             assert!(!home.join(".copilot/skills/magents/SKILL.md").is_file());
+        });
+    }
+
+    #[test]
+    fn install_all_does_not_skip_unexecutable_host() {
+        with_home(|_home, bin| {
+            let gemini = bin.join("gemini");
+            fs::write(&gemini, "#!/bin/sh\necho added\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut permissions = fs::metadata(&gemini).unwrap().permissions();
+                permissions.set_mode(0o644);
+                fs::set_permissions(&gemini, permissions).unwrap();
+            }
+            let error = install_spec(InstallSpec {
+                gemini: true,
+                skip_missing: true,
+                ..InstallSpec::default()
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains("mcp add failed"), "{error}");
+            assert!(!error.to_string().contains("skipped"), "{error}");
         });
     }
 
