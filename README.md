@@ -99,7 +99,8 @@ magents install --all
 - Cursor (`~/.cursor/mcp.json`)
 - OpenCode (`~/.config/opencode/opencode.json`)
 
-It also writes a skill under `~/.grok/skills/magents` and `~/.claude/skills/magents`.
+It also writes a skill under `~/.grok/skills/magents`, `~/.claude/skills/magents`,
+`~/.cursor/skills/magents`, and `~/.config/opencode/skills/magents`.
 
 Or point each host at the binary yourself:
 
@@ -139,8 +140,10 @@ the process list or a shell command line. Empty prompts, repeated
 
 ## How sessions talk
 
-`list_sessions` / `read_transcript` / `search_transcripts` are the handoff.
-Choose the write operation by where the work should happen:
+`list_sessions` / `read_transcript` / `search_transcripts` / `search_memories`
+are the handoff. `create_memory` writes a note into another harness's
+first-party memory (Claude, Codex, or Grok).
+Choose the session write operation by where the work should happen:
 
 - `spawn_session` starts a **new**, headless, persisted, independent session.
   Use it only for work that can proceed independently. Send a complete task,

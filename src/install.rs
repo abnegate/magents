@@ -84,6 +84,9 @@ fn install_grok(exe: &Path) -> Result<String> {
 }
 
 fn install_claude(exe: &Path) -> Result<String> {
+    let _ = Command::new("claude")
+        .args(["mcp", "remove", "--scope", "user", "magents"])
+        .output();
     run(
         "claude",
         &[
@@ -100,6 +103,9 @@ fn install_claude(exe: &Path) -> Result<String> {
 }
 
 fn install_codex(exe: &Path) -> Result<String> {
+    let _ = Command::new("codex")
+        .args(["mcp", "remove", "magents"])
+        .output();
     run(
         "codex",
         &[
@@ -283,6 +289,33 @@ mod tests {
                 home.join(".config/opencode/skills/magents/SKILL.md")
                     .is_file()
             );
+        });
+    }
+
+    #[test]
+    fn install_claude_replaces_existing() {
+        with_home(|home, bin| {
+            test_env::write_executable(
+                &bin.join("claude"),
+                r#"
+if [ "$1" = mcp ] && [ "$2" = remove ]; then
+  : > "$HOME/.removed-magents"
+  exit 0
+fi
+if [ -f "$HOME/.removed-magents" ]; then
+  echo added magents
+  exit 0
+fi
+echo already exists >&2
+exit 1
+"#,
+            );
+            let notes = install(true, false, false, false, false).unwrap();
+            assert!(
+                notes.iter().any(|note| note.contains("added magents")),
+                "{notes:?}"
+            );
+            assert!(home.join(".claude/skills/magents/SKILL.md").is_file());
         });
     }
 
