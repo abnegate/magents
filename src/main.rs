@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use magents::discover::{ListFilter, list_sessions, resolve};
 use magents::homes::Homes;
 use magents::model::{Agent, Caller};
-use magents::{deliver, mailbox, transcript};
+use magents::{deliver, mailbox, memory, transcript};
 use std::io::IsTerminal;
 
 #[derive(Parser)]
@@ -42,6 +42,14 @@ enum Command {
     },
     /// Search transcripts
     Search {
+        query: String,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(short = 'n', long, default_value_t = 10)]
+        limit: usize,
+    },
+    /// Search Claude, Codex, and Grok memory markdown
+    SearchMemories {
         query: String,
         #[arg(long)]
         agent: Option<String>,
@@ -138,6 +146,19 @@ async fn main() -> anyhow::Result<()> {
                 &query,
                 agent.as_deref().and_then(Agent::parse),
                 false,
+                limit,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&hits)?);
+        }
+        Some(Command::SearchMemories {
+            query,
+            agent,
+            limit,
+        }) => {
+            let hits = memory::search_memories(
+                &Homes::from_env(),
+                &query,
+                agent.as_deref().and_then(Agent::parse),
                 limit,
             )?;
             println!("{}", serde_json::to_string_pretty(&hits)?);

@@ -38,6 +38,7 @@ If neither is true, stay in this session and `read_transcript`.
 | `get_session` | Lookup by id, title, live name, pid, or `agent:ref` |
 | `read_transcript` | Compact inert handoff (last request, last action, recent turns) |
 | `search_transcripts` | Full-text search across those transcripts |
+| `search_memories` | Phrase search over Claude / Codex / Grok memory markdown |
 | `send_message` | Inject a user turn into a specific live chat (mailbox always; live path when one exists) |
 | `handoff` | Compact this session and inject it into another live chat (omit `to` to pick) |
 | `inbox` | Read messages addressed to this session |
@@ -109,6 +110,7 @@ magents list --agent grok --query edge
 magents get 'claude:disaster recovery'
 magents read grok:latest -n 20
 magents search "dedicated databases" --agent claude
+magents search-memories "dedicated databases" --agent claude
 magents send grok:latest "handoff: the DR runbook is in docs/RUNBOOK.md"
 magents handoff grok:latest --reason "continuing in grok"
 magents inbox --session 01a04b43-bee6-7d13-9362-62111aa1fc51 --agent grok
