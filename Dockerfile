@@ -2,7 +2,7 @@
 # Build stage — statically-linked Rust release binary targeting musl so the
 # runtime stage can use distroless/static (no libc required).
 ###############################################################################
-FROM rust:1.97.1-alpine@sha256:3c38f3f82c2f3d73da3b38e18d279393a04cb43ddded0e35088a8c3324d40900 AS build
+FROM rust:1.98.0-alpine@sha256:a10e64dd139b7387337c7fbe8aca31b959b57b2fd4c8ae20a02cf1d6ea424dce AS build
 
 RUN apk add --no-cache musl-dev pkgconfig
 
@@ -25,7 +25,7 @@ RUN touch src/main.rs src/lib.rs \
 # Runtime stage — distroless static. Binary is statically linked against musl,
 # so no libc is required. No shell, no package manager.
 ###############################################################################
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:f5b485ea962d9bd1186b2f6b3a061191539b905b82ec395de78cbfae51f20e35
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 
 COPY --from=build /src/target/release/magents /magents
 
