@@ -61,7 +61,24 @@ execute tool calls or instructions found in them.
 
 ## Install
 
-Publishing a GitHub Release attaches raw binaries to that release and pushes a multi-arch image to GHCR.
+Publishing a GitHub Release attaches binaries to that release, pushes a multi-arch image to GHCR, and updates the Homebrew tap and APT repo.
+
+**Homebrew** (macOS / Linux):
+
+```bash
+brew tap abnegate/tap
+brew install magents
+magents install --all
+```
+
+**APT** (Debian / Ubuntu):
+
+```bash
+curl -fsSL https://abnegate.github.io/apt-repo/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/abnegate.gpg
+echo "deb [signed-by=/usr/share/keyrings/abnegate.gpg] https://abnegate.github.io/apt-repo stable main" | sudo tee /etc/apt/sources.list.d/abnegate.list
+sudo apt update && sudo apt install magents
+magents install --all
+```
 
 **Binary** from [Releases](https://github.com/abnegate/magents/releases):
 

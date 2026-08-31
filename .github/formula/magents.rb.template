@@ -1,0 +1,39 @@
+# typed: false
+# frozen_string_literal: true
+
+class Magents < Formula
+  desc "Shared session bus for Claude Code, Codex, Cursor, Grok, and OpenCode"
+  homepage "https://github.com/{{REPO_OWNER}}/magents"
+  version "{{VERSION}}"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/{{REPO_OWNER}}/magents/releases/download/{{TAG}}/magents-aarch64-apple-darwin.tar.gz"
+      sha256 "{{SHA256_AARCH64_APPLE_DARWIN}}"
+    end
+    on_intel do
+      url "https://github.com/{{REPO_OWNER}}/magents/releases/download/{{TAG}}/magents-x86_64-apple-darwin.tar.gz"
+      sha256 "{{SHA256_X86_64_APPLE_DARWIN}}"
+    end
+  end
+
+  on_linux do
+    on_intel do
+      url "https://github.com/{{REPO_OWNER}}/magents/releases/download/{{TAG}}/magents-x86_64-unknown-linux-musl.tar.gz"
+      sha256 "{{SHA256_X86_64_UNKNOWN_LINUX_MUSL}}"
+    end
+    on_arm do
+      url "https://github.com/{{REPO_OWNER}}/magents/releases/download/{{TAG}}/magents-aarch64-unknown-linux-musl.tar.gz"
+      sha256 "{{SHA256_AARCH64_UNKNOWN_LINUX_MUSL}}"
+    end
+  end
+
+  def install
+    bin.install Dir["magents-*"].first => "magents"
+  end
+
+  test do
+    assert_match "magents", shell_output("#{bin}/magents --help")
+  end
+end

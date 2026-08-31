@@ -1072,6 +1072,9 @@ fn cli_spawn_failures_are_bounded_sanitized_and_hidden() {
     let help = String::from_utf8_lossy(&help.stdout);
     assert!(help.contains("spawn"));
     assert!(!help.contains("__supervise"));
+    let version = harness.command(&["--version"]).output().unwrap();
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).contains("magents"));
     let spawn_help = harness.command(&["spawn", "--help"]).output().unwrap();
     assert!(spawn_help.status.success());
     let spawn_help = String::from_utf8_lossy(&spawn_help.stdout);
