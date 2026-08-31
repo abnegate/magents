@@ -107,7 +107,7 @@ jobs:
     needs: [fmt, clippy, test, coverage]
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -131,28 +131,32 @@ jobs:
           path: |
             Cargo.toml
             Cargo.lock
+
+  # GITHUB_TOKEN cannot push a new commit to a branch that requires status
+  # checks. GH_TOKEN is the owner PAT (same secret Dependabot auto-merge uses);
+  # enforce_admins is off, so that push can land. Publish jobs do not need this
+  # job, so a failed bump does not skip binaries or GHCR.
+  commit-release-version:
+    name: Commit release version
+    if: github.event_name == 'release'
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          token: ${{ secrets.GH_TOKEN }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-version
       - name: Commit version on the default branch when this release is its tip
-        continue-on-error: true
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.prepare-release.outputs.version }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          if git diff --quiet -- Cargo.toml Cargo.lock; then
-            echo "package.version already ${VERSION}"
-            exit 0
-          fi
-          git fetch origin "${DEFAULT_BRANCH}"
-          tip="$(git rev-parse "origin/${DEFAULT_BRANCH}")"
-          if [ "${{ github.sha }}" != "$tip" ]; then
-            echo "release commit is not ${DEFAULT_BRANCH} tip; skipping version commit"
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git switch -C "${DEFAULT_BRANCH}"
-          git add Cargo.toml Cargo.lock
-          git commit -m "(chore): set package.version to ${VERSION}"
-          git push origin "HEAD:${DEFAULT_BRANCH}"
+          RELEASE_SHA: ${{ github.sha }}
+        run: .github/scripts/commit-release-version.sh
 
   docker:
     name: Docker
