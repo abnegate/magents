@@ -10,6 +10,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     name = "magents",
+    version,
     about = "Mates + agents: shared session bus for Claude, Codex, Cursor, Grok, and OpenCode"
 )]
 struct Cli {
