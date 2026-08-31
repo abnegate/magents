@@ -1388,20 +1388,64 @@ fn yaml_scalar(value: &str) -> String {
 
 fn unescape_double_quoted(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
-    let mut chars = value.chars();
+    let mut chars = value.chars().peekable();
     while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            match chars.next() {
-                Some('n') => output.push('\n'),
-                Some('t') => output.push('\t'),
-                Some(escaped) => output.push(escaped),
-                None => output.push('\\'),
-            }
-        } else {
+        if ch != '\\' {
             output.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => output.push('\n'),
+            Some('t') => output.push('\t'),
+            Some('r') => output.push('\r'),
+            Some('b') => output.push('\u{0008}'),
+            Some('f') => output.push('\u{000c}'),
+            Some('a') => output.push('\u{0007}'),
+            Some('e') => output.push('\u{001b}'),
+            Some('v') => output.push('\u{000b}'),
+            Some('0') => output.push('\0'),
+            Some(' ') => output.push(' '),
+            Some('"') => output.push('"'),
+            Some('\\') => output.push('\\'),
+            Some('/') => output.push('/'),
+            Some('u') => push_yaml_hex(&mut output, &mut chars, 4, 'u'),
+            Some('U') => push_yaml_hex(&mut output, &mut chars, 8, 'U'),
+            Some('x') => push_yaml_hex(&mut output, &mut chars, 2, 'x'),
+            Some(escaped) => output.push(escaped),
+            None => output.push('\\'),
         }
     }
     output
+}
+
+fn push_yaml_hex(
+    output: &mut String,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    count: usize,
+    marker: char,
+) {
+    let mut hex = String::with_capacity(count);
+    for _ in 0..count {
+        match chars.peek().copied() {
+            Some(ch) if ch.is_ascii_hexdigit() => {
+                hex.push(ch);
+                chars.next();
+            }
+            _ => {
+                output.push('\\');
+                output.push(marker);
+                output.push_str(&hex);
+                return;
+            }
+        }
+    }
+    if let Some(decoded) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+        output.push(decoded);
+    } else {
+        output.push('\\');
+        output.push(marker);
+        output.push_str(&hex);
+    }
 }
 
 fn copilot_title_from_events(path: &Path) -> Option<String> {
@@ -1533,6 +1577,16 @@ mod tests {
         assert_eq!(yaml_scalar("'it''s quoted'"), "it's quoted");
         assert_eq!(yaml_scalar("\"say \\\"hi\\\"\\n\\t\""), "say \"hi\"\n\t");
         assert_eq!(yaml_scalar("\"trailing\\\""), "trailing\\");
+        assert_eq!(yaml_scalar("\"caf\\u00E9\""), "café");
+        assert_eq!(yaml_scalar("\"\\x41\\U0001F600\""), "A😀");
+        assert_eq!(yaml_scalar("\"\\u00\""), "\\u00");
+        assert_eq!(yaml_scalar("\"\\U12\""), "\\U12");
+        assert_eq!(yaml_scalar("\"\\xG\""), "\\xG");
+        assert_eq!(yaml_scalar("\"\\uD800\""), "\\uD800");
+        assert_eq!(
+            yaml_scalar("\"\\r\\b\\f\\a\\e\\v\\0\\ /\\/\""),
+            "\r\u{0008}\u{000c}\u{0007}\u{001b}\u{000b}\0 //"
+        );
     }
 
     #[test]
