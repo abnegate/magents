@@ -264,19 +264,57 @@ fn process_started(pid: u32) -> Option<String> {
     if pid == 0 {
         return None;
     }
-    let output = std::process::Command::new("ps")
-        .env("LC_ALL", "C")
-        .args(["-o", "lstart=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    #[cfg(target_os = "linux")]
+    {
+        linux_stat_ticks(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
     }
-    let started = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if started.is_empty() {
-        None
-    } else {
-        Some(started)
+    #[cfg(target_os = "macos")]
+    {
+        macos_start_usec(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let output = std::process::Command::new("ps")
+            .env("LC_ALL", "C")
+            .args(["-o", "lstart=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let started = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!started.is_empty()).then_some(started)
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn linux_stat_ticks(stat: &str) -> Option<String> {
+    let rest = stat.rsplit_once(')')?.1;
+    rest.split_whitespace()
+        .nth(19)
+        .map(|ticks| format!("ticks:{ticks}"))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_start_usec(pid: u32) -> Option<String> {
+    unsafe {
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+        let written = libc::proc_pidinfo(
+            pid as i32,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        );
+        if written != size {
+            return None;
+        }
+        let info = info.assume_init();
+        Some(format!(
+            "usec:{}:{}",
+            info.pbi_start_tvsec, info.pbi_start_tvusec
+        ))
     }
 }
 
@@ -935,6 +973,17 @@ mod tests {
         assert!(!super::claimable(std::process::id(), None));
         assert!(super::process_started(0).is_none());
         assert!(super::process_started(u32::MAX).is_none());
+        let identity = super::process_started(std::process::id()).expect("self identity");
+        #[cfg(target_os = "macos")]
+        assert!(identity.starts_with("usec:"), "{identity}");
+        #[cfg(target_os = "linux")]
+        assert!(identity.starts_with("ticks:"), "{identity}");
+        assert_eq!(
+            super::linux_stat_ticks(
+                "1 (systemd) S 0 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 987654321 0"
+            ),
+            Some("ticks:987654321".into())
+        );
 
         let registry = Homes::isolated(directory.path().join("registry-io"));
         std::fs::create_dir_all(&registry.magents).unwrap();
