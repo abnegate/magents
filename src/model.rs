@@ -307,6 +307,16 @@ pub struct MemoryHit {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MemoryCreated {
+    pub agent: Agent,
+    pub path: PathBuf,
+    pub file: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub created: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Mail {
     pub id: String,
     pub ts: DateTime<Utc>,

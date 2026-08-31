@@ -3,7 +3,7 @@ use crate::discover::{ListFilter, list_sessions, resolve};
 use crate::error::Error;
 use crate::homes::Homes;
 use crate::mailbox::{self, compose};
-use crate::memory::search_memories;
+use crate::memory::{create_memory, search_memories};
 use crate::model::{Agent, Caller};
 use crate::transcript::{read_transcript, search_transcripts};
 use chrono::Utc;
@@ -769,6 +769,33 @@ fn searches_memories_across_harnesses() {
     let grok_only = search_memories(&world.homes, "MEMORY_NEEDLE", Some(Agent::Grok), 10).unwrap();
     assert_eq!(grok_only.len(), 2);
     assert!(grok_only.iter().all(|hit| hit.agent == Agent::Grok));
+}
+
+#[test]
+fn create_memory_round_trips_into_search() {
+    let world = World::new();
+    let created = create_memory(
+        &world.homes,
+        Agent::Claude,
+        "CREATE_MEMORY_NEEDLE dedicated db gaps",
+        Some("dedicated-db-gaps.md"),
+        Some("tmp-dr"),
+        None,
+    )
+    .unwrap();
+    assert!(created.created);
+    assert_eq!(created.file, "dedicated-db-gaps.md");
+    assert_eq!(created.project.as_deref(), Some("tmp-dr"));
+    let hits = search_memories(
+        &world.homes,
+        "CREATE_MEMORY_NEEDLE",
+        Some(Agent::Claude),
+        10,
+    )
+    .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].file, "dedicated-db-gaps.md");
+    assert_eq!(hits[0].path, created.path);
 }
 
 #[test]

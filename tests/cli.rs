@@ -491,6 +491,104 @@ fn cli_search_memories_requires_query() {
 }
 
 #[test]
+fn cli_create_memory_round_trips_into_search() {
+    let _lock = ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let harness = Harness::new();
+    let created = harness.json(&[
+        "create-memory",
+        "--agent",
+        "claude",
+        "--project",
+        "tmp-dr",
+        "--file",
+        "dedicated-db-gaps.md",
+        "CLI_CREATE_MEMORY_NEEDLE dedicated db gaps",
+    ]);
+    assert_eq!(created["created"], true);
+    assert_eq!(created["agent"], "claude");
+    assert_eq!(created["file"], "dedicated-db-gaps.md");
+    assert_eq!(created["project"], "tmp-dr");
+    let path = created["path"].as_str().unwrap();
+    assert!(path.ends_with("claude/projects/tmp-dr/memory/dedicated-db-gaps.md"));
+    assert_eq!(
+        fs::read_to_string(path).unwrap(),
+        "CLI_CREATE_MEMORY_NEEDLE dedicated db gaps"
+    );
+
+    let hits = harness.json(&[
+        "search-memories",
+        "CLI_CREATE_MEMORY_NEEDLE",
+        "--agent",
+        "claude",
+    ]);
+    assert_eq!(hits.as_array().unwrap().len(), 1);
+    assert_eq!(hits[0]["file"], "dedicated-db-gaps.md");
+    assert_eq!(hits[0]["path"], path);
+
+    let overwrite = harness
+        .command(&[
+            "create-memory",
+            "--agent",
+            "claude",
+            "--project",
+            "tmp-dr",
+            "--file",
+            "dedicated-db-gaps.md",
+            "should not overwrite",
+        ])
+        .output()
+        .unwrap();
+    assert!(!overwrite.status.success());
+    assert!(
+        String::from_utf8_lossy(&overwrite.stderr).contains("already exists"),
+        "{}",
+        String::from_utf8_lossy(&overwrite.stderr)
+    );
+
+    let cursor = harness
+        .command(&[
+            "create-memory",
+            "--agent",
+            "cursor",
+            "--file",
+            "note.md",
+            "no store",
+        ])
+        .output()
+        .unwrap();
+    assert!(!cursor.status.success());
+    assert!(
+        String::from_utf8_lossy(&cursor.stderr).contains("no first-party memory store"),
+        "{}",
+        String::from_utf8_lossy(&cursor.stderr)
+    );
+
+    let escape = harness
+        .command(&[
+            "create-memory",
+            "--agent",
+            "codex",
+            "--file",
+            "../secret.md",
+            "escape",
+        ])
+        .output()
+        .unwrap();
+    assert!(!escape.status.success());
+    assert!(
+        String::from_utf8_lossy(&escape.stderr).contains("markdown basename"),
+        "{}",
+        String::from_utf8_lossy(&escape.stderr)
+    );
+
+    let missing = harness
+        .command(&["create-memory", "--agent", "codex"])
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+}
+
+#[test]
 fn cli_spawns_all_harnesses_and_routes_later_messages() {
     let _lock = ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let harness = Harness::new();

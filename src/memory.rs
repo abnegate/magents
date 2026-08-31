@@ -1,9 +1,11 @@
 use crate::error::{Error, Result};
 use crate::homes::Homes;
-use crate::model::{Agent, MemoryHit};
+use crate::model::{Agent, MemoryCreated, MemoryHit};
 use crate::transcript::scan_file;
-use std::fs;
-use std::path::{Path, PathBuf};
+use chrono::Utc;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Component, Path, PathBuf};
 use walkdir::WalkDir;
 
 pub fn search_memories(
@@ -35,6 +37,254 @@ pub fn search_memories(
     });
     hits.truncate(limit);
     Ok(hits)
+}
+
+pub fn create_memory(
+    homes: &Homes,
+    agent: Agent,
+    content: &str,
+    file: Option<&str>,
+    project: Option<&str>,
+    cwd: Option<&str>,
+) -> Result<MemoryCreated> {
+    if content.trim().is_empty() {
+        return Err(Error::msg("content is required"));
+    }
+    let file = match file {
+        Some(file) => memory_filename(file)?,
+        None => default_filename(content),
+    };
+    match agent {
+        Agent::Claude => create_claude(homes, content, &file, project, cwd),
+        Agent::Codex => create_codex(homes, content, &file),
+        Agent::Grok => create_grok(homes, content, &file, project),
+        Agent::Cursor | Agent::OpenCode => Err(Error::msg(format!(
+            "{agent} has no first-party memory store"
+        ))),
+    }
+}
+
+fn memory_filename(file: &str) -> Result<String> {
+    let file = file.trim();
+    if file.is_empty() || file.contains('/') || file.contains('\\') {
+        return Err(Error::msg("file must be a markdown basename"));
+    }
+    let name = if file.ends_with(".md") {
+        file.to_string()
+    } else if file.contains('.') {
+        return Err(Error::msg("file must be a markdown basename"));
+    } else {
+        format!("{file}.md")
+    };
+    if name == ".md" || name.starts_with('.') {
+        return Err(Error::msg("file must be a markdown basename"));
+    }
+    let path = Path::new(&name);
+    if path.file_name().and_then(|name| name.to_str()) != Some(name.as_str())
+        || path.extension().and_then(|ext| ext.to_str()) != Some("md")
+    {
+        return Err(Error::msg("file must be a markdown basename"));
+    }
+    Ok(name)
+}
+
+fn default_filename(content: &str) -> String {
+    if let Some(slug) = slug_from_content(content) {
+        format!("{slug}.md")
+    } else {
+        format!("note-{}.md", Utc::now().format("%Y%m%dT%H%M%SZ"))
+    }
+}
+
+fn slug_from_content(content: &str) -> Option<String> {
+    let line = content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let line = line.trim_start_matches('#').trim();
+    let mut slug = String::new();
+    let mut dash = false;
+    for ch in line.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            dash = false;
+        } else if !slug.is_empty() && !dash {
+            slug.push('-');
+            dash = true;
+        }
+        if slug.len() >= 64 {
+            break;
+        }
+    }
+    let slug = slug.trim_end_matches('-');
+    if slug.is_empty() {
+        None
+    } else {
+        Some(slug.to_owned())
+    }
+}
+
+fn project_component(project: &str) -> Result<String> {
+    let project = project.trim();
+    let path = Path::new(project);
+    if project.is_empty()
+        || project == "."
+        || project.eq_ignore_ascii_case(".git")
+        || project.contains('/')
+        || project.contains('\\')
+        || path.components().count() != 1
+        || matches!(
+            path.components().next(),
+            Some(Component::ParentDir | Component::CurDir | Component::RootDir)
+        )
+    {
+        return Err(Error::msg("project must be a single path component"));
+    }
+    Ok(project.to_string())
+}
+
+fn encode_claude_cwd(cwd: &str) -> Result<String> {
+    let cwd = cwd.trim().trim_end_matches(['/', '\\']);
+    if cwd.is_empty() {
+        return Err(Error::msg("cwd is required"));
+    }
+    if Path::new(cwd)
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+        || cwd.split(['/', '\\']).any(|part| part == "..")
+    {
+        return Err(Error::msg("cwd is not a valid Claude project path"));
+    }
+    let slug: String = cwd
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' => '-',
+            other => other,
+        })
+        .collect();
+    project_component(&slug).map_err(|_| Error::msg("cwd is not a valid Claude project path"))
+}
+
+fn create_claude(
+    homes: &Homes,
+    content: &str,
+    file: &str,
+    project: Option<&str>,
+    cwd: Option<&str>,
+) -> Result<MemoryCreated> {
+    let slug = match (project, cwd) {
+        (Some(project), _) if !project.trim().is_empty() => project_component(project)?,
+        (_, Some(cwd)) if !cwd.trim().is_empty() => encode_claude_cwd(cwd)?,
+        _ => return Err(Error::msg("project or cwd is required for Claude")),
+    };
+    let root = homes.claude.join("projects").join(&slug).join("memory");
+    let path = root.join(file);
+    write_memory_file(&path, &root, content)?;
+    Ok(MemoryCreated {
+        agent: Agent::Claude,
+        path,
+        file: file.to_string(),
+        project: Some(slug),
+        created: true,
+    })
+}
+
+fn create_codex(homes: &Homes, content: &str, file: &str) -> Result<MemoryCreated> {
+    let root = homes.codex.join("memories");
+    let path = root.join(file);
+    write_memory_file(&path, &root, content)?;
+    Ok(MemoryCreated {
+        agent: Agent::Codex,
+        path,
+        file: file.to_string(),
+        project: None,
+        created: true,
+    })
+}
+
+fn create_grok(
+    homes: &Homes,
+    content: &str,
+    file: &str,
+    project: Option<&str>,
+) -> Result<MemoryCreated> {
+    let root = homes.grok.join("memory");
+    let (path, project) = match project {
+        Some(project) if !project.trim().is_empty() => {
+            let project = project_component(project)?;
+            (root.join(&project).join(file), Some(project))
+        }
+        _ => (root.join(file), Some("global".into())),
+    };
+    write_memory_file(&path, &root, content)?;
+    Ok(MemoryCreated {
+        agent: Agent::Grok,
+        path,
+        file: file.to_string(),
+        project,
+        created: true,
+    })
+}
+
+fn write_memory_file(path: &Path, root: &Path, content: &str) -> Result<()> {
+    if path
+        .components()
+        .any(|component| component.as_os_str() == ".git")
+    {
+        return Err(Error::msg("refusing to write under .git"));
+    }
+    fs::create_dir_all(root).map_err(|source| Error::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let canonical_root = root.canonicalize().map_err(|source| Error::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::msg("refusing to write outside the memory root"))?;
+    fs::create_dir_all(parent).map_err(|source| Error::Io {
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    let canonical_parent = parent.canonicalize().map_err(|source| Error::Io {
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        return Err(Error::msg("refusing to write outside the memory root"));
+    }
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(Error::msg(format!(
+                "memory file already exists: {}",
+                path.display()
+            )));
+        }
+        Err(source) => {
+            return Err(Error::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    write_exclusive_contents(path, &mut file, content)
+}
+
+fn write_exclusive_contents(path: &Path, file: &mut impl Write, content: &str) -> Result<()> {
+    if let Err(source) = file
+        .write_all(content.as_bytes())
+        .and_then(|_| file.flush())
+    {
+        let _ = fs::remove_file(path);
+        return Err(Error::Io {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    Ok(())
 }
 
 fn include(filter: Option<Agent>, agent: Agent) -> bool {
@@ -87,26 +337,33 @@ fn collect_grok(homes: &Homes, needle: &str, hits: &mut Vec<MemoryHit>) {
     if !root.is_dir() {
         return;
     }
-    let global = root.join("MEMORY.md");
-    if let Some(hit) = hit(Agent::Grok, global, Some("global".into()), needle) {
-        hits.push(hit);
-    }
     let Ok(entries) = fs::read_dir(&root) else {
+        if let Some(hit) = hit(
+            Agent::Grok,
+            root.join("MEMORY.md"),
+            Some("global".into()),
+            needle,
+        ) {
+            hits.push(hit);
+        }
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_dir() {
+        if path.is_dir() {
+            let Some(slug) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(ToOwned::to_owned)
+            else {
+                continue;
+            };
+            collect_markdown_tree(&path, Agent::Grok, Some(slug), needle, hits, false);
             continue;
         }
-        let Some(slug) = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(ToOwned::to_owned)
-        else {
-            continue;
-        };
-        collect_markdown_tree(&path, Agent::Grok, Some(slug), needle, hits, false);
+        if let Some(hit) = hit(Agent::Grok, path, Some("global".into()), needle) {
+            hits.push(hit);
+        }
     }
 }
 
@@ -153,7 +410,7 @@ fn hit(agent: Agent, path: PathBuf, project: Option<String>, needle: &str) -> Op
 
 #[cfg(test)]
 mod tests {
-    use super::search_memories;
+    use super::{create_memory, search_memories};
     use crate::homes::Homes;
     use crate::model::Agent;
     use crate::transcript::{extract_snippet, scan_file};
@@ -439,7 +696,7 @@ mod tests {
         );
         write(
             &homes.grok.join("memory").join("other.md"),
-            "GROK_SNIPPET_NEEDLE should stay unseen\n",
+            "GROK_SNIPPET_NEEDLE loose global note\n",
         );
         write(&nested, "workspace GROK_SNIPPET_NEEDLE note\n");
         write(
@@ -459,12 +716,17 @@ mod tests {
             "Claude scans memory/*.md flat, not nested trees"
         );
         let hits = search_memories(&homes, "GROK_SNIPPET_NEEDLE", Some(Agent::Grok), 10).unwrap();
-        assert_eq!(hits.len(), 2);
+        assert_eq!(hits.len(), 3);
         let global_hit = hits
             .iter()
             .find(|hit| hit.file == "MEMORY.md")
             .expect("global");
         assert_eq!(global_hit.project.as_deref(), Some("global"));
+        let loose = hits
+            .iter()
+            .find(|hit| hit.file == "other.md")
+            .expect("loose");
+        assert_eq!(loose.project.as_deref(), Some("global"));
         let workspace = hits
             .iter()
             .find(|hit| hit.file == "notes.md")
@@ -517,5 +779,446 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].project.as_deref(), Some("global"));
         assert_eq!(hits[0].file, "MEMORY.md");
+    }
+
+    #[test]
+    fn create_memory_requires_content() {
+        let homes = Homes::isolated(tempfile::tempdir().unwrap().path());
+        for content in ["", "   ", "\t\n"] {
+            let err = create_memory(&homes, Agent::Codex, content, Some("note.md"), None, None)
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("content is required"),
+                "{content:?} -> {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_memory_writes_claude_codex_and_grok() {
+        let dir = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(dir.path());
+        let claude = create_memory(
+            &homes,
+            Agent::Claude,
+            "CLAUDE_CREATE_NEEDLE dedicated db gaps",
+            Some("dedicated-db-gaps.md"),
+            Some("tmp-dr"),
+            None,
+        )
+        .unwrap();
+        assert!(claude.created);
+        assert_eq!(claude.agent, Agent::Claude);
+        assert_eq!(claude.file, "dedicated-db-gaps.md");
+        assert_eq!(claude.project.as_deref(), Some("tmp-dr"));
+        assert_eq!(
+            claude.path,
+            homes
+                .claude
+                .join("projects")
+                .join("tmp-dr")
+                .join("memory")
+                .join("dedicated-db-gaps.md")
+        );
+        assert_eq!(
+            fs::read_to_string(&claude.path).unwrap(),
+            "CLAUDE_CREATE_NEEDLE dedicated db gaps"
+        );
+
+        let codex = create_memory(
+            &homes,
+            Agent::Codex,
+            "CODEX_CREATE_NEEDLE billing cache",
+            Some("billing-cache"),
+            Some("unused-project"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(codex.agent, Agent::Codex);
+        assert_eq!(codex.file, "billing-cache.md");
+        assert!(codex.project.is_none());
+        assert_eq!(
+            codex.path,
+            homes.codex.join("memories").join("billing-cache.md")
+        );
+
+        let grok_project = create_memory(
+            &homes,
+            Agent::Grok,
+            "GROK_PROJECT_CREATE_NEEDLE workspace note",
+            Some("workspace-note.md"),
+            Some("tmp-edge"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(grok_project.project.as_deref(), Some("tmp-edge"));
+        assert_eq!(
+            grok_project.path,
+            homes
+                .grok
+                .join("memory")
+                .join("tmp-edge")
+                .join("workspace-note.md")
+        );
+
+        let grok_global = create_memory(
+            &homes,
+            Agent::Grok,
+            "GROK_GLOBAL_CREATE_NEEDLE unique note",
+            Some("unique-note.md"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(grok_global.project.as_deref(), Some("global"));
+        assert_eq!(
+            grok_global.path,
+            homes.grok.join("memory").join("unique-note.md")
+        );
+        assert_ne!(grok_global.file, "MEMORY.md");
+
+        for (query, agent, file) in [
+            (
+                "CLAUDE_CREATE_NEEDLE",
+                Agent::Claude,
+                "dedicated-db-gaps.md",
+            ),
+            ("CODEX_CREATE_NEEDLE", Agent::Codex, "billing-cache.md"),
+            (
+                "GROK_PROJECT_CREATE_NEEDLE",
+                Agent::Grok,
+                "workspace-note.md",
+            ),
+            ("GROK_GLOBAL_CREATE_NEEDLE", Agent::Grok, "unique-note.md"),
+        ] {
+            let hits = search_memories(&homes, query, Some(agent), 10).unwrap();
+            assert_eq!(hits.len(), 1, "{query}");
+            assert_eq!(hits[0].file, file);
+            assert_eq!(hits[0].agent, agent);
+        }
+    }
+
+    #[test]
+    fn create_memory_encodes_claude_cwd() {
+        let homes = Homes::isolated(tempfile::tempdir().unwrap().path());
+        let created = create_memory(
+            &homes,
+            Agent::Claude,
+            "cwd encoded note",
+            Some("cwd-note.md"),
+            None,
+            Some("/Users/foo/bar/"),
+        )
+        .unwrap();
+        assert_eq!(created.project.as_deref(), Some("-Users-foo-bar"));
+        assert_eq!(
+            created.path,
+            homes
+                .claude
+                .join("projects")
+                .join("-Users-foo-bar")
+                .join("memory")
+                .join("cwd-note.md")
+        );
+        let err = create_memory(
+            &homes,
+            Agent::Claude,
+            "missing target",
+            Some("missing.md"),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("project or cwd is required"));
+        let err = create_memory(
+            &homes,
+            Agent::Claude,
+            "blank cwd",
+            Some("blank.md"),
+            Some("   "),
+            Some("   "),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("project or cwd is required"));
+        let err = create_memory(
+            &homes,
+            Agent::Claude,
+            "root cwd",
+            Some("root.md"),
+            None,
+            Some("///"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("cwd is required"));
+        let err = create_memory(
+            &homes,
+            Agent::Claude,
+            "dotdot cwd",
+            Some("escape.md"),
+            None,
+            Some("/Users/foo/../etc"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not a valid Claude project path"));
+    }
+
+    #[test]
+    fn create_memory_rejects_cursor_opencode_overwrite_and_escapes() {
+        let dir = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(dir.path());
+        for agent in [Agent::Cursor, Agent::OpenCode] {
+            let err = create_memory(&homes, agent, "should fail", Some("note.md"), None, None)
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("no first-party memory store"),
+                "{agent} -> {err}"
+            );
+        }
+
+        create_memory(
+            &homes,
+            Agent::Codex,
+            "first write",
+            Some("exists.md"),
+            None,
+            None,
+        )
+        .unwrap();
+        let err = create_memory(
+            &homes,
+            Agent::Codex,
+            "second write",
+            Some("exists.md"),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+
+        for file in [
+            "",
+            "   ",
+            "../secret.md",
+            "foo/bar.md",
+            "foo\\bar.md",
+            "note.txt",
+            ".hidden.md",
+            ".md",
+            "note.",
+        ] {
+            let err =
+                create_memory(&homes, Agent::Codex, "escape", Some(file), None, None).unwrap_err();
+            assert!(
+                err.to_string().contains("markdown basename"),
+                "{file:?} -> {err}"
+            );
+        }
+
+        for project in ["..", "../escape", "foo/bar", "foo\\bar", ".", ".git"] {
+            let err = create_memory(
+                &homes,
+                Agent::Grok,
+                "escape project",
+                Some("ok.md"),
+                Some(project),
+                None,
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("single path component"),
+                "{project:?} -> {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_memory_accepts_consecutive_dots_in_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(dir.path());
+        let grok = create_memory(
+            &homes,
+            Agent::Grok,
+            "dotted project note",
+            Some("note..v2.md"),
+            Some("foo..bar"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(grok.file, "note..v2.md");
+        assert_eq!(grok.project.as_deref(), Some("foo..bar"));
+        assert_eq!(
+            grok.path,
+            homes
+                .grok
+                .join("memory")
+                .join("foo..bar")
+                .join("note..v2.md")
+        );
+        assert_eq!(
+            fs::read_to_string(&grok.path).unwrap(),
+            "dotted project note"
+        );
+
+        let claude = create_memory(
+            &homes,
+            Agent::Claude,
+            "dotted cwd note",
+            Some("cwd..note.md"),
+            None,
+            Some("/Users/foo..bar/proj"),
+        )
+        .unwrap();
+        assert_eq!(claude.project.as_deref(), Some("-Users-foo..bar-proj"));
+        assert_eq!(claude.file, "cwd..note.md");
+        assert_eq!(
+            claude.path,
+            homes
+                .claude
+                .join("projects")
+                .join("-Users-foo..bar-proj")
+                .join("memory")
+                .join("cwd..note.md")
+        );
+    }
+
+    #[test]
+    fn create_memory_removes_destination_when_write_fails() {
+        use super::write_exclusive_contents;
+        use std::io::{self, Write};
+
+        struct FailingWrite;
+        impl Write for FailingWrite {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("disk full"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        struct FlushFails;
+        impl Write for FlushFails {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::other("flush failed"))
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        for (mut writer, label) in [
+            (Box::new(FailingWrite) as Box<dyn Write>, "write"),
+            (Box::new(FlushFails) as Box<dyn Write>, "flush"),
+        ] {
+            let path = dir.path().join(format!("{label}.md"));
+            fs::write(&path, "partial").unwrap();
+            let err = write_exclusive_contents(&path, &mut writer, "hello").unwrap_err();
+            assert!(
+                err.to_string().contains("failed to read"),
+                "{label} -> {err}"
+            );
+            assert!(
+                !path.exists(),
+                "{label} should remove the destination so create_new can retry"
+            );
+        }
+
+        let homes = Homes::isolated(dir.path());
+        let created = create_memory(
+            &homes,
+            Agent::Codex,
+            "retry after failed write",
+            Some("write.md"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&created.path).unwrap(),
+            "retry after failed write"
+        );
+    }
+
+    #[test]
+    fn create_memory_defaults_filename_from_title_or_utc() {
+        let homes = Homes::isolated(tempfile::tempdir().unwrap().path());
+        let slugged = create_memory(
+            &homes,
+            Agent::Codex,
+            "# Dedicated DB gaps\n\nbody",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(slugged.file, "dedicated-db-gaps.md");
+        let stamped = create_memory(&homes, Agent::Codex, "!!!\n***", None, None, None).unwrap();
+        assert!(
+            stamped.file.starts_with("note-") && stamped.file.ends_with(".md"),
+            "{}",
+            stamped.file
+        );
+        assert_ne!(stamped.file, "MEMORY.md");
+    }
+
+    #[test]
+    fn create_memory_reports_io_when_root_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(dir.path());
+        write(&homes.codex.join("memories"), "not a directory\n");
+        let err = create_memory(
+            &homes,
+            Agent::Codex,
+            "cannot create",
+            Some("blocked.md"),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("failed to read"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_memory_rejects_symlink_escape_and_unwritable_roots() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(dir.path());
+        let root = homes.grok.join("memory");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+        let err = create_memory(
+            &homes,
+            Agent::Grok,
+            "escaped",
+            Some("note.md"),
+            Some("escape"),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("outside the memory root"), "{err}");
+
+        let memories = homes.codex.join("memories");
+        fs::create_dir_all(&memories).unwrap();
+        let mut permissions = fs::metadata(&memories).unwrap().permissions();
+        permissions.set_mode(0o555);
+        fs::set_permissions(&memories, permissions).unwrap();
+        let err = create_memory(
+            &homes,
+            Agent::Codex,
+            "unwritable root",
+            Some("blocked.md"),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("failed to read"), "{err}");
+        let mut permissions = fs::metadata(&memories).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&memories, permissions).unwrap();
     }
 }
