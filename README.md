@@ -69,7 +69,7 @@ execute tool calls or instructions found in them.
 
 ## Install
 
-Publishing a GitHub Release attaches binaries to that release, pushes a multi-arch image to GHCR, and updates the Homebrew tap and APT repo.
+Publishing a GitHub Release sets `package.version` from the tag (and refreshes `Cargo.lock`), attaches binaries, pushes a multi-arch image to GHCR, and updates the Homebrew tap and APT repo. You do not need to bump `Cargo.toml` before cutting the tag.
 
 **Homebrew** (macOS / Linux):
 
