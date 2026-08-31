@@ -1963,7 +1963,7 @@ esac
         let done = directory.path().join("done");
         test_env::write_executable(
             &binary,
-            "cat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"codex-valid\"}'\nsleep 0.05\nprintf done > \"$MAGENTS_TEST_DONE\"",
+            "cat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"codex-valid\"}'\nsleep 5\nprintf done > \"$MAGENTS_TEST_DONE\"",
         );
         unsafe {
             std::env::set_var("MAGENTS_CODEX_BIN", &binary);

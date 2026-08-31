@@ -1368,9 +1368,40 @@ fn read_simple_yaml(path: &Path) -> HashMap<String, String> {
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
-        map.insert(key.trim().to_string(), value.trim().to_string());
+        map.insert(key.trim().to_string(), yaml_scalar(value.trim()));
     }
     map
+}
+
+fn yaml_scalar(value: &str) -> String {
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        if bytes[0] == b'"' && bytes[value.len() - 1] == b'"' {
+            return unescape_double_quoted(&value[1..value.len() - 1]);
+        }
+        if bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'' {
+            return value[1..value.len() - 1].replace("''", "'");
+        }
+    }
+    value.to_string()
+}
+
+fn unescape_double_quoted(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('n') => output.push('\n'),
+                Some('t') => output.push('\t'),
+                Some(escaped) => output.push(escaped),
+                None => output.push('\\'),
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
 }
 
 fn copilot_title_from_events(path: &Path) -> Option<String> {
@@ -1464,7 +1495,7 @@ fn millis(value: Option<i64>) -> Option<DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ListFilter, cwd_matches, list_sessions, resolve, split_agent_ref};
+    use super::{ListFilter, cwd_matches, list_sessions, resolve, split_agent_ref, yaml_scalar};
     use crate::homes::Homes;
     use crate::model::Agent;
     use crate::spawn::Transport;
@@ -1492,6 +1523,16 @@ mod tests {
         let (agent, rest) = split_agent_ref("disaster recovery");
         assert_eq!(agent, None);
         assert_eq!(rest, "disaster recovery");
+    }
+
+    #[test]
+    fn decodes_yaml_scalars() {
+        assert_eq!(yaml_scalar("/tmp/plain"), "/tmp/plain");
+        assert_eq!(yaml_scalar("\"/tmp/quoted cwd\""), "/tmp/quoted cwd");
+        assert_eq!(yaml_scalar("'Return JSON: {}'"), "Return JSON: {}");
+        assert_eq!(yaml_scalar("'it''s quoted'"), "it's quoted");
+        assert_eq!(yaml_scalar("\"say \\\"hi\\\"\\n\\t\""), "say \"hi\"\n\t");
+        assert_eq!(yaml_scalar("\"trailing\\\""), "trailing\\");
     }
 
     #[test]
@@ -2296,6 +2337,20 @@ not-json
 "#,
         )
         .unwrap();
+        let quoted_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+        let quoted_dir = homes.copilot.join("session-state").join(quoted_id);
+        fs::create_dir_all(&quoted_dir).unwrap();
+        fs::write(
+            quoted_dir.join("workspace.yaml"),
+            "cwd: \"/tmp/quoted cwd\"\nclient_name: github/cli\nname: 'Return JSON: {}'\nupdated_at: \"2026-08-29T07:51:40.622Z\"\n",
+        )
+        .unwrap();
+        fs::write(
+            quoted_dir.join("events.jsonl"),
+            r#"{"type":"user.message","data":{"content":"quoted yaml scalars"}}
+"#,
+        )
+        .unwrap();
         let db = homes.copilot.join("session-store.db");
         let connection = rusqlite::Connection::open(&db).unwrap();
         connection
@@ -2337,7 +2392,7 @@ not-json
             },
         )
         .unwrap();
-        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions.len(), 3);
         let cli = sessions
             .iter()
             .find(|session| session.session_id == cli_id)
@@ -2357,6 +2412,13 @@ not-json
             Some("title from events.jsonl")
         );
         assert!(from_events.last_activity_at.is_some());
+        let quoted = sessions
+            .iter()
+            .find(|session| session.session_id == quoted_id)
+            .unwrap();
+        assert_eq!(quoted.cwd.as_deref(), Some("/tmp/quoted cwd"));
+        assert_eq!(quoted.title.as_deref(), Some("Return JSON: {}"));
+        assert!(quoted.last_activity_at.is_some());
 
         let store_miss = Homes::isolated(tempfile::tempdir().unwrap().path());
         let miss_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";

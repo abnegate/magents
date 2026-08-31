@@ -461,15 +461,16 @@ async fn main() -> anyhow::Result<()> {
             copilot,
             all,
         }) => {
-            let notes = magents::install::install(
-                claude || all,
-                grok || all,
-                codex || all,
-                cursor || all,
-                opencode || all,
-                gemini || all,
-                copilot || all,
-            )?;
+            let notes = magents::install::install_spec(magents::install::InstallSpec {
+                claude: claude || all,
+                grok: grok || all,
+                codex: codex || all,
+                cursor: cursor || all,
+                opencode: opencode || all,
+                gemini: gemini || all,
+                copilot: copilot || all,
+                skip_missing: all,
+            })?;
             for note in notes {
                 println!("{note}");
             }
