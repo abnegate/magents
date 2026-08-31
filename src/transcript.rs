@@ -488,7 +488,7 @@ fn content_parts(content: Option<&Value>) -> (String, Vec<String>) {
     (texts.join("\n"), tools)
 }
 
-fn scan_file(path: &Path, needle: &str) -> Option<(usize, String)> {
+pub(crate) fn scan_file(path: &Path, needle: &str) -> Option<(usize, String)> {
     let file = File::open(path).ok()?;
     let mut matches = 0usize;
     let mut snippet = None;
@@ -508,7 +508,7 @@ fn scan_file(path: &Path, needle: &str) -> Option<(usize, String)> {
     snippet.map(|snippet| (matches, snippet))
 }
 
-fn extract_snippet(line: &str, needle: &str) -> String {
+pub(crate) fn extract_snippet(line: &str, needle: &str) -> String {
     let lowered = line.to_ascii_lowercase();
     let index = lowered.find(needle).unwrap_or(0);
     let start = index.saturating_sub(160);

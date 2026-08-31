@@ -296,6 +296,17 @@ pub struct SearchHit {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MemoryHit {
+    pub agent: Agent,
+    pub path: PathBuf,
+    pub file: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub matches: usize,
+    pub snippet: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Mail {
     pub id: String,
     pub ts: DateTime<Utc>,

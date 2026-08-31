@@ -294,6 +294,22 @@ fn write_tree(root: &Path) {
         &root.join("opencode/storage/part/msg_1/prt_1.json"),
         r#"{"type":"text","text":"json fallback prompt about dedicated databases"}"#,
     );
+    write(
+        &root.join("claude/projects/tmp-dr/memory/MEMORY.md"),
+        "CLAUDE_MEMORY_NEEDLE dedicated databases runbook\n",
+    );
+    write(
+        &root.join("codex/memories/MEMORY.md"),
+        "CODEX_MEMORY_NEEDLE billing worker cache\n",
+    );
+    write(
+        &root.join("grok/memory/MEMORY.md"),
+        "GROK_MEMORY_NEEDLE edge queue notes\n",
+    );
+    write(
+        &root.join("grok/memory/tmp-edge/MEMORY.md"),
+        "GROK_WORKSPACE_MEMORY_NEEDLE workspace notes\nMEMORY_NEEDLE\n",
+    );
 }
 
 #[test]
@@ -391,6 +407,40 @@ fn cli_lists_reads_searches_and_mails_across_harnesses() {
     ]);
     assert!(!search.as_array().unwrap().is_empty());
 
+    let memories = harness.json(&["search-memories", "MEMORY_NEEDLE", "-n", "10"]);
+    let memory_hits = memories.as_array().unwrap();
+    assert!(memory_hits.iter().any(|hit| {
+        hit["agent"] == "claude"
+            && hit["project"] == "tmp-dr"
+            && hit["snippet"]
+                .as_str()
+                .unwrap()
+                .contains("CLAUDE_MEMORY_NEEDLE")
+    }));
+    assert!(memory_hits.iter().any(|hit| hit["agent"] == "codex"));
+    assert!(
+        memory_hits
+            .iter()
+            .any(|hit| { hit["agent"] == "grok" && hit["project"] == "global" })
+    );
+    assert!(memory_hits.iter().any(|hit| {
+        hit["agent"] == "grok"
+            && hit["project"] == "tmp-edge"
+            && hit["snippet"]
+                .as_str()
+                .unwrap()
+                .contains("GROK_WORKSPACE_MEMORY_NEEDLE")
+    }));
+    let claude = harness.json(&["search-memories", "MEMORY_NEEDLE", "--agent", "claude"]);
+    assert_eq!(claude.as_array().unwrap().len(), 1);
+    assert_eq!(claude[0]["agent"], "claude");
+    assert_eq!(claude[0]["project"], "tmp-dr");
+    let grok = harness.json(&["search-memories", "MEMORY_NEEDLE", "--agent", "grok"]);
+    assert_eq!(grok.as_array().unwrap().len(), 2);
+    let codex = harness.json(&["search-memories", "MEMORY_NEEDLE", "--agent", "codex"]);
+    assert_eq!(codex.as_array().unwrap().len(), 1);
+    assert_eq!(codex[0]["agent"], "codex");
+
     let miss = harness
         .command(&["get", "no-such-session-xyz"])
         .output()
@@ -415,6 +465,29 @@ fn cli_lists_reads_searches_and_mails_across_harnesses() {
     let body: Value = serde_json::from_slice(&handed.stdout).unwrap();
     assert_eq!(body["to"]["agent"], "cursor");
     assert_eq!(body["reason"], "switching windows");
+}
+
+#[test]
+fn cli_search_memories_requires_query() {
+    let _lock = ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let harness = Harness::new();
+    let missing = harness
+        .command(&["search-memories", "--agent", "claude"])
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        stderr.contains("<QUERY>") || stderr.contains("required arguments"),
+        "{stderr}"
+    );
+    let empty = harness
+        .command(&["search-memories", "   "])
+        .output()
+        .unwrap();
+    assert!(!empty.status.success());
+    let stderr = String::from_utf8_lossy(&empty.stderr);
+    assert!(stderr.contains("query is required"), "{stderr}");
 }
 
 #[test]

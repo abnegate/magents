@@ -3,6 +3,7 @@ use crate::discover::{ListFilter, list_sessions, resolve};
 use crate::error::Error;
 use crate::homes::Homes;
 use crate::mailbox::{self, compose};
+use crate::memory::search_memories;
 use crate::model::{Agent, Caller};
 use crate::transcript::{read_transcript, search_transcripts};
 use chrono::Utc;
@@ -140,6 +141,15 @@ fn write_claude(homes: &Homes) {
 {"type":"assistant","message":{"role":"assistant","content":[]}}
 "#,
     );
+    write(
+        &homes
+            .claude
+            .join("projects")
+            .join("tmp-dr")
+            .join("memory")
+            .join("MEMORY.md"),
+        "CLAUDE_MEMORY_NEEDLE dedicated databases runbook\n",
+    );
 }
 
 fn write_grok(homes: &Homes) {
@@ -190,6 +200,14 @@ fn write_grok(homes: &Homes) {
     );
     write(&sub.join("summary.bad"), "nope");
     write(
+        &homes.grok.join("memory").join("MEMORY.md"),
+        "GROK_MEMORY_NEEDLE edge queue notes\n",
+    );
+    write(
+        &homes.grok.join("memory").join("tmp-edge").join("MEMORY.md"),
+        "GROK_WORKSPACE_MEMORY_NEEDLE workspace notes\nMEMORY_NEEDLE\n",
+    );
+    write(
         &homes
             .grok
             .join("sessions")
@@ -229,6 +247,10 @@ fn write_codex(homes: &Homes) {
 {"type":"response_item","payload":{"type":"message"}}
 {"type":"response_item","payload":{"type":"message","role":"assistant","content":[]}}
 "#,
+    );
+    write(
+        &homes.codex.join("memories").join("MEMORY.md"),
+        "CODEX_MEMORY_NEEDLE billing worker cache\n",
     );
     let connection = Connection::open(&db).unwrap();
     connection
@@ -706,6 +728,47 @@ fn searches_across_harnesses() {
     assert_eq!(zone.len(), 1);
     let limited = search_transcripts(&world.homes, "109 point", None, false, 1).unwrap();
     assert_eq!(limited.len(), 1);
+}
+
+#[test]
+fn searches_memories_across_harnesses() {
+    let world = World::new();
+    let hits = search_memories(&world.homes, "MEMORY_NEEDLE", None, 10).unwrap();
+    let agents: Vec<_> = hits.iter().map(|hit| hit.agent).collect();
+    assert!(agents.contains(&Agent::Claude));
+    assert!(agents.contains(&Agent::Codex));
+    assert!(agents.contains(&Agent::Grok));
+    let claude = hits
+        .iter()
+        .find(|hit| hit.agent == Agent::Claude)
+        .expect("claude memory");
+    assert_eq!(claude.project.as_deref(), Some("tmp-dr"));
+    assert_eq!(claude.file, "MEMORY.md");
+    let grok: Vec<_> = hits.iter().filter(|hit| hit.agent == Agent::Grok).collect();
+    assert_eq!(grok.len(), 2);
+    assert!(
+        grok.iter()
+            .any(|hit| hit.project.as_deref() == Some("global") && hit.file == "MEMORY.md")
+    );
+    assert!(grok.iter().any(|hit| {
+        hit.project.as_deref() == Some("tmp-edge")
+            && hit.file == "MEMORY.md"
+            && hit.snippet.contains("GROK_WORKSPACE_MEMORY_NEEDLE")
+    }));
+    let codex = search_memories(&world.homes, "MEMORY_NEEDLE", Some(Agent::Codex), 10).unwrap();
+    assert_eq!(codex.len(), 1);
+    assert_eq!(codex[0].agent, Agent::Codex);
+    assert!(codex[0].project.is_none());
+    assert!(codex[0].snippet.contains("CODEX_MEMORY_NEEDLE"));
+    let limited = search_memories(&world.homes, "MEMORY_NEEDLE", None, 1).unwrap();
+    assert_eq!(limited.len(), 1);
+    let claude_only =
+        search_memories(&world.homes, "MEMORY_NEEDLE", Some(Agent::Claude), 10).unwrap();
+    assert_eq!(claude_only.len(), 1);
+    assert_eq!(claude_only[0].agent, Agent::Claude);
+    let grok_only = search_memories(&world.homes, "MEMORY_NEEDLE", Some(Agent::Grok), 10).unwrap();
+    assert_eq!(grok_only.len(), 2);
+    assert!(grok_only.iter().all(|hit| hit.agent == Agent::Grok));
 }
 
 #[test]
