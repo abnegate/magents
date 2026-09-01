@@ -4,6 +4,7 @@ use serde_json::{Map, Value, json};
 use std::fmt;
 use std::fs;
 use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use toml_edit::{Array, DocumentMut, value};
@@ -569,13 +570,164 @@ fn write_atomic_if_unchanged(
     expected: &[u8],
     contents: impl AsRef<[u8]>,
 ) -> Result<bool> {
+    let contents = contents.as_ref();
     let tmp = write_tmp(path, contents)?;
-    if read_bytes(path)? != expected {
-        let _ = fs::remove_file(&tmp);
+    let result = apply_if_unchanged(path, expected, contents);
+    let _ = fs::remove_file(&tmp);
+    result
+}
+
+fn apply_if_unchanged(path: &Path, expected: &[u8], contents: &[u8]) -> Result<bool> {
+    let Some(mut file) = open_live_if_unchanged(path, expected)? else {
         return Ok(false);
+    };
+    replace_file_contents(&mut file, path, contents, expected)?;
+    Ok(read_bytes(path)? == contents)
+}
+
+fn open_live_if_unchanged(path: &Path, expected: &[u8]) -> Result<Option<File>> {
+    if !path.is_file() {
+        if !expected.is_empty() {
+            return Ok(None);
+        }
+        return create_exclusive(path);
     }
-    rename_tmp(tmp, path)?;
-    Ok(true)
+    let mut file = match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => file,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(Error::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    lock_exclusive(&file, path)?;
+    if !same_live_file(&file, path)? {
+        unlock(&file);
+        return Ok(None);
+    }
+    let current = read_file(&mut file, path)?;
+    if current != expected {
+        unlock(&file);
+        return Ok(None);
+    }
+    Ok(Some(file))
+}
+
+fn create_exclusive(path: &Path) -> Result<Option<File>> {
+    match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => {
+            lock_exclusive(&file, path)?;
+            Ok(Some(file))
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists && path.is_file() => {
+            Ok(None)
+        }
+        Err(source) => Err(Error::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn read_file(file: &mut File, path: &Path) -> Result<Vec<u8>> {
+    file.seek(SeekFrom::Start(0)).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut current = Vec::new();
+    file.read_to_end(&mut current).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(current)
+}
+
+fn write_file_bytes(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(bytes)?;
+    file.set_len(bytes.len() as u64)?;
+    file.sync_all()
+}
+
+fn replace_file_contents(
+    file: &mut File,
+    path: &Path,
+    contents: &[u8],
+    backup: &[u8],
+) -> Result<()> {
+    write_file_bytes(file, contents).map_err(|source| {
+        let _ = write_file_bytes(file, backup);
+        Error::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
+}
+
+fn same_live_file(file: &File, path: &Path) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let fd_meta = file.metadata().map_err(|source| Error::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        match fs::metadata(path) {
+            Ok(path_meta) => {
+                Ok(fd_meta.dev() == path_meta.dev() && fd_meta.ino() == path_meta.ino())
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(Error::Io {
+                path: path.to_path_buf(),
+                source,
+            }),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, path);
+        Ok(true)
+    }
+}
+
+fn lock_exclusive(file: &File, path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if rc != 0 {
+            return Err(Error::Io {
+                path: path.to_path_buf(),
+                source: std::io::Error::last_os_error(),
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, path);
+    }
+    Ok(())
+}
+
+fn unlock(file: &File) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+    }
 }
 
 fn write_tmp(path: &Path, contents: impl AsRef<[u8]>) -> Result<PathBuf> {
@@ -593,6 +745,7 @@ fn write_tmp(path: &Path, contents: impl AsRef<[u8]>) -> Result<PathBuf> {
     Ok(tmp)
 }
 
+#[cfg(test)]
 fn rename_tmp(tmp: PathBuf, path: &Path) -> Result<()> {
     if let Err(source) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
@@ -639,30 +792,14 @@ impl FileLock {
                 path: path.to_path_buf(),
                 source,
             })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-            if rc != 0 {
-                return Err(Error::Io {
-                    path: path.to_path_buf(),
-                    source: std::io::Error::last_os_error(),
-                });
-            }
-        }
+        lock_exclusive(&file, path)?;
         Ok(Self(file))
     }
 }
 
 impl Drop for FileLock {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            unsafe {
-                libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
-            }
-        }
+        unlock(&self.0);
     }
 }
 
@@ -1630,6 +1767,39 @@ echo added gemini magents
         assert_eq!(fs::read_to_string(&path).unwrap(), "host\n");
         assert!(super::write_atomic_if_unchanged(&path, b"host\n", b"next\n").unwrap());
         assert_eq!(fs::read_to_string(&path).unwrap(), "next\n");
+        let missing = dir.path().join("missing.json");
+        assert!(!super::write_atomic_if_unchanged(&missing, b"before\n", b"next\n").unwrap());
+        assert!(!missing.is_file());
+        assert!(super::write_atomic_if_unchanged(&missing, b"", b"created\n").unwrap());
+        assert_eq!(fs::read_to_string(&missing).unwrap(), "created\n");
+        assert!(super::create_exclusive(&missing).unwrap().is_none());
+        let blocked = dir.path().join("blocked");
+        fs::write(&blocked, "file").unwrap();
+        assert!(super::create_exclusive(&blocked.join("x.json")).is_err());
+    }
+
+    #[test]
+    fn replace_file_contents_keeps_backup_when_write_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        fs::write(&path, "old\n").unwrap();
+        let mut file = fs::File::open(&path).unwrap();
+        let error = super::replace_file_contents(&mut file, &path, b"new\n", b"old\n").unwrap_err();
+        assert!(error.to_string().contains("failed to read"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old\n");
+    }
+
+    #[test]
+    fn same_live_file_is_false_when_the_path_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        fs::write(&path, "first\n").unwrap();
+        let file = fs::File::open(&path).unwrap();
+        assert!(super::same_live_file(&file, &path).unwrap());
+        fs::remove_file(&path).unwrap();
+        assert!(!super::same_live_file(&file, &path).unwrap());
+        fs::write(&path, "second\n").unwrap();
+        assert!(!super::same_live_file(&file, &path).unwrap());
     }
 
     #[test]
