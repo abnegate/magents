@@ -3,6 +3,7 @@ use crate::homes::Homes;
 use serde_json::{Map, Value, json};
 use std::fmt;
 use std::fs;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use toml_edit::{Array, DocumentMut, value};
@@ -395,41 +396,45 @@ fn stdio_server(exe: &Path, kind: Option<&str>) -> Value {
 }
 
 fn upsert_json_mcp(path: &Path, servers_key: &str, server: Value) -> Result<()> {
-    let mut root = read_json_object(path)?;
-    let servers = root
-        .entry(servers_key)
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .ok_or_else(|| {
-            Error::msg(format!(
-                "{} {servers_key} must be an object",
-                path.display()
-            ))
-        })?;
-    upsert_object_key(servers, "magents", server);
-    write_json(path, &Value::Object(root))
+    with_file_lock(path, || {
+        let mut root = read_json_object(path)?;
+        let servers = root
+            .entry(servers_key)
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| {
+                Error::msg(format!(
+                    "{} {servers_key} must be an object",
+                    path.display()
+                ))
+            })?;
+        upsert_object_key(servers, "magents", server);
+        write_json(path, &Value::Object(root))
+    })
 }
 
 fn upsert_toml_mcp(path: &Path, exe: &Path) -> Result<()> {
-    let mut doc = if path.is_file() {
-        let raw = fs::read_to_string(path).map_err(|source| Error::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        if raw.trim().is_empty() {
-            DocumentMut::new()
+    with_file_lock(path, || {
+        let mut doc = if path.is_file() {
+            let raw = fs::read_to_string(path).map_err(|source| Error::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            if raw.trim().is_empty() {
+                DocumentMut::new()
+            } else {
+                raw.parse::<DocumentMut>().map_err(|error| {
+                    Error::msg(format!("{} is not valid TOML: {error}", path.display()))
+                })?
+            }
         } else {
-            raw.parse::<DocumentMut>().map_err(|error| {
-                Error::msg(format!("{} is not valid TOML: {error}", path.display()))
-            })?
-        }
-    } else {
-        DocumentMut::new()
-    };
-    let command = exe.to_str().unwrap_or("magents");
-    doc["mcp_servers"]["magents"]["command"] = value(command);
-    doc["mcp_servers"]["magents"]["args"] = value(Array::from_iter(["mcp"]));
-    write_atomic(path, format!("{doc}"))
+            DocumentMut::new()
+        };
+        let command = exe.to_str().unwrap_or("magents");
+        doc["mcp_servers"]["magents"]["command"] = value(command);
+        doc["mcp_servers"]["magents"]["args"] = value(Array::from_iter(["mcp"]));
+        write_atomic(path, format!("{doc}"))
+    })
 }
 
 fn already_registered(error: &Error) -> bool {
@@ -442,22 +447,24 @@ fn install_cursor(exe: &Path) -> Result<HostStatus> {
         .unwrap_or_default()
         .join(".cursor")
         .join("mcp.json");
-    let mut root = read_json_object(&path)?;
-    let servers = root
-        .entry("mcpServers")
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .ok_or_else(|| Error::msg("cursor mcp.json mcpServers must be an object"))?;
-    let status = upsert_object_key(
-        servers,
-        "magents",
-        json!({
-            "command": exe.to_str().unwrap_or("magents"),
-            "args": ["mcp"],
-        }),
-    );
-    write_json(&path, &Value::Object(root))?;
-    Ok(status)
+    with_file_lock(&path, || {
+        let mut root = read_json_object(&path)?;
+        let servers = root
+            .entry("mcpServers")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| Error::msg("cursor mcp.json mcpServers must be an object"))?;
+        let status = upsert_object_key(
+            servers,
+            "magents",
+            json!({
+                "command": exe.to_str().unwrap_or("magents"),
+                "args": ["mcp"],
+            }),
+        );
+        write_json(&path, &Value::Object(root))?;
+        Ok(status)
+    })
 }
 
 fn install_opencode(exe: &Path) -> Result<HostStatus> {
@@ -466,26 +473,28 @@ fn install_opencode(exe: &Path) -> Result<HostStatus> {
         .join(".config")
         .join("opencode")
         .join("opencode.json");
-    let mut root = read_json_object(&path)?;
-    if !root.contains_key("$schema") {
-        root.insert("$schema".into(), json!("https://opencode.ai/config.json"));
-    }
-    let mcp = root
-        .entry("mcp")
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .ok_or_else(|| Error::msg("opencode.json mcp must be an object"))?;
-    let status = upsert_object_key(
-        mcp,
-        "magents",
-        json!({
-            "type": "local",
-            "command": [exe.to_str().unwrap_or("magents"), "mcp"],
-            "enabled": true,
-        }),
-    );
-    write_json(&path, &Value::Object(root))?;
-    Ok(status)
+    with_file_lock(&path, || {
+        let mut root = read_json_object(&path)?;
+        if !root.contains_key("$schema") {
+            root.insert("$schema".into(), json!("https://opencode.ai/config.json"));
+        }
+        let mcp = root
+            .entry("mcp")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| Error::msg("opencode.json mcp must be an object"))?;
+        let status = upsert_object_key(
+            mcp,
+            "magents",
+            json!({
+                "type": "local",
+                "command": [exe.to_str().unwrap_or("magents"), "mcp"],
+                "enabled": true,
+            }),
+        );
+        write_json(&path, &Value::Object(root))?;
+        Ok(status)
+    })
 }
 
 fn upsert_object_key(map: &mut Map<String, Value>, key: &str, value: Value) -> HostStatus {
@@ -570,6 +579,64 @@ fn atomic_tmp(path: &Path) -> PathBuf {
         std::process::id(),
         uuid::Uuid::new_v4().as_simple()
     ))
+}
+
+fn lock_path(path: &Path) -> PathBuf {
+    path.with_file_name(format!(
+        ".{}.lock",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ))
+}
+
+struct FileLock(File);
+
+impl FileLock {
+    fn exclusive(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|source| Error::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|source| Error::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+            if rc != 0 {
+                return Err(Error::Io {
+                    path: path.to_path_buf(),
+                    source: std::io::Error::last_os_error(),
+                });
+            }
+        }
+        Ok(Self(file))
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            unsafe {
+                libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+            }
+        }
+    }
+}
+
+fn with_file_lock<T>(path: &Path, work: impl FnOnce() -> Result<T>) -> Result<T> {
+    let _lock = FileLock::exclusive(&lock_path(path))?;
+    work()
 }
 
 fn write_skill(path: PathBuf) -> Result<()> {
@@ -1383,6 +1450,55 @@ echo added gemini magents
     }
 
     #[test]
+    fn concurrent_locked_updates_keep_both_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        write_json(&path, &json!({"mcpServers": {}})).unwrap();
+        let left = path.clone();
+        let right = path.clone();
+        let first = std::thread::spawn(move || {
+            super::with_file_lock(&left, || {
+                let mut root = read_json_object(&left)?;
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                root.get_mut("mcpServers")
+                    .and_then(Value::as_object_mut)
+                    .unwrap()
+                    .insert("alpha".into(), json!({"ok": true}));
+                write_json(&left, &Value::Object(root))
+            })
+        });
+        let second = std::thread::spawn(move || {
+            super::with_file_lock(&right, || {
+                let mut root = read_json_object(&right)?;
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                root.get_mut("mcpServers")
+                    .and_then(Value::as_object_mut)
+                    .unwrap()
+                    .insert("beta".into(), json!({"ok": true}));
+                write_json(&right, &Value::Object(root))
+            })
+        });
+        first.join().unwrap().unwrap();
+        second.join().unwrap().unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("alpha"), "{raw}");
+        assert!(raw.contains("beta"), "{raw}");
+    }
+
+    #[test]
+    fn config_lock_path_is_shared_for_the_same_file() {
+        let path = Path::new("/tmp/mcp.json");
+        assert_eq!(super::lock_path(path), super::lock_path(path));
+        assert_eq!(
+            super::lock_path(path)
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
+            ".mcp.json.lock"
+        );
+    }
+
+    #[test]
     fn atomic_tmp_paths_are_unique_per_call() {
         let path = Path::new("/tmp/mcp.json");
         let first = super::atomic_tmp(path);
@@ -1462,6 +1578,7 @@ echo added gemini magents
         fs::write(&blocked, "not a directory").unwrap();
         assert!(write_json(&blocked.join("x.json"), &json!({})).is_err());
         assert!(write_skill(blocked.join("SKILL.md")).is_err());
+        assert!(super::with_file_lock(&blocked.join("mcp.json"), || Ok(())).is_err());
         assert!(
             super::upsert_toml_mcp(&blocked.join("config.toml"), Path::new("magents")).is_err()
         );
