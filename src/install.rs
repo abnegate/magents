@@ -5,6 +5,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use toml_edit::{Array, DocumentMut, value};
 
 const SKILL: &str = include_str!("../skills/magents.md");
 
@@ -227,7 +228,9 @@ fn install_grok(homes: &Homes, exe: &Path) -> Result<HostStatus> {
         exe.to_str().unwrap_or("magents"),
         "mcp",
     ];
-    add_or_replace_known(cli_has_magents(homes, "grok"), "grok", &add)
+    add_or_replace_known(cli_has_magents(homes, "grok"), "grok", &add, || {
+        upsert_toml_mcp(&homes.grok.join("config.toml"), exe)
+    })
 }
 
 fn install_claude(homes: &Homes, exe: &Path) -> Result<HostStatus> {
@@ -241,7 +244,13 @@ fn install_claude(homes: &Homes, exe: &Path) -> Result<HostStatus> {
         exe.to_str().unwrap_or("magents"),
         "mcp",
     ];
-    add_or_replace_known(cli_has_magents(homes, "claude"), "claude", &add)
+    add_or_replace_known(cli_has_magents(homes, "claude"), "claude", &add, || {
+        upsert_json_mcp(
+            &dirs::home_dir().unwrap_or_default().join(".claude.json"),
+            "mcpServers",
+            stdio_server(exe, None),
+        )
+    })
 }
 
 fn install_codex(homes: &Homes, exe: &Path) -> Result<HostStatus> {
@@ -253,7 +262,9 @@ fn install_codex(homes: &Homes, exe: &Path) -> Result<HostStatus> {
         exe.to_str().unwrap_or("magents"),
         "mcp",
     ];
-    add_or_replace_known(cli_has_magents(homes, "codex"), "codex", &add)
+    add_or_replace_known(cli_has_magents(homes, "codex"), "codex", &add, || {
+        upsert_toml_mcp(&homes.codex.join("config.toml"), exe)
+    })
 }
 
 fn install_gemini(homes: &Homes, exe: &Path) -> Result<HostStatus> {
@@ -267,7 +278,13 @@ fn install_gemini(homes: &Homes, exe: &Path) -> Result<HostStatus> {
         exe.to_str().unwrap_or("magents"),
         "mcp",
     ];
-    add_or_replace_known(cli_has_magents(homes, "gemini"), "gemini", &add)
+    add_or_replace_known(cli_has_magents(homes, "gemini"), "gemini", &add, || {
+        upsert_json_mcp(
+            &homes.gemini.join("settings.json"),
+            "mcpServers",
+            stdio_server(exe, None),
+        )
+    })
 }
 
 fn install_copilot(homes: &Homes, exe: &Path) -> Result<HostStatus> {
@@ -279,7 +296,13 @@ fn install_copilot(homes: &Homes, exe: &Path) -> Result<HostStatus> {
         exe.to_str().unwrap_or("magents"),
         "mcp",
     ];
-    add_or_replace_known(cli_has_magents(homes, "copilot"), "copilot", &add)
+    add_or_replace_known(cli_has_magents(homes, "copilot"), "copilot", &add, || {
+        upsert_json_mcp(
+            &homes.copilot.join("mcp-config.json"),
+            "mcpServers",
+            stdio_server(exe, Some("local")),
+        )
+    })
 }
 
 fn cli_has_magents(homes: &Homes, program: &str) -> bool {
@@ -293,6 +316,14 @@ fn cli_has_magents(homes: &Homes, program: &str) -> bool {
             &dirs::home_dir().unwrap_or_default().join(".claude.json"),
             "magents",
         ),
+        "gemini" => {
+            json_top_level_mcp(&homes.gemini.join("settings.json"), "magents")
+                || mcp_get_exists(program)
+        }
+        "copilot" => {
+            json_top_level_mcp(&homes.copilot.join("mcp-config.json"), "magents")
+                || mcp_get_exists(program)
+        }
         _ => mcp_get_exists(program),
     }
 }
@@ -327,18 +358,87 @@ fn mcp_get_exists(program: &str) -> bool {
     })
 }
 
-fn add_or_replace_known(existed: bool, program: &str, add: &[&str]) -> Result<HostStatus> {
+fn add_or_replace_known(
+    existed: bool,
+    program: &str,
+    add: &[&str],
+    upsert: impl FnOnce() -> Result<()>,
+) -> Result<HostStatus> {
     match run(program, add) {
         Ok(_) => Ok(if existed {
             HostStatus::Replaced
         } else {
             HostStatus::Added
         }),
-        // Hosts that refuse a second add have already confirmed the server is
-        // registered. Removing it here would open a gap if the retry failed.
-        Err(error) if already_registered(&error) => Ok(HostStatus::Replaced),
+        Err(error) if already_registered(&error) => {
+            upsert()?;
+            Ok(HostStatus::Replaced)
+        }
         Err(error) => Err(error),
     }
+}
+
+fn stdio_server(exe: &Path, kind: Option<&str>) -> Value {
+    let command = exe.to_str().unwrap_or("magents");
+    match kind {
+        Some(kind) => json!({
+            "type": kind,
+            "command": command,
+            "args": ["mcp"],
+            "tools": ["*"],
+        }),
+        None => json!({
+            "command": command,
+            "args": ["mcp"],
+        }),
+    }
+}
+
+fn upsert_json_mcp(path: &Path, servers_key: &str, server: Value) -> Result<()> {
+    let mut root = read_json_object(path)?;
+    let servers = root
+        .entry(servers_key)
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| {
+            Error::msg(format!(
+                "{} {servers_key} must be an object",
+                path.display()
+            ))
+        })?;
+    upsert_object_key(servers, "magents", server);
+    write_json(path, &Value::Object(root))
+}
+
+fn upsert_toml_mcp(path: &Path, exe: &Path) -> Result<()> {
+    let mut doc = if path.is_file() {
+        let raw = fs::read_to_string(path).map_err(|source| Error::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if raw.trim().is_empty() {
+            DocumentMut::new()
+        } else {
+            raw.parse::<DocumentMut>().map_err(|error| {
+                Error::msg(format!("{} is not valid TOML: {error}", path.display()))
+            })?
+        }
+    } else {
+        DocumentMut::new()
+    };
+    let command = exe.to_str().unwrap_or("magents");
+    doc["mcp_servers"]["magents"]["command"] = value(command);
+    doc["mcp_servers"]["magents"]["args"] = value(Array::from_iter(["mcp"]));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| Error::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    fs::write(path, format!("{doc}")).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 fn already_registered(error: &Error) -> bool {
@@ -667,12 +767,15 @@ exit 1
             let notes = install(true, false, false, false, false, false, false).unwrap();
             assert_eq!(host(&notes, "claude").status, HostStatus::Replaced);
             assert!(!home.join(".removed-magents").is_file());
+            let claude = fs::read_to_string(home.join(".claude.json")).unwrap();
+            assert!(claude.contains("\"args\""));
+            assert!(claude.contains("mcp"));
             assert!(home.join(".claude/skills/magents/SKILL.md").is_file());
         });
     }
 
     #[test]
-    fn install_keeps_existing_server_when_already_registered() {
+    fn install_updates_stale_registration_when_already_registered() {
         with_home(|home, bin| {
             test_env::write_executable(
                 &bin.join("claude"),
@@ -685,9 +788,18 @@ echo already exists >&2
 exit 1
 "#,
             );
+            write_json(
+                &home.join(".claude.json"),
+                &json!({"mcpServers": {"magents": {"command": "old"}, "other": {"command": "x"}}}),
+            )
+            .unwrap();
             let notes = install(true, false, false, false, false, false, false).unwrap();
             assert_eq!(host(&notes, "claude").status, HostStatus::Replaced);
             assert!(!home.join(".removed-magents").is_file());
+            let claude = fs::read_to_string(home.join(".claude.json")).unwrap();
+            assert!(!claude.contains("old"));
+            assert!(claude.contains("other"));
+            assert!(claude.contains("mcp"));
         });
     }
 
@@ -764,6 +876,107 @@ echo added magents
             .unwrap();
             let notes = install(true, false, false, false, false, false, false).unwrap();
             assert_eq!(host(&notes, "claude").status, HostStatus::Replaced);
+            assert!(!home.join(".removed-magents").is_file());
+        });
+    }
+
+    #[test]
+    fn install_updates_stale_toml_when_already_registered() {
+        with_home(|home, bin| {
+            test_env::write_executable(
+                &bin.join("grok"),
+                r#"
+if [ "$1" = mcp ] && [ "$2" = remove ]; then
+  : > "$HOME/.removed-magents"
+  exit 0
+fi
+echo already registered >&2
+exit 1
+"#,
+            );
+            let grok = home.join(".grok");
+            fs::create_dir_all(&grok).unwrap();
+            fs::write(
+                grok.join("config.toml"),
+                "[mcp_servers.magents]\ncommand = \"old\"\nenv = \"keep\"\n",
+            )
+            .unwrap();
+            let notes = install(false, true, false, false, false, false, false).unwrap();
+            assert_eq!(host(&notes, "grok").status, HostStatus::Replaced);
+            assert!(!home.join(".removed-magents").is_file());
+            let toml = fs::read_to_string(grok.join("config.toml")).unwrap();
+            assert!(!toml.contains("old"));
+            assert!(toml.contains("keep"));
+            assert!(toml.contains("mcp"));
+        });
+    }
+
+    #[test]
+    fn install_updates_gemini_and_copilot_files_when_already_registered() {
+        with_home(|home, bin| {
+            test_env::write_executable(
+                &bin.join("gemini"),
+                r#"
+if [ "$1" = mcp ] && [ "$2" = remove ]; then
+  : > "$HOME/.removed-gemini"
+  exit 0
+fi
+echo already exists >&2
+exit 1
+"#,
+            );
+            test_env::write_executable(
+                &bin.join("copilot"),
+                r#"
+if [ "$1" = mcp ] && [ "$2" = remove ]; then
+  : > "$HOME/.removed-copilot"
+  exit 0
+fi
+echo already exists >&2
+exit 1
+"#,
+            );
+            write_json(
+                &home.join(".gemini").join("settings.json"),
+                &json!({"mcpServers": {"magents": {"command": "old-gemini"}, "other": {}}}),
+            )
+            .unwrap();
+            write_json(
+                &home.join(".copilot").join("mcp-config.json"),
+                &json!({"mcpServers": {"magents": {"command": "old-copilot"}}}),
+            )
+            .unwrap();
+            let notes = install(false, false, false, false, false, true, true).unwrap();
+            assert_eq!(host(&notes, "gemini").status, HostStatus::Replaced);
+            assert_eq!(host(&notes, "copilot").status, HostStatus::Replaced);
+            assert!(!home.join(".removed-gemini").is_file());
+            assert!(!home.join(".removed-copilot").is_file());
+            let gemini = fs::read_to_string(home.join(".gemini/settings.json")).unwrap();
+            assert!(!gemini.contains("old-gemini"));
+            assert!(gemini.contains("other"));
+            let copilot = fs::read_to_string(home.join(".copilot/mcp-config.json")).unwrap();
+            assert!(!copilot.contains("old-copilot"));
+            assert!(copilot.contains("\"type\": \"local\""));
+        });
+    }
+
+    #[test]
+    fn install_keeps_existing_server_when_already_registered_upsert_fails() {
+        with_home(|home, bin| {
+            test_env::write_executable(
+                &bin.join("claude"),
+                r#"
+if [ "$1" = mcp ] && [ "$2" = remove ]; then
+  : > "$HOME/.removed-magents"
+  exit 0
+fi
+echo already exists >&2
+exit 1
+"#,
+            );
+            fs::create_dir_all(home.join(".claude.json")).unwrap();
+            let error = install(true, false, false, false, false, false, false).unwrap_err();
+            assert!(error.to_string().contains("failed to read"), "{error}");
             assert!(!home.join(".removed-magents").is_file());
         });
     }
@@ -869,6 +1082,26 @@ echo added gemini magents
             assert!(!cli_has_magents(&homes, "codex"));
             assert!(!cli_has_magents(&homes, "claude"));
             assert!(!cli_has_magents(&homes, "gemini"));
+            assert!(!cli_has_magents(&homes, "copilot"));
+        });
+    }
+
+    #[test]
+    fn cli_has_magents_reads_gemini_and_copilot_files() {
+        with_home(|home, _bin| {
+            write_json(
+                &home.join(".gemini").join("settings.json"),
+                &json!({"mcpServers": {"magents": {"command": "x"}}}),
+            )
+            .unwrap();
+            write_json(
+                &home.join(".copilot").join("mcp-config.json"),
+                &json!({"mcpServers": {"magents": {"command": "x"}}}),
+            )
+            .unwrap();
+            let homes = Homes::from_env();
+            assert!(cli_has_magents(&homes, "gemini"));
+            assert!(cli_has_magents(&homes, "copilot"));
         });
     }
 
@@ -1090,6 +1323,28 @@ echo added gemini magents
             &Value::Object(Default::default()),
         )
         .unwrap();
+        let invalid_toml = dir.path().join("bad.toml");
+        fs::write(&invalid_toml, "[[[not toml").unwrap();
+        let error = super::upsert_toml_mcp(&invalid_toml, Path::new("magents")).unwrap_err();
+        assert!(error.to_string().contains("not valid TOML"), "{error}");
+        super::upsert_toml_mcp(&dir.path().join("missing.toml"), Path::new("magents")).unwrap();
+        assert!(toml_has_keys(
+            &dir.path().join("missing.toml"),
+            &["mcp_servers", "magents"]
+        ));
+        let empty_toml = dir.path().join("empty.toml");
+        fs::write(&empty_toml, "  \n").unwrap();
+        super::upsert_toml_mcp(&empty_toml, Path::new("magents")).unwrap();
+        assert!(toml_has_keys(&empty_toml, &["mcp_servers", "magents"]));
+        let servers = dir.path().join("servers.json");
+        write_json(&servers, &json!({"mcpServers": []})).unwrap();
+        let error = super::upsert_json_mcp(
+            &servers,
+            "mcpServers",
+            json!({"command": "magents", "args": ["mcp"]}),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("must be an object"), "{error}");
     }
 
     #[test]
@@ -1152,6 +1407,22 @@ echo added gemini magents
         fs::write(&blocked, "not a directory").unwrap();
         assert!(write_json(&blocked.join("x.json"), &json!({})).is_err());
         assert!(write_skill(blocked.join("SKILL.md")).is_err());
+        assert!(
+            super::upsert_toml_mcp(&blocked.join("config.toml"), Path::new("magents")).is_err()
+        );
+        let unreadable_toml = dir.path().join("secret.toml");
+        fs::write(&unreadable_toml, "[mcp_servers.magents]\ncommand = \"x\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&unreadable_toml).unwrap().permissions();
+            permissions.set_mode(0o000);
+            fs::set_permissions(&unreadable_toml, permissions).unwrap();
+            assert!(super::upsert_toml_mcp(&unreadable_toml, Path::new("magents")).is_err());
+            let mut permissions = fs::metadata(&unreadable_toml).unwrap().permissions();
+            permissions.set_mode(0o644);
+            fs::set_permissions(&unreadable_toml, permissions).unwrap();
+        }
 
         with_home(|home, bin| {
             test_env::write_executable(&bin.join("grok"), "echo added magents");

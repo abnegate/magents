@@ -863,8 +863,8 @@ fn format_turns(style: &Style, turns: &[magents::model::Turn]) -> Vec<String> {
     let mut lines = Vec::new();
     for turn in turns {
         let role = match turn.role.as_str() {
-            "assistant" => "assist",
-            other => other,
+            "assistant" => "assist".to_string(),
+            other => clip(other, 8),
         };
         lines.push(format!(
             "  {}  {}",
@@ -1430,6 +1430,21 @@ mod tests {
         assert_eq!(super::clip("hello\x1b[0m world", 20), "hello[0m world");
         assert!(super::row("✓", "note", "hi\x1b[2J").contains("hi[2J"));
         assert!(!super::row("✓", "note", "hi\x1b[2J").contains('\u{1b}'));
+        let style = super::Style {
+            stderr_tty: false,
+            color: false,
+        };
+        let lines = super::format_turns(
+            &style,
+            &[magents::model::Turn {
+                role: "user\x1b[31m".into(),
+                text: "hi".into(),
+                tools: vec![],
+            }],
+        );
+        let rendered = lines.join("\n");
+        assert!(!rendered.contains('\u{1b}'));
+        assert!(rendered.contains("user"));
     }
 
     #[test]
