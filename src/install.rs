@@ -646,7 +646,7 @@ fn restore_path(from: &Path, to: &Path) {
 }
 
 fn publish_if_unchanged(path: &Path, expected: &[u8], tmp: &Path) -> Result<bool> {
-    publish_after_unlink(path, expected, tmp, |_| Ok(()), |_| Ok(()))
+    publish_after_unlink(path, expected, tmp, |_| Ok(()), |_| Ok(()), |_| Ok(()))
 }
 
 fn publish_after_unlink(
@@ -655,6 +655,7 @@ fn publish_after_unlink(
     tmp: &Path,
     after_compare: impl FnOnce(&Path) -> Result<()>,
     after_aside: impl FnOnce(&Path) -> Result<()>,
+    after_link: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<bool> {
     recover_live_file(path)?;
     let stamp = stamp_path(path);
@@ -696,9 +697,12 @@ fn publish_after_unlink(
     after_aside(&stamp)?;
     match link_or_conflict(tmp, path) {
         Ok(true) => {
+            after_link(path)?;
             if stamp.is_file() && read_bytes(&stamp)? != expected {
-                let _ = fs::remove_file(path);
-                let _ = fs::hard_link(&stamp, path);
+                if same_inode(path, tmp).unwrap_or(false) {
+                    let _ = fs::remove_file(path);
+                    let _ = fs::hard_link(&stamp, path);
+                }
                 let _ = fs::remove_file(&stamp);
                 let _ = fs::remove_file(&aside);
                 return Ok(false);
@@ -1876,7 +1880,8 @@ echo added gemini magents
                 |stamp| {
                     fs::write(stamp, "host\n").unwrap();
                     Ok(())
-                }
+                },
+                |_| Ok(())
             )
             .unwrap()
         );
@@ -1899,7 +1904,8 @@ echo added gemini magents
                 |_| {
                     fs::write(&path, "host\n").unwrap();
                     Ok(())
-                }
+                },
+                |_| Ok(())
             )
             .unwrap()
         );
@@ -1923,7 +1929,34 @@ echo added gemini magents
                     fs::write(live, "host-replaced\n").unwrap();
                     Ok(())
                 },
+                |_| Ok(()),
                 |_| Ok(())
+            )
+            .unwrap()
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "host-replaced\n");
+    }
+
+    #[test]
+    fn publish_keeps_a_host_replacement_after_successful_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        let tmp = dir.path().join("next.json");
+        fs::write(&path, "before\n").unwrap();
+        fs::write(&tmp, "next\n").unwrap();
+        assert!(
+            !super::publish_after_unlink(
+                &path,
+                b"before\n",
+                &tmp,
+                |_| Ok(()),
+                |_| Ok(()),
+                |live| {
+                    fs::write(super::stamp_path(live), "stale-host\n").unwrap();
+                    fs::remove_file(live).unwrap();
+                    fs::write(live, "host-replaced\n").unwrap();
+                    Ok(())
+                }
             )
             .unwrap()
         );
@@ -1946,6 +1979,7 @@ echo added gemini magents
                     fs::remove_file(live).unwrap();
                     Ok(())
                 },
+                |_| Ok(()),
                 |_| Ok(())
             )
             .unwrap()
@@ -2009,6 +2043,7 @@ echo added gemini magents
                         fs::set_permissions(dir.path(), permissions).unwrap();
                         Ok(())
                     },
+                    |_| Ok(()),
                     |_| Ok(())
                 )
                 .is_err()
