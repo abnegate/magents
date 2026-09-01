@@ -548,11 +548,9 @@ fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
             source,
         })?;
     }
-    let tmp = path.with_file_name(format!(
-        "{}.tmp",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    ));
+    let tmp = atomic_tmp(path);
     if let Err(source) = fs::write(&tmp, contents) {
+        let _ = fs::remove_file(&tmp);
         return Err(Error::Io { path: tmp, source });
     }
     if let Err(source) = fs::rename(&tmp, path) {
@@ -563,6 +561,15 @@ fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
         });
     }
     Ok(())
+}
+
+fn atomic_tmp(path: &Path) -> PathBuf {
+    path.with_file_name(format!(
+        ".{}.{}.{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id(),
+        uuid::Uuid::new_v4().as_simple()
+    ))
 }
 
 fn write_skill(path: PathBuf) -> Result<()> {
@@ -1376,22 +1383,45 @@ echo added gemini magents
     }
 
     #[test]
+    fn atomic_tmp_paths_are_unique_per_call() {
+        let path = Path::new("/tmp/mcp.json");
+        let first = super::atomic_tmp(path);
+        let second = super::atomic_tmp(path);
+        assert_ne!(first, second);
+        assert!(
+            first
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".mcp.json.")
+        );
+        assert!(first.to_string_lossy().ends_with(".tmp"));
+    }
+
+    #[test]
     fn config_write_keeps_existing_file_when_tmp_cannot_be_written() {
         let dir = tempfile::tempdir().unwrap();
         let json = dir.path().join("mcp.json");
         write_json(&json, &json!({"keep": true})).unwrap();
-        fs::create_dir_all(dir.path().join("mcp.json.tmp")).unwrap();
         let before = fs::read_to_string(&json).unwrap();
-        let error = write_json(&json, &json!({"keep": false})).unwrap_err();
-        assert!(error.to_string().contains("failed to read"), "{error}");
-        assert_eq!(fs::read_to_string(&json).unwrap(), before);
-
         let toml = dir.path().join("config.toml");
         fs::write(&toml, "keep = true\n").unwrap();
-        fs::create_dir_all(dir.path().join("config.toml.tmp")).unwrap();
-        let error = super::upsert_toml_mcp(&toml, Path::new("magents")).unwrap_err();
-        assert!(error.to_string().contains("failed to read"), "{error}");
-        assert_eq!(fs::read_to_string(&toml).unwrap(), "keep = true\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(dir.path()).unwrap().permissions();
+            permissions.set_mode(0o555);
+            fs::set_permissions(dir.path(), permissions).unwrap();
+            let error = write_json(&json, &json!({"keep": false})).unwrap_err();
+            assert!(error.to_string().contains("failed to read"), "{error}");
+            assert_eq!(fs::read_to_string(&json).unwrap(), before);
+            let error = super::upsert_toml_mcp(&toml, Path::new("magents")).unwrap_err();
+            assert!(error.to_string().contains("failed to read"), "{error}");
+            assert_eq!(fs::read_to_string(&toml).unwrap(), "keep = true\n");
+            let mut permissions = fs::metadata(dir.path()).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(dir.path(), permissions).unwrap();
+        }
     }
 
     #[test]
