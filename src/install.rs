@@ -396,8 +396,8 @@ fn stdio_server(exe: &Path, kind: Option<&str>) -> Value {
 }
 
 fn upsert_json_mcp(path: &Path, servers_key: &str, server: Value) -> Result<()> {
-    with_file_lock(path, || {
-        let mut root = read_json_object(path)?;
+    with_config_update(path, |raw| {
+        let mut root = json_object_from_bytes(path, raw)?;
         let servers = root
             .entry(servers_key)
             .or_insert_with(|| json!({}))
@@ -408,32 +408,18 @@ fn upsert_json_mcp(path: &Path, servers_key: &str, server: Value) -> Result<()> 
                     path.display()
                 ))
             })?;
-        upsert_object_key(servers, "magents", server);
-        write_json(path, &Value::Object(root))
+        upsert_object_key(servers, "magents", server.clone());
+        Ok((pretty_json_bytes(&Value::Object(root))?, ()))
     })
 }
 
 fn upsert_toml_mcp(path: &Path, exe: &Path) -> Result<()> {
-    with_file_lock(path, || {
-        let mut doc = if path.is_file() {
-            let raw = fs::read_to_string(path).map_err(|source| Error::Io {
-                path: path.to_path_buf(),
-                source,
-            })?;
-            if raw.trim().is_empty() {
-                DocumentMut::new()
-            } else {
-                raw.parse::<DocumentMut>().map_err(|error| {
-                    Error::msg(format!("{} is not valid TOML: {error}", path.display()))
-                })?
-            }
-        } else {
-            DocumentMut::new()
-        };
-        let command = exe.to_str().unwrap_or("magents");
-        doc["mcp_servers"]["magents"]["command"] = value(command);
+    let command = exe.to_str().unwrap_or("magents").to_string();
+    with_config_update(path, |raw| {
+        let mut doc = toml_from_bytes(path, raw)?;
+        doc["mcp_servers"]["magents"]["command"] = value(command.as_str());
         doc["mcp_servers"]["magents"]["args"] = value(Array::from_iter(["mcp"]));
-        write_atomic(path, format!("{doc}"))
+        Ok((doc.to_string().into_bytes(), ()))
     })
 }
 
@@ -447,8 +433,9 @@ fn install_cursor(exe: &Path) -> Result<HostStatus> {
         .unwrap_or_default()
         .join(".cursor")
         .join("mcp.json");
-    with_file_lock(&path, || {
-        let mut root = read_json_object(&path)?;
+    let command = exe.to_str().unwrap_or("magents").to_string();
+    with_config_update(&path, |raw| {
+        let mut root = json_object_from_bytes(&path, raw)?;
         let servers = root
             .entry("mcpServers")
             .or_insert_with(|| json!({}))
@@ -458,12 +445,11 @@ fn install_cursor(exe: &Path) -> Result<HostStatus> {
             servers,
             "magents",
             json!({
-                "command": exe.to_str().unwrap_or("magents"),
+                "command": command,
                 "args": ["mcp"],
             }),
         );
-        write_json(&path, &Value::Object(root))?;
-        Ok(status)
+        Ok((pretty_json_bytes(&Value::Object(root))?, status))
     })
 }
 
@@ -473,8 +459,9 @@ fn install_opencode(exe: &Path) -> Result<HostStatus> {
         .join(".config")
         .join("opencode")
         .join("opencode.json");
-    with_file_lock(&path, || {
-        let mut root = read_json_object(&path)?;
+    let command = exe.to_str().unwrap_or("magents").to_string();
+    with_config_update(&path, |raw| {
+        let mut root = json_object_from_bytes(&path, raw)?;
         if !root.contains_key("$schema") {
             root.insert("$schema".into(), json!("https://opencode.ai/config.json"));
         }
@@ -488,12 +475,11 @@ fn install_opencode(exe: &Path) -> Result<HostStatus> {
             "magents",
             json!({
                 "type": "local",
-                "command": [exe.to_str().unwrap_or("magents"), "mcp"],
+                "command": [command, "mcp"],
                 "enabled": true,
             }),
         );
-        write_json(&path, &Value::Object(root))?;
-        Ok(status)
+        Ok((pretty_json_bytes(&Value::Object(root))?, status))
     })
 }
 
@@ -525,17 +511,14 @@ fn toml_has_keys(path: &Path, keys: &[&str]) -> bool {
 }
 
 fn read_json_object(path: &Path) -> Result<Map<String, Value>> {
-    if !path.is_file() {
+    json_object_from_bytes(path, &read_bytes(path)?)
+}
+
+fn json_object_from_bytes(path: &Path, raw: &[u8]) -> Result<Map<String, Value>> {
+    if raw.is_empty() || raw.trim_ascii().is_empty() {
         return Ok(Map::new());
     }
-    let raw = fs::read_to_string(path).map_err(|source| Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if raw.trim().is_empty() {
-        return Ok(Map::new());
-    }
-    let value: Value = serde_json::from_str(&raw)?;
+    let value: Value = serde_json::from_slice(raw)?;
     match value {
         Value::Object(map) => Ok(map),
         _ => Err(Error::msg(format!(
@@ -545,12 +528,57 @@ fn read_json_object(path: &Path) -> Result<Map<String, Value>> {
     }
 }
 
-fn write_json(path: &Path, value: &Value) -> Result<()> {
-    let raw = serde_json::to_string_pretty(value)?;
-    write_atomic(path, format!("{raw}\n"))
+fn toml_from_bytes(path: &Path, raw: &[u8]) -> Result<DocumentMut> {
+    if raw.is_empty() || raw.trim_ascii().is_empty() {
+        return Ok(DocumentMut::new());
+    }
+    let text = std::str::from_utf8(raw)
+        .map_err(|error| Error::msg(format!("{} is not valid TOML: {error}", path.display())))?;
+    text.parse::<DocumentMut>()
+        .map_err(|error| Error::msg(format!("{} is not valid TOML: {error}", path.display())))
 }
 
+fn pretty_json_bytes(value: &Value) -> Result<Vec<u8>> {
+    let raw = serde_json::to_string_pretty(value)?;
+    Ok(format!("{raw}\n").into_bytes())
+}
+
+#[cfg(test)]
+fn write_json(path: &Path, value: &Value) -> Result<()> {
+    write_atomic(path, pretty_json_bytes(value)?)
+}
+
+fn read_bytes(path: &Path) -> Result<Vec<u8>> {
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    fs::read(path).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+#[cfg(test)]
 fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    let tmp = write_tmp(path, contents)?;
+    rename_tmp(tmp, path)
+}
+
+fn write_atomic_if_unchanged(
+    path: &Path,
+    expected: &[u8],
+    contents: impl AsRef<[u8]>,
+) -> Result<bool> {
+    let tmp = write_tmp(path, contents)?;
+    if read_bytes(path)? != expected {
+        let _ = fs::remove_file(&tmp);
+        return Ok(false);
+    }
+    rename_tmp(tmp, path)?;
+    Ok(true)
+}
+
+fn write_tmp(path: &Path, contents: impl AsRef<[u8]>) -> Result<PathBuf> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| Error::Io {
             path: parent.to_path_buf(),
@@ -562,6 +590,10 @@ fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
         let _ = fs::remove_file(&tmp);
         return Err(Error::Io { path: tmp, source });
     }
+    Ok(tmp)
+}
+
+fn rename_tmp(tmp: PathBuf, path: &Path) -> Result<()> {
     if let Err(source) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
         return Err(Error::Io {
@@ -637,6 +669,30 @@ impl Drop for FileLock {
 fn with_file_lock<T>(path: &Path, work: impl FnOnce() -> Result<T>) -> Result<T> {
     let _lock = FileLock::exclusive(&lock_path(path))?;
     work()
+}
+
+const CONFIG_WRITE_ATTEMPTS: u32 = 8;
+
+fn with_config_update<T>(
+    path: &Path,
+    mut update: impl FnMut(&[u8]) -> Result<(Vec<u8>, T)>,
+) -> Result<T> {
+    with_file_lock(path, || {
+        for _ in 0..CONFIG_WRITE_ATTEMPTS {
+            let before = read_bytes(path)?;
+            let (next, out) = update(&before)?;
+            if next == before {
+                return Ok(out);
+            }
+            if write_atomic_if_unchanged(path, &before, &next)? {
+                return Ok(out);
+            }
+        }
+        Err(Error::msg(format!(
+            "{} changed while installing magents; try again",
+            path.display()
+        )))
+    })
 }
 
 fn write_skill(path: PathBuf) -> Result<()> {
@@ -1499,6 +1555,95 @@ echo added gemini magents
     }
 
     #[test]
+    fn config_update_keeps_host_edits_made_during_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        write_json(&path, &json!({"mcpServers": {"keep": {"command": "x"}}})).unwrap();
+        let mut attempts = 0;
+        super::with_config_update(&path, |raw| {
+            attempts += 1;
+            let mut root = super::json_object_from_bytes(&path, raw)?;
+            if attempts == 1 {
+                write_json(
+                    &path,
+                    &json!({
+                        "mcpServers": {
+                            "keep": {"command": "x"},
+                            "host": {"command": "y"}
+                        }
+                    }),
+                )
+                .unwrap();
+            }
+            root.entry("mcpServers")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .unwrap()
+                .insert(
+                    "magents".into(),
+                    json!({"command": "magents", "args": ["mcp"]}),
+                );
+            Ok((super::pretty_json_bytes(&Value::Object(root))?, ()))
+        })
+        .unwrap();
+        assert!(attempts >= 2, "attempts={attempts}");
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("keep"), "{raw}");
+        assert!(raw.contains("host"), "{raw}");
+        assert!(raw.contains("magents"), "{raw}");
+    }
+
+    #[test]
+    fn config_update_skips_write_when_contents_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        let raw = b"same\n";
+        fs::write(&path, raw).unwrap();
+        super::with_config_update(&path, |_| Ok((raw.to_vec(), ()))).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), raw);
+    }
+
+    #[test]
+    fn config_update_errors_when_the_file_keeps_changing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        write_json(&path, &json!({"ok": true})).unwrap();
+        let mut n = 0;
+        let error = super::with_config_update(&path, |_| {
+            n += 1;
+            fs::write(&path, format!("changed-{n}\n")).unwrap();
+            Ok((b"{\"magents\":true}\n".to_vec(), ()))
+        })
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("changed while installing"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn write_atomic_if_unchanged_refuses_a_stale_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        fs::write(&path, "host\n").unwrap();
+        assert!(!super::write_atomic_if_unchanged(&path, b"before\n", b"next\n").unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "host\n");
+        assert!(super::write_atomic_if_unchanged(&path, b"host\n", b"next\n").unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "next\n");
+    }
+
+    #[test]
+    fn toml_from_bytes_rejects_invalid_utf8() {
+        let error = super::toml_from_bytes(Path::new("config.toml"), &[0xff, 0xfe]).unwrap_err();
+        assert!(error.to_string().contains("not valid TOML"), "{error}");
+        assert!(
+            super::json_object_from_bytes(Path::new("mcp.json"), b"  \n")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn atomic_tmp_paths_are_unique_per_call() {
         let path = Path::new("/tmp/mcp.json");
         let first = super::atomic_tmp(path);
@@ -1529,6 +1674,11 @@ echo added gemini magents
             permissions.set_mode(0o555);
             fs::set_permissions(dir.path(), permissions).unwrap();
             let error = write_json(&json, &json!({"keep": false})).unwrap_err();
+            assert!(error.to_string().contains("failed to read"), "{error}");
+            assert_eq!(fs::read_to_string(&json).unwrap(), before);
+            let error =
+                super::write_atomic_if_unchanged(&json, before.as_bytes(), b"{\"keep\":false}\n")
+                    .unwrap_err();
             assert!(error.to_string().contains("failed to read"), "{error}");
             assert_eq!(fs::read_to_string(&json).unwrap(), before);
             let error = super::upsert_toml_mcp(&toml, Path::new("magents")).unwrap_err();
