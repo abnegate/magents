@@ -1964,6 +1964,29 @@ echo added gemini magents
     }
 
     #[test]
+    fn publish_restores_the_stamp_when_the_exclusive_link_source_vanishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        let tmp = dir.path().join("next.json");
+        fs::write(&path, "before\n").unwrap();
+        fs::write(&tmp, "next\n").unwrap();
+        let error = super::publish_after_unlink(
+            &path,
+            b"before\n",
+            &tmp,
+            |_| Ok(()),
+            |_| {
+                fs::remove_file(&tmp).unwrap();
+                Ok(())
+            },
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("failed to read"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "before\n");
+    }
+
+    #[test]
     fn publish_retries_when_the_live_path_disappears_before_aside() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mcp.json");
@@ -2000,6 +2023,24 @@ echo added gemini magents
     }
 
     #[test]
+    fn recover_live_file_errors_when_the_destination_cannot_be_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        fs::write(super::stamp_path(&path), "stamp\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(dir.path()).unwrap().permissions();
+            permissions.set_mode(0o555);
+            fs::set_permissions(dir.path(), permissions).unwrap();
+            assert!(super::recover_live_file(&path).is_err());
+            let mut permissions = fs::metadata(dir.path()).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(dir.path(), permissions).unwrap();
+        }
+    }
+
+    #[test]
     fn recover_live_file_treats_an_existing_directory_as_a_conflict() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mcp.json");
@@ -2016,6 +2057,7 @@ echo added gemini magents
         let right = dir.path().join("right");
         fs::write(&left, "left\n").unwrap();
         assert!(super::same_inode(&left, &dir.path().join("missing")).is_err());
+        assert!(super::same_inode(&dir.path().join("missing"), &left).is_err());
         fs::write(&right, "right\n").unwrap();
         super::restore_path(&left, &right);
         assert_eq!(fs::read_to_string(&right).unwrap(), "right\n");
