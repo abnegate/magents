@@ -570,12 +570,102 @@ fn write_atomic_if_unchanged(
     contents: impl AsRef<[u8]>,
 ) -> Result<bool> {
     let tmp = write_tmp(path, contents)?;
-    if read_bytes(path)? != expected {
-        let _ = fs::remove_file(&tmp);
+    let result = publish_if_unchanged(path, expected, &tmp);
+    let _ = fs::remove_file(&tmp);
+    result
+}
+
+fn stamp_path(path: &Path) -> PathBuf {
+    path.with_file_name(format!(
+        ".{}.stamp",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ))
+}
+
+fn recover_live_file(path: &Path) -> Result<()> {
+    let stamp = stamp_path(path);
+    if path.is_file() || !stamp.is_file() {
+        return Ok(());
+    }
+    match fs::hard_link(&stamp, path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(source) => Err(Error::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn link_or_conflict(from: &Path, to: &Path) -> Result<bool> {
+    match fs::hard_link(from, to) {
+        Ok(()) => Ok(true),
+        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists && to.is_file() => {
+            Ok(false)
+        }
+        Err(source) => Err(Error::Io {
+            path: to.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn publish_if_unchanged(path: &Path, expected: &[u8], tmp: &Path) -> Result<bool> {
+    publish_after_unlink(path, expected, tmp, |_| Ok(()))
+}
+
+fn publish_after_unlink(
+    path: &Path,
+    expected: &[u8],
+    tmp: &Path,
+    after_unlink: impl FnOnce(&Path) -> Result<()>,
+) -> Result<bool> {
+    recover_live_file(path)?;
+    let stamp = stamp_path(path);
+    let _ = fs::remove_file(&stamp);
+    if path.is_file() {
+        fs::hard_link(path, &stamp).map_err(|source| Error::Io {
+            path: stamp.clone(),
+            source,
+        })?;
+        if read_bytes(path)? != expected {
+            let _ = fs::remove_file(&stamp);
+            return Ok(false);
+        }
+        if let Err(source) = fs::remove_file(path) {
+            let _ = fs::remove_file(&stamp);
+            return Err(Error::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    } else if !expected.is_empty() {
         return Ok(false);
     }
-    rename_tmp(tmp, path)?;
-    Ok(true)
+    after_unlink(&stamp)?;
+    match link_or_conflict(tmp, path) {
+        Ok(true) => {
+            if stamp.is_file() && read_bytes(&stamp)? != expected {
+                let _ = fs::remove_file(path);
+                let _ = fs::hard_link(&stamp, path);
+                let _ = fs::remove_file(&stamp);
+                return Ok(false);
+            }
+            let _ = fs::remove_file(&stamp);
+            Ok(true)
+        }
+        Ok(false) => {
+            let _ = fs::remove_file(&stamp);
+            Ok(false)
+        }
+        Err(error) => {
+            if !path.is_file() && stamp.is_file() {
+                let _ = fs::hard_link(&stamp, path);
+            }
+            let _ = fs::remove_file(&stamp);
+            Err(error)
+        }
+    }
 }
 
 fn lock_exclusive(file: &File, path: &Path) -> Result<()> {
@@ -626,6 +716,7 @@ fn write_tmp(path: &Path, contents: impl AsRef<[u8]>) -> Result<PathBuf> {
     Ok(tmp)
 }
 
+#[cfg(test)]
 fn rename_tmp(tmp: PathBuf, path: &Path) -> Result<()> {
     if let Err(source) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
@@ -695,6 +786,7 @@ fn with_config_update<T>(
     mut update: impl FnMut(&[u8]) -> Result<(Vec<u8>, T)>,
 ) -> Result<T> {
     with_file_lock(path, || {
+        recover_live_file(path)?;
         for _ in 0..CONFIG_WRITE_ATTEMPTS {
             let before = read_bytes(path)?;
             let (next, out) = update(&before)?;
@@ -1655,6 +1747,96 @@ echo added gemini magents
         let blocked = dir.path().join("blocked");
         fs::write(&blocked, "file").unwrap();
         assert!(super::write_atomic_if_unchanged(&blocked.join("x.json"), b"", b"x\n").is_err());
+    }
+
+    #[test]
+    fn recover_live_file_ignores_an_existing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        fs::write(&path, "live\n").unwrap();
+        fs::write(super::stamp_path(&path), "stamp\n").unwrap();
+        super::recover_live_file(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "live\n");
+    }
+
+    #[test]
+    fn config_update_recovers_a_leftover_stamp_before_merging() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        write_json(
+            &super::stamp_path(&path),
+            &json!({"mcpServers": {"keep": {"command": "x"}}}),
+        )
+        .unwrap();
+        super::upsert_json_mcp(
+            &path,
+            "mcpServers",
+            json!({"command": "magents", "args": ["mcp"]}),
+        )
+        .unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("keep"), "{raw}");
+        assert!(raw.contains("magents"), "{raw}");
+        assert!(!super::stamp_path(&path).is_file());
+    }
+
+    #[test]
+    fn publish_if_unchanged_restores_stamp_when_exclusive_link_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        let tmp = dir.path().join("next.json");
+        fs::write(&path, "before\n").unwrap();
+        fs::write(&tmp, "next\n").unwrap();
+        let blocked = dir.path().join("blocked");
+        fs::write(&blocked, "file").unwrap();
+        let dest = blocked.join("mcp.json");
+        let error = super::publish_if_unchanged(&dest, b"", &tmp).unwrap_err();
+        assert!(error.to_string().contains("failed to read"), "{error}");
+    }
+
+    #[test]
+    fn link_or_conflict_is_false_when_the_destination_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("from");
+        let to = dir.path().join("to");
+        fs::write(&from, "from\n").unwrap();
+        fs::write(&to, "to\n").unwrap();
+        assert!(!super::link_or_conflict(&from, &to).unwrap());
+        assert_eq!(fs::read_to_string(&to).unwrap(), "to\n");
+    }
+
+    #[test]
+    fn publish_restores_an_in_place_host_update_from_the_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        let tmp = dir.path().join("next.json");
+        fs::write(&path, "before\n").unwrap();
+        fs::write(&tmp, "next\n").unwrap();
+        assert!(
+            !super::publish_after_unlink(&path, b"before\n", &tmp, |stamp| {
+                fs::write(stamp, "host\n").unwrap();
+                Ok(())
+            })
+            .unwrap()
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "host\n");
+    }
+
+    #[test]
+    fn publish_retries_when_the_live_path_is_recreated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        let tmp = dir.path().join("next.json");
+        fs::write(&path, "before\n").unwrap();
+        fs::write(&tmp, "next\n").unwrap();
+        assert!(
+            !super::publish_after_unlink(&path, b"before\n", &tmp, |_| {
+                fs::write(&path, "host\n").unwrap();
+                Ok(())
+            })
+            .unwrap()
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "host\n");
     }
 
     #[test]
