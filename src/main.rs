@@ -724,16 +724,28 @@ impl Drop for Spinner {
     }
 }
 
+fn sanitize(text: &str) -> String {
+    text.chars()
+        .filter(|&ch| ch == '\n' || ch == '\t' || !ch.is_control())
+        .collect()
+}
+
 fn row(mark: &str, label: &str, primary: &str) -> String {
-    format!("  {mark} {label:<8}  {primary}")
+    format!(
+        "  {mark} {label:<8}  {}",
+        sanitize(primary).replace('\n', " ")
+    )
 }
 
 fn sub(text: &str) -> String {
-    format!("              {text}")
+    format!("              {}", sanitize(text).replace('\n', " "))
 }
 
 fn clip(text: &str, max: usize) -> String {
-    let trimmed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = sanitize(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     if trimmed.chars().count() <= max {
         return trimmed;
     }
@@ -984,7 +996,7 @@ fn format_memory_read(style: &Style, read: &MemoryRead) -> String {
         lines.push(style.dim(&sub(project)));
     }
     lines.push(String::new());
-    lines.push(read.content.trim_end().to_string());
+    lines.push(sanitize(&read.content).trim_end().to_string());
     if read.truncated {
         lines.push(style.dim(&sub("truncated")));
     }
@@ -1150,7 +1162,7 @@ fn format_note(style: &Style, note: &Note, written: bool) -> String {
             style.dim(&sub(&short_path(&note.cwd)))
         );
     }
-    if !note.exists || note.content.trim().is_empty() {
+    if !note.exists || sanitize(&note.content).trim().is_empty() {
         return format!(
             "{}\n",
             row(
@@ -1165,7 +1177,7 @@ fn format_note(style: &Style, note: &Note, written: bool) -> String {
         lines.push(style.dim(&sub(&relative_time(time))));
     }
     lines.push(String::new());
-    lines.push(note.content.trim_end().to_string());
+    lines.push(sanitize(&note.content).trim_end().to_string());
     lines.push(String::new());
     lines.join("\n")
 }
@@ -1410,6 +1422,14 @@ mod tests {
         assert!(help.contains("await-reply"));
         assert!(help.contains("--output"));
         assert!(!help.contains("__supervise"));
+    }
+
+    #[test]
+    fn sanitizes_terminal_controls_from_human_text() {
+        assert_eq!(super::sanitize("ok\x1b[31mRED\x07"), "ok[31mRED");
+        assert_eq!(super::clip("hello\x1b[0m world", 20), "hello[0m world");
+        assert!(super::row("✓", "note", "hi\x1b[2J").contains("hi[2J"));
+        assert!(!super::row("✓", "note", "hi\x1b[2J").contains('\u{1b}'));
     }
 
     #[test]

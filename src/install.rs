@@ -358,9 +358,6 @@ fn add_or_replace_known(
     add: &[&str],
     remove: &[&str],
 ) -> Result<HostStatus> {
-    if existed {
-        let _ = Command::new(program).args(remove).output();
-    }
     match run(program, add) {
         Ok(_) => Ok(if existed {
             HostStatus::Replaced
@@ -732,7 +729,7 @@ echo added magents
             .unwrap();
             let notes = install(false, true, false, false, false, false, false).unwrap();
             assert_eq!(host(&notes, "grok").status, HostStatus::Replaced);
-            assert!(home.join(".removed-magents").is_file());
+            assert!(!home.join(".removed-magents").is_file());
             assert!(home.join(".grok/skills/magents/SKILL.md").is_file());
         });
     }
@@ -759,7 +756,7 @@ echo added magents
             .unwrap();
             let notes = install(false, false, true, false, false, false, false).unwrap();
             assert_eq!(host(&notes, "codex").status, HostStatus::Replaced);
-            assert!(home.join(".removed-magents").is_file());
+            assert!(!home.join(".removed-magents").is_file());
         });
     }
 
@@ -783,7 +780,34 @@ echo added magents
             .unwrap();
             let notes = install(true, false, false, false, false, false, false).unwrap();
             assert_eq!(host(&notes, "claude").status, HostStatus::Replaced);
-            assert!(home.join(".removed-magents").is_file());
+            assert!(!home.join(".removed-magents").is_file());
+        });
+    }
+
+    #[test]
+    fn install_keeps_existing_server_when_upsert_add_fails() {
+        with_home(|home, bin| {
+            test_env::write_executable(
+                &bin.join("grok"),
+                r#"
+if [ "$1" = mcp ] && [ "$2" = remove ]; then
+  : > "$HOME/.removed-magents"
+  exit 0
+fi
+echo boom >&2
+exit 1
+"#,
+            );
+            let grok = home.join(".grok");
+            fs::create_dir_all(&grok).unwrap();
+            fs::write(
+                grok.join("config.toml"),
+                "[mcp_servers.magents]\ncommand = \"old\"\n",
+            )
+            .unwrap();
+            let error = install(false, true, false, false, false, false, false).unwrap_err();
+            assert!(error.to_string().contains("grok mcp add failed"), "{error}");
+            assert!(!home.join(".removed-magents").is_file());
         });
     }
 
@@ -806,7 +830,7 @@ echo added gemini magents
             );
             let notes = install(false, false, false, false, false, true, false).unwrap();
             assert_eq!(host(&notes, "gemini").status, HostStatus::Replaced);
-            assert!(home.join(".removed-magents").is_file());
+            assert!(!home.join(".removed-magents").is_file());
         });
     }
 
