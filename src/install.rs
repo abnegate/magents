@@ -581,7 +581,19 @@ fn apply_if_unchanged(path: &Path, expected: &[u8], contents: &[u8]) -> Result<b
     let Some(mut file) = open_live_if_unchanged(path, expected)? else {
         return Ok(false);
     };
-    replace_file_contents(&mut file, path, contents, expected)?;
+    write_if_fd_matches(&mut file, path, expected, contents)
+}
+
+fn write_if_fd_matches(
+    file: &mut File,
+    path: &Path,
+    expected: &[u8],
+    contents: &[u8],
+) -> Result<bool> {
+    if !same_live_file(file, path)? || read_file(file, path)? != expected {
+        return Ok(false);
+    }
+    replace_file_contents(file, path, contents, expected)?;
     Ok(read_bytes(path)? == contents)
 }
 
@@ -1800,6 +1812,23 @@ echo added gemini magents
         assert!(!super::same_live_file(&file, &path).unwrap());
         fs::write(&path, "second\n").unwrap();
         assert!(!super::same_live_file(&file, &path).unwrap());
+    }
+
+    #[test]
+    fn write_if_fd_matches_refuses_an_in_place_host_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        fs::write(&path, "before\n").unwrap();
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        fs::write(&path, "host\n").unwrap();
+        assert!(!super::write_if_fd_matches(&mut file, &path, b"before\n", b"next\n").unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "host\n");
+        assert!(super::write_if_fd_matches(&mut file, &path, b"host\n", b"next\n").unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "next\n");
     }
 
     #[test]
