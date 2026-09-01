@@ -227,12 +227,7 @@ fn install_grok(homes: &Homes, exe: &Path) -> Result<HostStatus> {
         exe.to_str().unwrap_or("magents"),
         "mcp",
     ];
-    add_or_replace_known(
-        cli_has_magents(homes, "grok"),
-        "grok",
-        &add,
-        &["mcp", "remove", "magents"],
-    )
+    add_or_replace_known(cli_has_magents(homes, "grok"), "grok", &add)
 }
 
 fn install_claude(homes: &Homes, exe: &Path) -> Result<HostStatus> {
@@ -246,12 +241,7 @@ fn install_claude(homes: &Homes, exe: &Path) -> Result<HostStatus> {
         exe.to_str().unwrap_or("magents"),
         "mcp",
     ];
-    add_or_replace_known(
-        cli_has_magents(homes, "claude"),
-        "claude",
-        &add,
-        &["mcp", "remove", "--scope", "user", "magents"],
-    )
+    add_or_replace_known(cli_has_magents(homes, "claude"), "claude", &add)
 }
 
 fn install_codex(homes: &Homes, exe: &Path) -> Result<HostStatus> {
@@ -263,12 +253,7 @@ fn install_codex(homes: &Homes, exe: &Path) -> Result<HostStatus> {
         exe.to_str().unwrap_or("magents"),
         "mcp",
     ];
-    add_or_replace_known(
-        cli_has_magents(homes, "codex"),
-        "codex",
-        &add,
-        &["mcp", "remove", "magents"],
-    )
+    add_or_replace_known(cli_has_magents(homes, "codex"), "codex", &add)
 }
 
 fn install_gemini(homes: &Homes, exe: &Path) -> Result<HostStatus> {
@@ -282,12 +267,7 @@ fn install_gemini(homes: &Homes, exe: &Path) -> Result<HostStatus> {
         exe.to_str().unwrap_or("magents"),
         "mcp",
     ];
-    add_or_replace_known(
-        cli_has_magents(homes, "gemini"),
-        "gemini",
-        &add,
-        &["mcp", "remove", "-s", "user", "magents"],
-    )
+    add_or_replace_known(cli_has_magents(homes, "gemini"), "gemini", &add)
 }
 
 fn install_copilot(homes: &Homes, exe: &Path) -> Result<HostStatus> {
@@ -299,12 +279,7 @@ fn install_copilot(homes: &Homes, exe: &Path) -> Result<HostStatus> {
         exe.to_str().unwrap_or("magents"),
         "mcp",
     ];
-    add_or_replace_known(
-        cli_has_magents(homes, "copilot"),
-        "copilot",
-        &add,
-        &["mcp", "remove", "magents"],
-    )
+    add_or_replace_known(cli_has_magents(homes, "copilot"), "copilot", &add)
 }
 
 fn cli_has_magents(homes: &Homes, program: &str) -> bool {
@@ -352,28 +327,16 @@ fn mcp_get_exists(program: &str) -> bool {
     })
 }
 
-fn add_or_replace_known(
-    existed: bool,
-    program: &str,
-    add: &[&str],
-    remove: &[&str],
-) -> Result<HostStatus> {
+fn add_or_replace_known(existed: bool, program: &str, add: &[&str]) -> Result<HostStatus> {
     match run(program, add) {
         Ok(_) => Ok(if existed {
             HostStatus::Replaced
         } else {
             HostStatus::Added
         }),
-        Err(error) if already_registered(&error) => {
-            let _ = Command::new(program).args(remove).output();
-            match run(program, add) {
-                Ok(_) => Ok(HostStatus::Replaced),
-                Err(add_error) => {
-                    let _ = run(program, add);
-                    Err(add_error)
-                }
-            }
-        }
+        // Hosts that refuse a second add have already confirmed the server is
+        // registered. Removing it here would open a gap if the retry failed.
+        Err(error) if already_registered(&error) => Ok(HostStatus::Replaced),
         Err(error) => Err(error),
     }
 }
@@ -703,7 +666,28 @@ exit 1
             );
             let notes = install(true, false, false, false, false, false, false).unwrap();
             assert_eq!(host(&notes, "claude").status, HostStatus::Replaced);
+            assert!(!home.join(".removed-magents").is_file());
             assert!(home.join(".claude/skills/magents/SKILL.md").is_file());
+        });
+    }
+
+    #[test]
+    fn install_keeps_existing_server_when_already_registered() {
+        with_home(|home, bin| {
+            test_env::write_executable(
+                &bin.join("claude"),
+                r#"
+if [ "$1" = mcp ] && [ "$2" = remove ]; then
+  : > "$HOME/.removed-magents"
+  exit 0
+fi
+echo already exists >&2
+exit 1
+"#,
+            );
+            let notes = install(true, false, false, false, false, false, false).unwrap();
+            assert_eq!(host(&notes, "claude").status, HostStatus::Replaced);
+            assert!(!home.join(".removed-magents").is_file());
         });
     }
 
@@ -1170,16 +1154,6 @@ echo added gemini magents
         assert!(write_skill(blocked.join("SKILL.md")).is_err());
 
         with_home(|home, bin| {
-            test_env::write_executable(
-                &bin.join("claude"),
-                r#"
-echo already exists >&2
-exit 1
-"#,
-            );
-            let error = install(true, false, false, false, false, false, false).unwrap_err();
-            assert!(error.to_string().contains("already exists"));
-
             test_env::write_executable(&bin.join("grok"), "echo added magents");
             fs::create_dir_all(home.join(".grok")).unwrap();
             fs::write(home.join(".grok").join("skills"), "not-a-dir").unwrap();
