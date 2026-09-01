@@ -1,6 +1,6 @@
 [package]
 name = "magents"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 description = "Mates + agents: a shared session bus for Claude Code, Codex, Copilot, Cursor, Gemini, Grok, and OpenCode"
 license = "MIT"
