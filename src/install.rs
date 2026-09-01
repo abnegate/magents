@@ -610,19 +610,56 @@ fn link_or_conflict(from: &Path, to: &Path) -> Result<bool> {
     }
 }
 
+fn aside_path(path: &Path) -> PathBuf {
+    path.with_file_name(format!(
+        ".{}.{}.{}.aside",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id(),
+        uuid::Uuid::new_v4().as_simple()
+    ))
+}
+
+fn same_inode(left: &Path, right: &Path) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let left_meta = fs::metadata(left).map_err(|source| Error::Io {
+            path: left.to_path_buf(),
+            source,
+        })?;
+        let right_meta = fs::metadata(right).map_err(|source| Error::Io {
+            path: right.to_path_buf(),
+            source,
+        })?;
+        Ok(left_meta.dev() == right_meta.dev() && left_meta.ino() == right_meta.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(read_bytes(left)? == read_bytes(right)?)
+    }
+}
+
+fn restore_path(from: &Path, to: &Path) {
+    if !to.is_file() {
+        let _ = fs::rename(from, to);
+    }
+}
+
 fn publish_if_unchanged(path: &Path, expected: &[u8], tmp: &Path) -> Result<bool> {
-    publish_after_unlink(path, expected, tmp, |_| Ok(()))
+    publish_after_unlink(path, expected, tmp, |_| Ok(()), |_| Ok(()))
 }
 
 fn publish_after_unlink(
     path: &Path,
     expected: &[u8],
     tmp: &Path,
-    after_unlink: impl FnOnce(&Path) -> Result<()>,
+    after_compare: impl FnOnce(&Path) -> Result<()>,
+    after_aside: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<bool> {
     recover_live_file(path)?;
     let stamp = stamp_path(path);
     let _ = fs::remove_file(&stamp);
+    let aside = aside_path(path);
     if path.is_file() {
         fs::hard_link(path, &stamp).map_err(|source| Error::Io {
             path: stamp.clone(),
@@ -632,30 +669,47 @@ fn publish_after_unlink(
             let _ = fs::remove_file(&stamp);
             return Ok(false);
         }
-        if let Err(source) = fs::remove_file(path) {
+        after_compare(path)?;
+        match fs::rename(path, &aside) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                let _ = fs::remove_file(&stamp);
+                return Ok(false);
+            }
+            Err(source) => {
+                let _ = fs::remove_file(&stamp);
+                return Err(Error::Io {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        }
+        if !same_inode(&aside, &stamp)? {
+            restore_path(&aside, path);
             let _ = fs::remove_file(&stamp);
-            return Err(Error::Io {
-                path: path.to_path_buf(),
-                source,
-            });
+            let _ = fs::remove_file(&aside);
+            return Ok(false);
         }
     } else if !expected.is_empty() {
         return Ok(false);
     }
-    after_unlink(&stamp)?;
+    after_aside(&stamp)?;
     match link_or_conflict(tmp, path) {
         Ok(true) => {
             if stamp.is_file() && read_bytes(&stamp)? != expected {
                 let _ = fs::remove_file(path);
                 let _ = fs::hard_link(&stamp, path);
                 let _ = fs::remove_file(&stamp);
+                let _ = fs::remove_file(&aside);
                 return Ok(false);
             }
             let _ = fs::remove_file(&stamp);
+            let _ = fs::remove_file(&aside);
             Ok(true)
         }
         Ok(false) => {
             let _ = fs::remove_file(&stamp);
+            let _ = fs::remove_file(&aside);
             Ok(false)
         }
         Err(error) => {
@@ -663,6 +717,7 @@ fn publish_after_unlink(
                 let _ = fs::hard_link(&stamp, path);
             }
             let _ = fs::remove_file(&stamp);
+            let _ = fs::remove_file(&aside);
             Err(error)
         }
     }
@@ -1813,10 +1868,16 @@ echo added gemini magents
         fs::write(&path, "before\n").unwrap();
         fs::write(&tmp, "next\n").unwrap();
         assert!(
-            !super::publish_after_unlink(&path, b"before\n", &tmp, |stamp| {
-                fs::write(stamp, "host\n").unwrap();
-                Ok(())
-            })
+            !super::publish_after_unlink(
+                &path,
+                b"before\n",
+                &tmp,
+                |_| Ok(()),
+                |stamp| {
+                    fs::write(stamp, "host\n").unwrap();
+                    Ok(())
+                }
+            )
             .unwrap()
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), "host\n");
@@ -1830,13 +1891,43 @@ echo added gemini magents
         fs::write(&path, "before\n").unwrap();
         fs::write(&tmp, "next\n").unwrap();
         assert!(
-            !super::publish_after_unlink(&path, b"before\n", &tmp, |_| {
-                fs::write(&path, "host\n").unwrap();
-                Ok(())
-            })
+            !super::publish_after_unlink(
+                &path,
+                b"before\n",
+                &tmp,
+                |_| Ok(()),
+                |_| {
+                    fs::write(&path, "host\n").unwrap();
+                    Ok(())
+                }
+            )
             .unwrap()
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), "host\n");
+    }
+
+    #[test]
+    fn publish_restores_a_host_replacement_moved_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        let tmp = dir.path().join("next.json");
+        fs::write(&path, "before\n").unwrap();
+        fs::write(&tmp, "next\n").unwrap();
+        assert!(
+            !super::publish_after_unlink(
+                &path,
+                b"before\n",
+                &tmp,
+                |live| {
+                    fs::remove_file(live).unwrap();
+                    fs::write(live, "host-replaced\n").unwrap();
+                    Ok(())
+                },
+                |_| Ok(())
+            )
+            .unwrap()
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "host-replaced\n");
     }
 
     #[test]
