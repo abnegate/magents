@@ -1931,6 +1931,96 @@ echo added gemini magents
     }
 
     #[test]
+    fn publish_retries_when_the_live_path_disappears_before_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        let tmp = dir.path().join("next.json");
+        fs::write(&path, "before\n").unwrap();
+        fs::write(&tmp, "next\n").unwrap();
+        assert!(
+            !super::publish_after_unlink(
+                &path,
+                b"before\n",
+                &tmp,
+                |live| {
+                    fs::remove_file(live).unwrap();
+                    Ok(())
+                },
+                |_| Ok(())
+            )
+            .unwrap()
+        );
+        assert!(!path.is_file());
+    }
+
+    #[test]
+    fn publish_errors_when_the_stamp_path_cannot_be_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        let tmp = dir.path().join("next.json");
+        fs::write(&path, "before\n").unwrap();
+        fs::write(&tmp, "next\n").unwrap();
+        fs::create_dir(super::stamp_path(&path)).unwrap();
+        assert!(super::publish_if_unchanged(&path, b"before\n", &tmp).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "before\n");
+    }
+
+    #[test]
+    fn recover_live_file_treats_an_existing_directory_as_a_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        fs::create_dir(&path).unwrap();
+        fs::write(super::stamp_path(&path), "stamp\n").unwrap();
+        super::recover_live_file(&path).unwrap();
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn same_inode_and_restore_path_cover_conflict_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        let left = dir.path().join("left");
+        let right = dir.path().join("right");
+        fs::write(&left, "left\n").unwrap();
+        assert!(super::same_inode(&left, &dir.path().join("missing")).is_err());
+        fs::write(&right, "right\n").unwrap();
+        super::restore_path(&left, &right);
+        assert_eq!(fs::read_to_string(&right).unwrap(), "right\n");
+        assert!(left.is_file());
+    }
+
+    #[test]
+    fn publish_errors_when_the_aside_rename_is_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        let tmp = dir.path().join("next.json");
+        fs::write(&path, "before\n").unwrap();
+        fs::write(&tmp, "next\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(
+                super::publish_after_unlink(
+                    &path,
+                    b"before\n",
+                    &tmp,
+                    |_| {
+                        let mut permissions = fs::metadata(dir.path()).unwrap().permissions();
+                        permissions.set_mode(0o555);
+                        fs::set_permissions(dir.path(), permissions).unwrap();
+                        Ok(())
+                    },
+                    |_| Ok(())
+                )
+                .is_err()
+            );
+            let mut permissions = fs::metadata(dir.path()).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(dir.path(), permissions).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), "before\n");
+        }
+    }
+
+    #[test]
     fn toml_from_bytes_rejects_invalid_utf8() {
         let error = super::toml_from_bytes(Path::new("config.toml"), &[0xff, 0xfe]).unwrap_err();
         assert!(error.to_string().contains("not valid TOML"), "{error}");
