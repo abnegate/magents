@@ -646,16 +646,16 @@ fn restore_path(from: &Path, to: &Path) {
 }
 
 fn publish_if_unchanged(path: &Path, expected: &[u8], tmp: &Path) -> Result<bool> {
-    publish_after_unlink(path, expected, tmp, |_| Ok(()), |_| Ok(()), |_| Ok(()))
+    publish_after_unlink(path, expected, tmp, &|_| Ok(()), &|_| Ok(()), &|_| Ok(()))
 }
 
 fn publish_after_unlink(
     path: &Path,
     expected: &[u8],
     tmp: &Path,
-    after_compare: impl FnOnce(&Path) -> Result<()>,
-    after_aside: impl FnOnce(&Path) -> Result<()>,
-    after_link: impl FnOnce(&Path) -> Result<()>,
+    after_compare: &dyn Fn(&Path) -> Result<()>,
+    after_aside: &dyn Fn(&Path) -> Result<()>,
+    after_link: &dyn Fn(&Path) -> Result<()>,
 ) -> Result<bool> {
     recover_live_file(path)?;
     let stamp = stamp_path(path);
@@ -1876,12 +1876,12 @@ echo added gemini magents
                 &path,
                 b"before\n",
                 &tmp,
-                |_| Ok(()),
-                |stamp| {
+                &|_| Ok(()),
+                &|stamp| {
                     fs::write(stamp, "host\n").unwrap();
                     Ok(())
                 },
-                |_| Ok(())
+                &|_| Ok(()),
             )
             .unwrap()
         );
@@ -1900,12 +1900,12 @@ echo added gemini magents
                 &path,
                 b"before\n",
                 &tmp,
-                |_| Ok(()),
-                |_| {
+                &|_| Ok(()),
+                &|_| {
                     fs::write(&path, "host\n").unwrap();
                     Ok(())
                 },
-                |_| Ok(())
+                &|_| Ok(()),
             )
             .unwrap()
         );
@@ -1924,13 +1924,13 @@ echo added gemini magents
                 &path,
                 b"before\n",
                 &tmp,
-                |live| {
+                &|live| {
                     fs::remove_file(live).unwrap();
                     fs::write(live, "host-replaced\n").unwrap();
                     Ok(())
                 },
-                |_| Ok(()),
-                |_| Ok(())
+                &|_| Ok(()),
+                &|_| Ok(()),
             )
             .unwrap()
         );
@@ -1949,14 +1949,14 @@ echo added gemini magents
                 &path,
                 b"before\n",
                 &tmp,
-                |_| Ok(()),
-                |_| Ok(()),
-                |live| {
+                &|_| Ok(()),
+                &|_| Ok(()),
+                &|live| {
                     fs::write(super::stamp_path(live), "stale-host\n").unwrap();
                     fs::remove_file(live).unwrap();
                     fs::write(live, "host-replaced\n").unwrap();
                     Ok(())
-                }
+                },
             )
             .unwrap()
         );
@@ -1974,12 +1974,12 @@ echo added gemini magents
             &path,
             b"before\n",
             &tmp,
-            |_| Ok(()),
-            |_| {
+            &|_| Ok(()),
+            &|_| {
                 fs::remove_file(&tmp).unwrap();
                 Ok(())
             },
-            |_| Ok(()),
+            &|_| Ok(()),
         )
         .unwrap_err();
         assert!(error.to_string().contains("failed to read"), "{error}");
@@ -1998,12 +1998,12 @@ echo added gemini magents
                 &path,
                 b"before\n",
                 &tmp,
-                |live| {
+                &|live| {
                     fs::remove_file(live).unwrap();
                     Ok(())
                 },
-                |_| Ok(()),
-                |_| Ok(())
+                &|_| Ok(()),
+                &|_| Ok(()),
             )
             .unwrap()
         );
@@ -2064,6 +2064,21 @@ echo added gemini magents
         assert!(left.is_file());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn lock_exclusive_errors_when_the_descriptor_is_invalid() {
+        use std::os::unix::io::{FromRawFd, IntoRawFd};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        fs::write(&path, "x\n").unwrap();
+        let file = super::File::open(&path).unwrap();
+        let fd = file.into_raw_fd();
+        unsafe { libc::close(fd) };
+        let file = unsafe { super::File::from_raw_fd(fd) };
+        assert!(super::lock_exclusive(&file, &path).is_err());
+        std::mem::forget(file);
+    }
+
     #[test]
     fn publish_errors_when_the_aside_rename_is_blocked() {
         let dir = tempfile::tempdir().unwrap();
@@ -2079,14 +2094,14 @@ echo added gemini magents
                     &path,
                     b"before\n",
                     &tmp,
-                    |_| {
+                    &|_| {
                         let mut permissions = fs::metadata(dir.path()).unwrap().permissions();
                         permissions.set_mode(0o555);
                         fs::set_permissions(dir.path(), permissions).unwrap();
                         Ok(())
                     },
-                    |_| Ok(()),
-                    |_| Ok(())
+                    &|_| Ok(()),
+                    &|_| Ok(()),
                 )
                 .is_err()
             );
