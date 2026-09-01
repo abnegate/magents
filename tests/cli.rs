@@ -754,6 +754,7 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
             variable,
             &format!("spawn-{agent}"),
         );
+        command.env("MAGENTS_TEST_HOLD_SECONDS", "2");
         assert!(
             !command
                 .get_args()
