@@ -429,16 +429,7 @@ fn upsert_toml_mcp(path: &Path, exe: &Path) -> Result<()> {
     let command = exe.to_str().unwrap_or("magents");
     doc["mcp_servers"]["magents"]["command"] = value(command);
     doc["mcp_servers"]["magents"]["args"] = value(Array::from_iter(["mcp"]));
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| Error::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
-    fs::write(path, format!("{doc}")).map_err(|source| Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })
+    write_atomic(path, format!("{doc}"))
 }
 
 fn already_registered(error: &Error) -> bool {
@@ -546,17 +537,32 @@ fn read_json_object(path: &Path) -> Result<Map<String, Value>> {
 }
 
 fn write_json(path: &Path, value: &Value) -> Result<()> {
+    let raw = serde_json::to_string_pretty(value)?;
+    write_atomic(path, format!("{raw}\n"))
+}
+
+fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| Error::Io {
             path: parent.to_path_buf(),
             source,
         })?;
     }
-    let raw = serde_json::to_string_pretty(value)?;
-    fs::write(path, format!("{raw}\n")).map_err(|source| Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })
+    let tmp = path.with_file_name(format!(
+        "{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    if let Err(source) = fs::write(&tmp, contents) {
+        return Err(Error::Io { path: tmp, source });
+    }
+    if let Err(source) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(Error::Io {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    Ok(())
 }
 
 fn write_skill(path: PathBuf) -> Result<()> {
@@ -1367,6 +1373,25 @@ echo added gemini magents
         assert!(error.to_string().contains("failed to read"));
         let error = write_skill(parent.join("SKILL.md")).unwrap_err();
         assert!(error.to_string().contains("failed to read"));
+    }
+
+    #[test]
+    fn config_write_keeps_existing_file_when_tmp_cannot_be_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = dir.path().join("mcp.json");
+        write_json(&json, &json!({"keep": true})).unwrap();
+        fs::create_dir_all(dir.path().join("mcp.json.tmp")).unwrap();
+        let before = fs::read_to_string(&json).unwrap();
+        let error = write_json(&json, &json!({"keep": false})).unwrap_err();
+        assert!(error.to_string().contains("failed to read"), "{error}");
+        assert_eq!(fs::read_to_string(&json).unwrap(), before);
+
+        let toml = dir.path().join("config.toml");
+        fs::write(&toml, "keep = true\n").unwrap();
+        fs::create_dir_all(dir.path().join("config.toml.tmp")).unwrap();
+        let error = super::upsert_toml_mcp(&toml, Path::new("magents")).unwrap_err();
+        assert!(error.to_string().contains("failed to read"), "{error}");
+        assert_eq!(fs::read_to_string(&toml).unwrap(), "keep = true\n");
     }
 
     #[test]
