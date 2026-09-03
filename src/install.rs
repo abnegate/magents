@@ -269,13 +269,14 @@ fn install_codex(homes: &Homes, exe: &Path) -> Result<HostStatus> {
 }
 
 fn install_gemini(homes: &Homes, exe: &Path) -> Result<HostStatus> {
+    // Gemini CLI parses `mcp add` with yargs, which drops everything after `--`
+    // instead of treating it as positionals. Pass the command and its args directly.
     let add = [
         "mcp",
         "add",
         "-s",
         "user",
         "magents",
-        "--",
         exe.to_str().unwrap_or("magents"),
         "mcp",
     ];
@@ -1332,6 +1333,29 @@ echo added gemini magents
             let notes = install(false, false, false, false, false, true, false).unwrap();
             assert_eq!(host(&notes, "gemini").status, HostStatus::Replaced);
             assert!(!home.join(".removed-magents").is_file());
+        });
+    }
+
+    #[test]
+    fn install_gemini_passes_command_as_positionals_without_separator() {
+        with_home(|home, bin| {
+            test_env::write_executable(
+                &bin.join("gemini"),
+                r#"
+if [ "$1" = mcp ] && [ "$2" = get ]; then
+  exit 1
+fi
+printf '%s\n' "$@" > "$HOME/.gemini-argv"
+"#,
+            );
+            let notes = install(false, false, false, false, false, true, false).unwrap();
+            assert_eq!(host(&notes, "gemini").status, HostStatus::Added);
+            let argv = fs::read_to_string(home.join(".gemini-argv")).unwrap();
+            let argv: Vec<&str> = argv.lines().collect();
+            assert!(!argv.contains(&"--"), "{argv:?}");
+            assert_eq!(&argv[..5], ["mcp", "add", "-s", "user", "magents"]);
+            assert_eq!(argv.len(), 7, "{argv:?}");
+            assert_eq!(argv[6], "mcp");
         });
     }
 
