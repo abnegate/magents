@@ -124,7 +124,7 @@ magents install --all
 - Codex (`codex mcp add magents -- magents mcp`)
 - Cursor (`~/.cursor/mcp.json`)
 - OpenCode (`~/.config/opencode/opencode.json`)
-- Gemini CLI (`gemini mcp add -s user magents -- magents mcp`)
+- Gemini CLI (`gemini mcp add -s user magents magents mcp`)
 - GitHub Copilot CLI (`copilot mcp add magents -- magents mcp`)
 
 It also writes a skill under `~/.grok/skills/magents`, `~/.claude/skills/magents`,
