@@ -497,6 +497,7 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           mkdir -p apt-repo/pool/main
+          rm -f apt-repo/pool/main/magents_*.deb
           cp debs/*.deb apt-repo/pool/main/
           cd apt-repo
           mkdir -p dists/stable/main/binary-amd64
