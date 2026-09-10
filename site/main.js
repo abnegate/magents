@@ -1,6 +1,6 @@
 const REDUCED_MOTION = matchMedia('(prefers-reduced-motion: reduce)');
 const REPOSITORY = 'abnegate/magents';
-const SPINNER_FRAME_MS = 80;
+const SPINNER_FRAME_MS = 50;
 const ANSI = /\x1b\[([\d;?]*)([A-Za-z])/g;
 const SGR_CLASS = { 2: 'ansi-dim', 31: 'ansi-red', 32: 'ansi-green', 36: 'ansi-cyan' };
 
@@ -151,9 +151,9 @@ async function typeCommand(screen, command) {
   text.classList.add('t-cursor');
   for (const character of command) {
     text.textContent += character;
-    await sleep(character === ' ' ? jitter(90, 60) : jitter(28, 45));
+    await sleep(jitter(8, 14));
   }
-  await sleep(380);
+  await sleep(120);
   text.classList.remove('t-cursor');
 }
 
@@ -182,14 +182,13 @@ async function runTerminal(element, steps) {
   }
   for (;;) {
     screen.clear();
-    await sleep(600);
     for (const step of steps) {
       await typeCommand(screen, step.command);
       await playOutput(screen, step.output);
-      await sleep(1400);
+      await sleep(450);
     }
     screen.prompt('').classList.add('t-cursor');
-    await sleep(4200);
+    await sleep(6000);
   }
 }
 
