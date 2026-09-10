@@ -29,4 +29,8 @@ FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c
 
 COPY --from=build /src/target/release/magents /magents
 
+# Official MCP Registry ownership check + default stdio MCP for Glama introspection.
+# CLI usage still works: `docker run ... list --live` replaces CMD.
+LABEL io.modelcontextprotocol.server.name="io.github.abnegate/magents"
 ENTRYPOINT ["/magents"]
+CMD ["mcp"]

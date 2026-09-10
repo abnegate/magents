@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.abnegate/magents",
+  "title": "magents",
+  "description": "Shared session bus MCP+CLI for Claude Code, Codex, Cursor, Grok, and friends: list/read/handoff/send/spawn across live agent sessions.",
+  "repository": {
+    "url": "https://github.com/abnegate/magents",
+    "source": "github"
+  },
+  "version": "0.11.0",
+  "websiteUrl": "https://abnegate.github.io/magents",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/abnegate/magents:0.11.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
