@@ -94,7 +94,8 @@ magents install --all
 
 ## Quick start
 
-`magents install --all` registers the stdio MCP server with:
+`magents install --all` registers the stdio MCP server with each installed host,
+skipping hosts whose required binaries are unavailable:
 
 - Grok (`grok mcp add magents -- magents mcp`)
 - Claude Code (`claude mcp add --scope user magents -- magents mcp`)
@@ -104,11 +105,11 @@ magents install --all
 - Gemini CLI (`gemini mcp add -s user magents magents mcp`)
 - GitHub Copilot CLI (`copilot mcp add magents -- magents mcp`)
 
-It also writes a skill under each host's skills directory (`~/.grok/skills/magents`,
+It also writes a skill under supported hosts' skills directories (`~/.grok/skills/magents`,
 `~/.claude/skills/magents`, `~/.cursor/skills/magents`, and the OpenCode / Gemini /
 Copilot equivalents).
 
-Or point a host at the binary yourself:
+For Grok and Codex only, point a host at the binary yourself:
 
 ```toml
 [mcp_servers.magents]
