@@ -758,10 +758,13 @@ section h2 {
 
   .rail-nav a span {
     position: absolute;
-    left: calc(100% + 0.9rem);
-    top: 50%;
-    transform: translateY(-50%);
-    font-size: 0.75rem;
+    left: 50%;
+    top: calc(100% + 0.4rem);
+    transform: translateX(-50%);
+    padding: 0 0.25rem;
+    background: var(--paper);
+    font-size: 0.6875rem;
+    line-height: 1.2;
     color: var(--ash);
     opacity: 0;
     white-space: nowrap;
