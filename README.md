@@ -4,7 +4,7 @@
 
 # magents
 
-**Mates + agents. Same work, new driver.**
+**Same work, new driver.**
 
 <p align="center">
   <img src="docs/assets/hero.svg" alt="magents shared session bus across Claude, Codex, Grok, and Cursor" width="100%" />

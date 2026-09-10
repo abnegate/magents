@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-label="magents">
   <rect width="1600" height="900" fill="#FAFAF7"/>
   <text x="800" y="390" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="64" font-weight="500" letter-spacing="10" fill="#111111">magents</text>
-  <text x="800" y="450" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="28" fill="#111111">mates + agents</text>
-  <circle cx="980" cy="442" r="5" fill="#FF8FAB"/>
+  <text x="800" y="450" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="28" fill="#111111">same work, new driver</text>
+  <circle cx="1048" cy="442" r="5" fill="#FF8FAB"/>
   <g fill="none" stroke="#111111" stroke-width="3">
     <circle cx="620" cy="560" r="18"/>
     <circle cx="740" cy="560" r="18"/>
