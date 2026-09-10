@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>magents</title>
+  <meta name="description" content="A shared session bus for Claude Code, Codex, Copilot, Cursor, Gemini, Grok, and OpenCode. One agent picks up where another left off.">
+  <meta name="theme-color" content="#FAFAF7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0C0C0B" media="(prefers-color-scheme: dark)">
+  <meta property="og:title" content="magents">
+  <meta property="og:description" content="same work, new driver. A shared session bus for the coding agents already on your machine.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://abnegate.github.io/magents/">
+  <meta property="og:image" content="https://abnegate.github.io/magents/card.svg">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="face.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="style.css">
+  <script>
+    (function () {
+      var stored = null;
+      try { stored = localStorage.getItem('theme'); } catch (error) {}
+      var dark = stored ? stored === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+      document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    })();
+  </script>
+</head>
+<body>
+  <a class="skip" href="#main">skip to content</a>
+
+  <template id="face-template">
+    <svg class="face" viewBox="140 156 232 140" aria-hidden="true" focusable="false">
+      <g fill="none" stroke="currentColor" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+        <circle class="eye" cx="196" cy="210" r="42"/>
+        <circle class="eye" cx="316" cy="210" r="42"/>
+        <path d="M238 210 C256 190 256 190 274 210"/>
+        <path d="M170 248 C160 268 152 278 148 286"/>
+        <path d="M342 248 C352 268 360 278 364 286"/>
+      </g>
+      <g fill="currentColor">
+        <circle class="pupil" cx="196" cy="210" r="10"/>
+        <circle class="pupil" cx="316" cy="210" r="10"/>
+      </g>
+    </svg>
+  </template>
+
+  <aside class="rail" aria-label="page sections">
+    <a class="rail-mark" href="#top" aria-label="back to top">
+      <svg class="face face--blink" viewBox="140 156 232 140" aria-hidden="true" focusable="false">
+        <g fill="none" stroke="currentColor" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+          <circle class="eye" cx="196" cy="210" r="42"/>
+          <circle class="eye" cx="316" cy="210" r="42"/>
+          <path d="M238 210 C256 190 256 190 274 210"/>
+          <path d="M170 248 C160 268 152 278 148 286"/>
+          <path d="M342 248 C352 268 360 278 364 286"/>
+        </g>
+        <g fill="currentColor">
+          <circle class="pupil" cx="196" cy="210" r="10"/>
+          <circle class="pupil" cx="316" cy="210" r="10"/>
+        </g>
+      </svg>
+    </a>
+    <nav class="rail-nav">
+      <a href="#demo" data-node="demo"><span>demo</span></a>
+      <a href="#moves" data-node="moves"><span>moves</span></a>
+      <a href="#install" data-node="install"><span>install</span></a>
+      <a href="#tools" data-node="tools"><span>tools</span></a>
+    </nav>
+  </aside>
+
+  <div class="page" id="top">
+    <header class="top">
+      <a class="top-brand" href="#top">
+        <svg class="face" viewBox="140 156 232 140" aria-hidden="true" focusable="false">
+          <g fill="none" stroke="currentColor" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="196" cy="210" r="42"/>
+            <circle cx="316" cy="210" r="42"/>
+            <path d="M238 210 C256 190 256 190 274 210"/>
+            <path d="M170 248 C160 268 152 278 148 286"/>
+            <path d="M342 248 C352 268 360 278 364 286"/>
+          </g>
+          <g fill="currentColor">
+            <circle cx="196" cy="210" r="10"/>
+            <circle cx="316" cy="210" r="10"/>
+          </g>
+        </svg>
+        <span>magents</span>
+      </a>
+      <nav class="top-nav" aria-label="links">
+        <a href="https://github.com/abnegate/magents">github</a>
+        <a href="https://github.com/abnegate/magents/releases">releases</a>
+        <button class="theme" type="button" aria-label="switch to dark theme" data-theme-toggle>
+          <span data-theme-label>dark</span>
+        </button>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="demo" aria-labelledby="wordmark">
+        <div class="hero-head">
+          <h1 class="wordmark" id="wordmark">magents</h1>
+          <span class="version" data-version>v0.10.1</span>
+        </div>
+        <p class="tagline">same work, new driver<span class="dot" aria-hidden="true"></span></p>
+        <p class="lede">
+          Your coding agents already keep transcripts on disk. magents is the shared API over them,
+          an MCP server plus a small CLI, so the agent in front of you starts where the last one stopped.
+        </p>
+        <div class="quick">
+          <code class="quick-cmd" data-copy-source>brew install abnegate/tap/magents</code>
+          <button class="copy" type="button" data-copy aria-label="copy install command">copy</button>
+          <a class="quick-link" href="https://github.com/abnegate/magents#readme">readme</a>
+        </div>
+
+        <div class="terminal" data-terminal>
+          <div class="terminal-bar">
+            <span class="terminal-cwd">~/Local/edge</span>
+            <span class="terminal-live" aria-label="live"><span class="dot dot--term"></span>live</span>
+          </div>
+          <pre class="terminal-screen" aria-live="off"><code data-terminal-screen></code></pre>
+        </div>
+      </section>
+
+      <section class="hosts" aria-label="supported hosts">
+        <p class="hosts-lede">Works with the agents already on your machine.</p>
+        <ol class="chain">
+          <li>claude code</li>
+          <li>codex</li>
+          <li>copilot</li>
+          <li>cursor</li>
+          <li>gemini</li>
+          <li>grok</li>
+          <li>opencode</li>
+        </ol>
+      </section>
+
+      <section class="moves" id="moves" aria-labelledby="moves-title">
+        <h2 id="moves-title">Three ways work moves</h2>
+        <div class="moves-grid">
+          <article class="move">
+            <svg class="move-art" viewBox="0 0 160 56" aria-hidden="true">
+              <line x1="24" y1="28" x2="126" y2="28" class="wire"/>
+              <circle cx="16" cy="28" r="8" class="node"/>
+              <circle cx="144" cy="28" r="8" class="node node--here"/>
+              <path d="M120 22 L130 28 L120 34" class="tip"/>
+            </svg>
+            <h3>read</h3>
+            <p>Ask the agent in front of you what the last one was doing. It reads the live session and carries on. No paste buffer, no recap.</p>
+            <code>magents digest claude:latest</code>
+          </article>
+          <article class="move">
+            <svg class="move-art" viewBox="0 0 160 56" aria-hidden="true">
+              <line x1="24" y1="28" x2="72" y2="28" class="wire"/>
+              <line x1="88" y1="28" x2="136" y2="28" class="wire"/>
+              <path d="M16 20 C 40 -6 120 -6 144 20" class="arc"/>
+              <circle cx="16" cy="28" r="8" class="node node--here"/>
+              <circle cx="80" cy="28" r="8" class="node node--you"/>
+              <circle cx="144" cy="28" r="8" class="node"/>
+              <path d="M142 11 L144 20 L135.5 17.5" class="tip"/>
+            </svg>
+            <h3>send</h3>
+            <p>Claude hits a wall that Codex owns. Claude messages that Codex thread directly, failing query and file attached, and keeps going. You are not the messenger.</p>
+            <code>magents send codex:latest "…"</code>
+          </article>
+          <article class="move">
+            <svg class="move-art" viewBox="0 0 160 56" aria-hidden="true">
+              <line x1="24" y1="16" x2="136" y2="16" class="wire"/>
+              <path d="M80 16 C 80 32 104 32 112 44" class="wire"/>
+              <circle cx="16" cy="16" r="8" class="node node--here"/>
+              <circle cx="144" cy="16" r="8" class="node"/>
+              <circle cx="120" cy="46" r="8" class="node node--new"/>
+            </svg>
+            <h3>spawn</h3>
+            <p>A task that can run alone gets a new headless session, its own working directory, and a reply path back through magents.</p>
+            <code>magents spawn codex --cwd ../wt</code>
+          </article>
+        </div>
+        <p class="moves-note">Spawned agents keep their host's own approval policy. magents never adds a bypass.</p>
+      </section>
+
+      <section class="install" id="install" aria-labelledby="install-title">
+        <h2 id="install-title">Install</h2>
+        <div class="tabs" data-tabs>
+          <div class="tablist" role="tablist" aria-label="install method">
+            <button role="tab" id="tab-brew" aria-controls="panel-brew" aria-selected="true" tabindex="0">homebrew</button>
+            <button role="tab" id="tab-apt" aria-controls="panel-apt" aria-selected="false" tabindex="-1">apt</button>
+            <button role="tab" id="tab-bin" aria-controls="panel-bin" aria-selected="false" tabindex="-1">binary</button>
+            <button role="tab" id="tab-docker" aria-controls="panel-docker" aria-selected="false" tabindex="-1">docker</button>
+            <button role="tab" id="tab-cargo" aria-controls="panel-cargo" aria-selected="false" tabindex="-1">cargo</button>
+          </div>
+
+          <div class="panel" role="tabpanel" id="panel-brew" aria-labelledby="tab-brew">
+            <pre><code data-copy-source>brew tap abnegate/tap
+brew install magents
+magents install --all</code></pre>
+            <button class="copy" type="button" data-copy aria-label="copy homebrew commands">copy</button>
+          </div>
+
+          <div class="panel" role="tabpanel" id="panel-apt" aria-labelledby="tab-apt" hidden>
+            <pre><code data-copy-source>curl -fsSL https://abnegate.github.io/apt-repo/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/abnegate.gpg
+echo "deb [signed-by=/usr/share/keyrings/abnegate.gpg] https://abnegate.github.io/apt-repo stable main" | sudo tee /etc/apt/sources.list.d/abnegate.list
+sudo apt update && sudo apt install magents
+magents install --all</code></pre>
+            <button class="copy" type="button" data-copy aria-label="copy apt commands">copy</button>
+          </div>
+
+          <div class="panel" role="tabpanel" id="panel-bin" aria-labelledby="tab-bin" hidden>
+            <pre><code data-copy-source>curl -LSsf -o magents \
+  "https://github.com/abnegate/magents/releases/latest/download/magents-$(uname -m | sed 's/arm64/aarch64/')-$(uname -s | tr 'A-Z' 'a-z' | sed 's/darwin/apple-darwin/;s/linux/unknown-linux-musl/')"
+chmod +x magents
+./magents install --all</code></pre>
+            <button class="copy" type="button" data-copy aria-label="copy binary install commands">copy</button>
+          </div>
+
+          <div class="panel" role="tabpanel" id="panel-docker" aria-labelledby="tab-docker" hidden>
+            <pre><code data-copy-source>docker pull ghcr.io/abnegate/magents:latest
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v "$HOME:$HOME" -e HOME \
+  ghcr.io/abnegate/magents list --live</code></pre>
+            <button class="copy" type="button" data-copy aria-label="copy docker commands">copy</button>
+          </div>
+
+          <div class="panel" role="tabpanel" id="panel-cargo" aria-labelledby="tab-cargo" hidden>
+            <pre><code data-copy-source>cargo install --git https://github.com/abnegate/magents
+magents install --all</code></pre>
+            <button class="copy" type="button" data-copy aria-label="copy cargo commands">copy</button>
+          </div>
+        </div>
+        <p class="install-note">
+          <code>magents install --all</code> registers the MCP server with every host it finds and drops a skill into each host's skills directory. Restart the agent, or refresh its MCP list, and the tools appear.
+        </p>
+      </section>
+
+      <section class="tools" id="tools" aria-labelledby="tools-title">
+        <h2 id="tools-title">MCP tools</h2>
+        <dl class="tool-list">
+          <dt>list_sessions</dt><dd>live and recent sessions across every host, filter by cwd or branch</dd>
+          <dt>session_digest</dt><dd>last request, last action, cwd, branch, clipped recent turns</dd>
+          <dt>read_transcript</dt><dd>compact inert handoff of another session's history</dd>
+          <dt>search_transcripts</dt><dd>full-text search across all of them</dd>
+          <dt>handoff</dt><dd>compact this session and inject it into another live chat</dd>
+          <dt>send_message</dt><dd>deliver a user turn to an existing chat, mailbox plus live inject</dd>
+          <dt>spawn_session</dt><dd>start a headless persisted session for independent work</dd>
+          <dt>inbox <span class="sep">/</span> reply</dt><dd>mailbox for cross-session answers</dd>
+          <dt>whoami</dt><dd>which session is this, resolved by env, socket, or cwd</dd>
+        </dl>
+        <p class="tools-note">
+          Same verbs on the CLI: <code>magents list</code>, <code>magents digest</code>, <code>magents handoff</code>.
+          Add <code>--output json</code> to any of them. The full list, including memory and notes, is in the
+          <a href="https://github.com/abnegate/magents#tools">readme</a>.
+        </p>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <a href="https://github.com/abnegate/magents">github</a>
+      <a href="https://github.com/abnegate/magents/releases">releases</a>
+      <a href="https://github.com/abnegate/magents/blob/main/LICENSE">mit</a>
+      <span>rust, macOS and linux</span>
+    </footer>
+  </div>
+
+  <script src="main.js" defer></script>
+</body>
+</html>

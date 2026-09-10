@@ -1,0 +1,16 @@
+{
+  "steps": [
+    {
+      "command": "magents list --live",
+      "output": "\u001b[?25l\r\u001b[K  \u001b[36m⠋\u001b[0m list\r\u001b[K\u001b[?25h  \u001b[32m●\u001b[0m grok      Queue drain on edge\n\u001b[2m              01j7q4d4  ~/Local/edge  just now\u001b[0m\n\n  \u001b[32m●\u001b[0m claude    disaster recovery\n\u001b[2m              9f3c1a2e  ~/Local/edge  4m ago\u001b[0m\n"
+    },
+    {
+      "command": "magents digest claude:latest",
+      "output": "  \u001b[32m●\u001b[0m claude    disaster recovery\n\u001b[2m              asked    write the failover runbook for the edge cluster\u001b[0m\n\u001b[2m              did      Drafted docs/RUNBOOK.md with steps 1-6. Step 7 needs the DNS TTL from ops.\u001b[0m\n\n  \u001b[2muser    \u001b[0m  write the failover runbook for the edge cluster\n  \u001b[2massist  \u001b[0m  Drafted docs/RUNBOOK.md with steps 1-6. Step 7 needs the DNS TTL from ops.\n\u001b[2m              tools    Write\u001b[0m\n"
+    },
+    {
+      "command": "magents handoff grok:latest --reason \"continuing in grok\"",
+      "output": "\u001b[?25l\r\u001b[K  \u001b[36m⠋\u001b[0m handoff\r\u001b[K  \u001b[36m⠙\u001b[0m handoff\r\u001b[K  \u001b[36m⠹\u001b[0m handoff\r\u001b[K\u001b[?25h  \u001b[32m✓\u001b[0m handoff   claude → grok\n\u001b[2m              reason    continuing in grok\u001b[0m\n\u001b[2m              delivered  grok-single\u001b[0m\n\u001b[2m              mail      634c3565-c94c-40ad-8063-d2baf42eeeda\u001b[0m\n"
+    }
+  ]
+}
