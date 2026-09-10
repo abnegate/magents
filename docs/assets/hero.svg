@@ -1,18 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-label="magents">
-  <rect width="1600" height="900" fill="#FAFAF7"/>
-  <text x="800" y="390" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="64" font-weight="500" letter-spacing="10" fill="#111111">magents</text>
-  <text x="800" y="450" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="28" fill="#111111">same work, new driver</text>
-  <circle cx="1048" cy="442" r="5" fill="#FF8FAB"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="480" viewBox="0 0 1600 480" role="img" aria-label="magents">
+  <rect width="1600" height="480" fill="#FAFAF7"/>
+  <text x="800" y="190" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="56" font-weight="500" letter-spacing="10" fill="#111111">magents</text>
+  <text x="800" y="240" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="24" fill="#111111">same work, new driver</text>
+  <circle cx="1040" cy="232" r="5" fill="#FF8FAB"/>
   <g fill="none" stroke="#111111" stroke-width="3">
-    <circle cx="620" cy="560" r="18"/>
-    <circle cx="740" cy="560" r="18"/>
-    <circle cx="860" cy="560" r="18"/>
-    <circle cx="980" cy="560" r="18"/>
+    <circle cx="640" cy="340" r="16"/>
+    <circle cx="760" cy="340" r="16"/>
+    <circle cx="880" cy="340" r="16"/>
+    <circle cx="1000" cy="340" r="16"/>
   </g>
   <g stroke="#111111" stroke-width="2" stroke-dasharray="4 6">
-    <line x1="638" y1="560" x2="722" y2="560"/>
-    <line x1="758" y1="560" x2="842" y2="560"/>
-    <line x1="878" y1="560" x2="962" y2="560"/>
+    <line x1="656" y1="340" x2="744" y2="340"/>
+    <line x1="776" y1="340" x2="864" y2="340"/>
+    <line x1="896" y1="340" x2="984" y2="340"/>
   </g>
-  <circle cx="620" cy="600" r="4" fill="#FF8FAB"/>
+  <circle cx="640" cy="376" r="4" fill="#FF8FAB"/>
 </svg>
