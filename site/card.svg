@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="magents: same work, new driver">
+  <rect width="1200" height="630" fill="#FAFAF7"/>
+  <g fill="none" stroke="#111111" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="536" cy="200" r="42"/>
+    <circle cx="664" cy="200" r="42"/>
+    <path d="M580 200 C600 178 600 178 620 200"/>
+    <path d="M508 240 C498 260 490 270 486 278"/>
+    <path d="M692 240 C702 260 710 270 714 278"/>
+  </g>
+  <g fill="#111111">
+    <circle cx="536" cy="200" r="10"/>
+    <circle cx="664" cy="200" r="10"/>
+  </g>
+  <text x="600" y="380" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="64" font-weight="500" letter-spacing="14" fill="#111111">magents</text>
+  <text x="600" y="436" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="26" fill="#111111">same work, new driver</text>
+  <circle cx="868" cy="428" r="6" fill="#FF8FAB"/>
+</svg>
