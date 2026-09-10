@@ -1,18 +1,10 @@
 <p align="center">
-  <img src="docs/assets/logo.svg" alt="magents" width="120" />
-</p>
-
-# magents
-
-**Same work, new driver.**
-
-<p align="center">
   <img src="docs/assets/hero.svg" alt="magents shared session bus across Claude, Codex, Grok, and Cursor" width="100%" />
 </p>
 
 Claude Code, Codex, Copilot, Cursor, Gemini, Grok, and OpenCode already keep
-transcripts on disk. **magents** is the shared API over those sessions — an MCP
-server plus a small CLI — so one agent can pick up where another left off
+transcripts on disk. **magents** is the shared API over those sessions - an MCP
+server plus a small CLI - so one agent can pick up where another left off
 without you recapping, ping a *specific live chat* when you are not sitting in
 the middle, or start an independent persisted chat for a complete task.
 
@@ -24,7 +16,7 @@ benefits from its own session and working directory.
 
 ## Why hardcore agentic devs care
 
-You already run more than one coding agent. The pain is not "more models" — it
+You already run more than one coding agent. The pain is not "more models" - it
 is **context trapped in another window**.
 
 | Pain | What magents does |
@@ -45,14 +37,14 @@ buffer. No "new chat, here's the context."
 
 **2. Send when you are not the messenger**  
 Three agents running. Claude hits a wall Codex owns. Claude injects into that
-Codex thread and keeps going — especially useful when the sender already has the
+Codex thread and keeps going - especially useful when the sender already has the
 failing query, file, and constraint you would otherwise reconstruct.
 
 **3. Spawn independent work**  
 When a task can proceed alone, start a new headless persisted session with a
 complete prompt, an isolated working directory when files could collide, and a
 request to reply through magents. Spawned agents keep their host's native
-approval policy — spawning does not add an approval bypass.
+approval policy - spawning does not add an approval bypass.
 
 ## Install
 
@@ -195,13 +187,13 @@ memory (Claude, Codex, or Grok).
 
 Choose the write path by where the work should happen:
 
-- **`spawn_session`** — new, headless, persisted, independent session. Complete
+- **`spawn_session`** - new, headless, persisted, independent session. Complete
   task, verification, reply-through-magents, isolated `cwd` when edits could
   collide. Success means launch accepted (`accepted: true`, `status: "starting"`),
   not that the task finished.
-- **`send_message`** — existing session. Always records mailbox mail; injects a
+- **`send_message`** - existing session. Always records mailbox mail; injects a
   live user turn where the host supports one.
-- **`handoff`** — compact this session into an existing live session so that
+- **`handoff`** - compact this session into an existing live session so that
   session continues the same work.
 
 ### Delivery routes (existing chats)
