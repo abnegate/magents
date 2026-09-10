@@ -1,5 +1,4 @@
 const REDUCED_MOTION = matchMedia('(prefers-reduced-motion: reduce)');
-const REPOSITORY = 'abnegate/magents';
 const SPINNER_FRAME_MS = 50;
 const ANSI = /\x1b\[([\d;?]*)([A-Za-z])/g;
 const SGR_CLASS = { 2: 'ansi-dim', 31: 'ansi-red', 32: 'ansi-green', 36: 'ansi-cyan' };
@@ -307,25 +306,8 @@ function initRail() {
   }
 }
 
-async function initVersion() {
-  const target = document.querySelector('[data-version]');
-  try {
-    const response = await fetch(`https://api.github.com/repos/${REPOSITORY}/tags?per_page=1`, {
-      headers: { Accept: 'application/vnd.github+json' },
-    });
-    if (!response.ok) {
-      return;
-    }
-    const [latest] = await response.json();
-    if (latest && /^\d+\.\d+\.\d+$/.test(latest.name)) {
-      target.textContent = `v${latest.name}`;
-    }
-  } catch (error) {}
-}
-
 initTheme();
 initCopy();
 initTabs();
 initRail();
-initVersion();
 initTerminal();
