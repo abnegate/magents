@@ -48,8 +48,7 @@ approval policy - spawning does not add an approval bypass.
 ### Homebrew (macOS / Linux)
 
 ```bash
-brew tap abnegate/tap
-brew install magents
+brew install abnegate/tap/magents
 magents install --all
 ```
 
