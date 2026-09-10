@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-label="magents hero">
+  <defs>
+    <linearGradient id="bus" x1="520" y1="450" x2="1480" y2="450" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8B5CF6"/>
+      <stop offset="1" stop-color="#22D3EE"/>
+    </linearGradient>
+    <linearGradient id="word" x1="72" y1="120" x2="420" y2="120" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A78BFA"/>
+      <stop offset="1" stop-color="#67E8F9"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#1E293B" stroke-width="1"/>
+    </pattern>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#67E8F9"/>
+    </marker>
+  </defs>
+  <rect width="1600" height="900" fill="#0B1220"/>
+  <rect width="1600" height="900" fill="url(#grid)" opacity="0.55"/>
+  <circle cx="1200" cy="220" r="220" fill="#312E81" opacity="0.35"/>
+  <circle cx="980" cy="620" r="180" fill="#0E7490" opacity="0.2"/>
+
+  <text x="80" y="160" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="72" font-weight="700" fill="url(#word)">magents</text>
+  <text x="80" y="240" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="36" font-weight="600" fill="#F8FAFC">Mates + agents.</text>
+  <text x="80" y="292" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="36" font-weight="600" fill="#F8FAFC">Same work, new driver.</text>
+  <text x="80" y="360" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="22" fill="#94A3B8">Shared session bus for Claude Code, Codex, Cursor, Grok, and friends.</text>
+
+  <line x1="560" y1="520" x2="1480" y2="520" stroke="url(#bus)" stroke-width="6" stroke-linecap="round"/>
+  <g font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="20" font-weight="600">
+    <circle cx="680" cy="520" r="34" fill="#0B1220" stroke="#8B5CF6" stroke-width="4"/>
+    <circle cx="680" cy="520" r="48" fill="none" stroke="#8B5CF6" stroke-width="1.5" stroke-dasharray="3 6" opacity="0.7"/>
+    <rect x="624" y="580" width="112" height="36" rx="18" fill="#1E1B4B"/>
+    <text x="680" y="604" text-anchor="middle" fill="#E9D5FF">Claude</text>
+
+    <circle cx="920" cy="520" r="34" fill="#0B1220" stroke="#818CF8" stroke-width="4"/>
+    <circle cx="920" cy="520" r="48" fill="none" stroke="#818CF8" stroke-width="1.5" stroke-dasharray="3 6" opacity="0.7"/>
+    <rect x="866" y="580" width="108" height="36" rx="18" fill="#1E1B4B"/>
+    <text x="920" y="604" text-anchor="middle" fill="#C7D2FE">Codex</text>
+
+    <circle cx="1160" cy="520" r="34" fill="#0B1220" stroke="#22D3EE" stroke-width="4"/>
+    <circle cx="1160" cy="520" r="48" fill="none" stroke="#22D3EE" stroke-width="1.5" stroke-dasharray="3 6" opacity="0.7"/>
+    <rect x="1112" y="580" width="96" height="36" rx="18" fill="#164E63"/>
+    <text x="1160" y="604" text-anchor="middle" fill="#CFFAFE">Grok</text>
+
+    <circle cx="1400" cy="520" r="34" fill="#0B1220" stroke="#67E8F9" stroke-width="4"/>
+    <circle cx="1400" cy="520" r="48" fill="none" stroke="#67E8F9" stroke-width="1.5" stroke-dasharray="3 6" opacity="0.7"/>
+    <rect x="1346" y="580" width="108" height="36" rx="18" fill="#164E63"/>
+    <text x="1400" y="604" text-anchor="middle" fill="#ECFEFF">Cursor</text>
+  </g>
+  <path d="M730 520h150" stroke="#A78BFA" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M970 520h150" stroke="#818CF8" stroke-width="3"/>
+  <path d="M1210 520h150" stroke="#22D3EE" stroke-width="3"/>
+  <path d="M1400 470 C1400 400 1160 400 1160 470" fill="none" stroke="#64748B" stroke-width="2" stroke-dasharray="6 6" opacity="0.8"/>
+  <text x="80" y="820" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="18" fill="#64748B">handoff · send · spawn · shared memory — MCP + CLI</text>
+</svg>

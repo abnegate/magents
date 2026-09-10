@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="magents">
+  <rect width="512" height="512" rx="96" fill="#0F172A"/>
+  <defs>
+    <linearGradient id="g" x1="80" y1="120" x2="432" y2="392" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8B5CF6"/>
+      <stop offset="1" stop-color="#22D3EE"/>
+    </linearGradient>
+  </defs>
+  <!-- twin chat nodes forming M -->
+  <path fill="url(#g)" d="M128 340 V180 c0-28 22-44 48-44 18 0 32 8 44 24 l36 52 36-52 c12-16 26-24 44-24 26 0 48 16 48 44 v160 h-52 V230 l-40 58 c-8 12-22 12-30 0 l-40-58 v110 H128z"/>
+  <circle cx="188" cy="210" r="10" fill="#0F172A"/>
+  <circle cx="224" cy="210" r="10" fill="#0F172A"/>
+  <circle cx="288" cy="210" r="10" fill="#0F172A"/>
+  <circle cx="324" cy="210" r="10" fill="#0F172A"/>
+</svg>
