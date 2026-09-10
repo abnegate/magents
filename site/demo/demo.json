@@ -2,7 +2,7 @@
   "steps": [
     {
       "command": "magents list --live",
-      "output": "\u001b[?25l\r\u001b[K  \u001b[36m⠋\u001b[0m list\r\u001b[K\u001b[?25h  \u001b[32m●\u001b[0m grok      Queue drain on edge\n\u001b[2m              01j7q4d4  ~/Local/edge  just now\u001b[0m\n\n  \u001b[32m●\u001b[0m claude    disaster recovery\n\u001b[2m              9f3c1a2e  ~/Local/edge  4m ago\u001b[0m\n"
+      "output": "\u001b[?25l\r\u001b[K  \u001b[36m⠋\u001b[0m list\r\u001b[K\u001b[?25h  \u001b[32m●\u001b[0m grok      Queue drain on edge\n\u001b[2m              01j7q4d4  ~/src/edge  just now\u001b[0m\n\n  \u001b[32m●\u001b[0m claude    disaster recovery\n\u001b[2m              9f3c1a2e  ~/src/edge  4m ago\u001b[0m\n"
     },
     {
       "command": "magents digest claude:latest",
@@ -10,7 +10,7 @@
     },
     {
       "command": "magents handoff grok:latest --reason \"continuing in grok\"",
-      "output": "\u001b[?25l\r\u001b[K  \u001b[36m⠋\u001b[0m handoff\r\u001b[K  \u001b[36m⠙\u001b[0m handoff\r\u001b[K  \u001b[36m⠹\u001b[0m handoff\r\u001b[K\u001b[?25h  \u001b[32m✓\u001b[0m handoff   claude → grok\n\u001b[2m              reason    continuing in grok\u001b[0m\n\u001b[2m              delivered  grok-single\u001b[0m\n\u001b[2m              mail      634c3565-c94c-40ad-8063-d2baf42eeeda\u001b[0m\n"
+      "output": "\u001b[?25l\r\u001b[K  \u001b[36m⠋\u001b[0m handoff\r\u001b[K  \u001b[36m⠙\u001b[0m handoff\r\u001b[K  \u001b[36m⠹\u001b[0m handoff\r\u001b[K  \u001b[36m⠸\u001b[0m handoff\r\u001b[K  \u001b[36m⠼\u001b[0m handoff\r\u001b[K\u001b[?25h  \u001b[32m✓\u001b[0m handoff   claude → grok\n\u001b[2m              reason    continuing in grok\u001b[0m\n\u001b[2m              delivered  grok-single\u001b[0m\n\u001b[2m              mail      3e1f8449-41a9-4042-b5b3-ebb0bc68e852\u001b[0m\n"
     }
   ]
 }

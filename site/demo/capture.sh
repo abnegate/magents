@@ -9,7 +9,7 @@ mkdir -p "$CAPTURES"
 
 CLAUDE_ID='9f3c1a2e-6b0d-4f5a-8c21-7e4d3b2a1c90'
 GROK_ID='01j7q4d41e77b0k3m9x2p5r8s6'
-CWD="$ROOT/Local/edge"
+CWD="$ROOT/src/edge"
 mkdir -p "$CWD"
 
 sleep 900 > /dev/null 2>&1 &
