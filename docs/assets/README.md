@@ -1,7 +1,6 @@
 # Brand assets
 
-Logo and hero used by the repository README.
+Sparse weeb-tech minimal mark and hero for the README.
 
-- `logo.svg` — mark for README / icon use
-- `hero.svg` — wide banner for the GitHub front door
-- `logo.png` / `hero.png` — optional raster exports for GitHub social preview (Settings → Social preview)
+- `logo.svg` / `hero.svg` — primary assets referenced by README
+- Optional: set a PNG export as the GitHub social preview (Settings → General → Social preview)
