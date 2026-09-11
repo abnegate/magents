@@ -5,6 +5,7 @@ pub mod error;
 pub mod handoff;
 pub mod homes;
 pub mod install;
+pub mod learn;
 pub mod mailbox;
 pub mod mcp;
 pub mod memory;

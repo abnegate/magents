@@ -119,9 +119,10 @@ skipping hosts whose required binaries are unavailable:
 - Gemini CLI (`gemini mcp add -s user magents magents mcp`)
 - GitHub Copilot CLI (`copilot mcp add magents -- magents mcp`)
 
-It also writes a skill under supported hosts' skills directories (`~/.grok/skills/magents`,
-`~/.claude/skills/magents`, `~/.cursor/skills/magents`, and the OpenCode / Gemini /
-Copilot equivalents).
+It also writes the `magents` and `learn` skills under supported hosts' skills
+directories (`~/.grok/skills/{magents,learn}`, `~/.claude/skills/{magents,learn}`,
+`~/.cursor/skills/{magents,learn}`, and the OpenCode / Gemini / Copilot
+equivalents). `/learn` reads every local agent's sessions, not only Grok.
 
 For Grok and Codex only, point a host at the binary yourself:
 
@@ -161,6 +162,8 @@ magents handoff grok:latest --reason "continuing in grok"
 | `read_memory` | Read one Claude / Codex / Grok memory markdown file |
 | `get_note` / `put_note` | Magents-owned shared scratch for a working directory |
 | `whoami` | Detect this connection; resolve session via env, socket, or unique cwd |
+| `learn_collect` | Collect compact records from every local agent's full history for `/learn`, or estimate a run |
+| `learn_state` | Read or update `/learn` state, decisions, and trash |
 
 Refs can be prefixed: `claude:disaster recovery`, `grok:latest`, `codex:<uuid>`,
 `cursor:latest`, `opencode:<id>`, `gemini:latest`, `copilot:<id>`.
@@ -178,6 +181,11 @@ magents spawn codex --prompt-file /path/to/task.md --cwd /path/to/isolated-workt
 magents send grok:latest "handoff: the DR runbook is in docs/RUNBOOK.md"
 magents handoff grok:latest --reason "continuing in grok"
 magents whoami
+magents learn estimate
+magents learn collect
+magents learn plan
+magents learn collect --since-last
+magents learn state
 ```
 
 Pass `--output json` on any command for stable machine-readable stdout.

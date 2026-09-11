@@ -85,6 +85,10 @@ impl Homes {
         self.magents.join("notes")
     }
 
+    pub fn learn_dir(&self) -> PathBuf {
+        self.magents.join("learn")
+    }
+
     pub fn live_dir(&self) -> PathBuf {
         self.spawn_dir().join("live")
     }
@@ -210,6 +214,7 @@ mod tests {
         assert_eq!(homes.mailbox_dir(), root.join("m").join("mailbox"));
         assert_eq!(homes.spawn_dir(), root.join("m").join("spawns"));
         assert_eq!(homes.notes_dir(), root.join("m").join("notes"));
+        assert_eq!(homes.learn_dir(), root.join("m").join("learn"));
         assert_eq!(homes.live_dir(), root.join("m").join("spawns").join("live"));
 
         unsafe {
