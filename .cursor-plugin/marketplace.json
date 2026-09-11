@@ -1,0 +1,19 @@
+{
+  "name": "magents",
+  "owner": {
+    "name": "abnegate"
+  },
+  "metadata": {
+    "description": "magents host plugins for Cursor",
+    "pluginRoot": "plugins"
+  },
+  "plugins": [
+    {
+      "name": "magents",
+      "source": "cursor",
+      "description": "Shared session bus so Cursor can hand off with Claude, Codex, Grok, and friends.",
+      "version": "0.11.0",
+      "logo": "plugins/cursor/assets/logo.svg"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "magents": {
+      "command": "magents",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}
