@@ -84,10 +84,12 @@ pub fn collect(homes: &Homes, sessions: &[CompactSession]) -> Surfaces {
         for rec in added {
             let name = rec["name"].as_str().unwrap_or("").to_string();
             if let Some(index) = project_seen.get(&name).copied() {
-                if let Some(roots) = skills[index]
-                    .get_mut("project_roots")
-                    .and_then(Value::as_array_mut)
-                {
+                let slot = if index < skills.len() {
+                    &mut skills[index]
+                } else {
+                    &mut keep[index - before]
+                };
+                if let Some(roots) = slot.get_mut("project_roots").and_then(Value::as_array_mut) {
                     let owner_s = json!(owner);
                     if !roots.contains(&owner_s) {
                         roots.push(owner_s);
@@ -347,12 +349,9 @@ pub fn collect(homes: &Homes, sessions: &[CompactSession]) -> Surfaces {
             .iter()
             .filter(|(_other, other_path)| {
                 other_path != path
-                    && bodies.get(other_path).is_some_and(|body| {
-                        body.contains(&format!("`/{name}`"))
-                            || body.contains(&format!("`{name}`"))
-                            || body.contains(&format!("skills/{name}"))
-                            || body.contains(&needle)
-                    })
+                    && bodies
+                        .get(other_path)
+                        .is_some_and(|body| mentions_name(body, name, &needle))
             })
             .map(|(other, _)| other.clone())
             .collect();
@@ -427,7 +426,7 @@ pub fn usage(surfaces: &Surfaces, sessions: &[CompactSession]) -> Value {
             if session
                 .turns
                 .iter()
-                .any(|turn| turn.contains(workflow.as_str()))
+                .any(|turn| delimited_token(turn, workflow))
             {
                 hit(&mut hits, "workflow", workflow, session, 1, "mention");
             }
@@ -848,9 +847,58 @@ fn strip_hash_suffix(name: &str) -> String {
     re.replace(name, "").into_owned()
 }
 
+fn mentions_name(body: &str, name: &str, slash: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    body.contains(&format!("`/{name}`"))
+        || body.contains(&format!("`{name}`"))
+        || delimited_token(body, &format!("skills/{name}"))
+        || delimited_token(body, slash)
+}
+
+fn delimited_token(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let bytes = haystack.as_bytes();
+    let mut start = 0;
+    while let Some(offset) = haystack[start..].find(needle) {
+        let index = start + offset;
+        let before = index
+            .checked_sub(1)
+            .and_then(|i| bytes.get(i).copied())
+            .unwrap_or(b' ');
+        let after = bytes.get(index + needle.len()).copied().unwrap_or(b' ');
+        if !is_token_char(before) && !is_token_char(after) {
+            return true;
+        }
+        start = index + needle.len().max(1);
+        if start >= haystack.len() {
+            break;
+        }
+    }
+    false
+}
+
+fn is_token_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
+}
+
 #[cfg(test)]
 mod tests {
     use super::{toml_string_array, toml_subtables};
+
+    #[test]
+    fn delimited_token_requires_boundaries() {
+        assert!(super::delimited_token("please demo this", "demo"));
+        assert!(!super::delimited_token("please demonstrate this", "demo"));
+        assert!(super::delimited_token("demo", "demo"));
+        assert!(!super::delimited_token("x", ""));
+        assert!(super::mentions_name("see `/go` now", "go", "/go"));
+        assert!(!super::mentions_name("cmd/google/src", "go", "/go"));
+        assert!(!super::mentions_name("x", "", "/"));
+    }
 
     #[test]
     fn toml_helpers_read_names() {
@@ -903,7 +951,10 @@ mod tests {
             human_turns: 1,
             smoke_test: false,
             repeated_single_turn: false,
-            turns: vec!["please demo this workflow now".into()],
+            turns: vec![
+                "please demo this workflow now".into(),
+                "do not count demonstrate as the demo workflow".into(),
+            ],
             slash_commands: BTreeMap::from([
                 ("review".into(), 1),
                 ("demo".into(), 1),

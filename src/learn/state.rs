@@ -3,7 +3,8 @@ use crate::homes::Homes;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 pub const STATUSES: &[&str] = &["collected", "running", "report_ready", "curating", "done"];
@@ -83,22 +84,12 @@ pub fn set(homes: &Homes, update: &StateUpdate) -> Result<LearnState> {
             STATUSES.join(", ")
         )));
     }
-    let path = state_path(homes);
-    let mut state = load(&path)?;
-    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let run_dir = update.run_dir.display().to_string();
-    let mut pending = state.pending.take().unwrap_or(Pending {
-        run_dir: run_dir.clone(),
-        status: update.status.clone(),
-        started_at: Some(now.clone()),
-        updated_at: Some(now.clone()),
-        report_ready: false,
-        mode: None,
-        scope: None,
-        note: None,
-    });
-    if pending.run_dir != run_dir {
-        pending = Pending {
+    with_lock(homes, || {
+        let path = state_path(homes);
+        let mut state = load(&path)?;
+        let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let run_dir = update.run_dir.display().to_string();
+        let mut pending = state.pending.take().unwrap_or(Pending {
             run_dir: run_dir.clone(),
             status: update.status.clone(),
             started_at: Some(now.clone()),
@@ -107,29 +98,41 @@ pub fn set(homes: &Homes, update: &StateUpdate) -> Result<LearnState> {
             mode: None,
             scope: None,
             note: None,
-        };
-    }
-    pending.status = update.status.clone();
-    pending.updated_at = Some(now.clone());
-    pending.report_ready =
-        update.run_dir.join("report.md").is_file() && update.run_dir.join("actions.json").is_file();
-    if let Some(mode) = &update.mode {
-        pending.mode = Some(mode.clone());
-    }
-    if let Some(scope) = &update.scope {
-        pending.scope = Some(scope.clone());
-    }
-    if let Some(note) = &update.note {
-        pending.note = Some(note.clone());
-    }
-    if update.status == "done" {
-        state.last_completed_at = Some(now);
-        state.last_completed_dir = Some(run_dir);
-    }
-    state.pending = Some(pending);
-    state.magents_home = homes.magents.clone();
-    save(&path, &state)?;
-    Ok(state)
+        });
+        if pending.run_dir != run_dir {
+            pending = Pending {
+                run_dir: run_dir.clone(),
+                status: update.status.clone(),
+                started_at: Some(now.clone()),
+                updated_at: Some(now.clone()),
+                report_ready: false,
+                mode: None,
+                scope: None,
+                note: None,
+            };
+        }
+        pending.status = update.status.clone();
+        pending.updated_at = Some(now.clone());
+        pending.report_ready = update.run_dir.join("report.md").is_file()
+            && update.run_dir.join("actions.json").is_file();
+        if let Some(mode) = &update.mode {
+            pending.mode = Some(mode.clone());
+        }
+        if let Some(scope) = &update.scope {
+            pending.scope = Some(scope.clone());
+        }
+        if let Some(note) = &update.note {
+            pending.note = Some(note.clone());
+        }
+        if update.status == "done" {
+            state.last_completed_at = Some(now);
+            state.last_completed_dir = Some(run_dir);
+        }
+        state.pending = Some(pending);
+        state.magents_home = homes.magents.clone();
+        save(&path, &state)?;
+        Ok(state)
+    })
 }
 
 pub fn record_collection(
@@ -138,34 +141,38 @@ pub fn record_collection(
     generated_at: &str,
     kept: usize,
 ) -> Result<()> {
-    let path = state_path(homes);
-    let mut state = load(&path)?;
-    state.last_run_at = Some(generated_at.to_string());
-    state.last_run_dir = Some(run_dir.display().to_string());
-    state.sessions_kept = Some(kept);
-    if kept > 0 {
-        state.pending = Some(Pending {
-            run_dir: run_dir.display().to_string(),
-            status: "collected".into(),
-            started_at: Some(generated_at.to_string()),
-            updated_at: Some(generated_at.to_string()),
-            report_ready: false,
-            mode: None,
-            scope: None,
-            note: None,
-        });
-    }
-    state.magents_home = homes.magents.clone();
-    save(&path, &state)
+    with_lock(homes, || {
+        let path = state_path(homes);
+        let mut state = load(&path)?;
+        state.last_run_at = Some(generated_at.to_string());
+        state.last_run_dir = Some(run_dir.display().to_string());
+        state.sessions_kept = Some(kept);
+        if kept > 0 {
+            state.pending = Some(Pending {
+                run_dir: run_dir.display().to_string(),
+                status: "collected".into(),
+                started_at: Some(generated_at.to_string()),
+                updated_at: Some(generated_at.to_string()),
+                report_ready: false,
+                mode: None,
+                scope: None,
+                note: None,
+            });
+        }
+        state.magents_home = homes.magents.clone();
+        save(&path, &state)
+    })
 }
 
 pub fn clear(homes: &Homes) -> Result<LearnState> {
-    let path = state_path(homes);
-    let mut state = load(&path)?;
-    state.pending = None;
-    state.magents_home = homes.magents.clone();
-    save(&path, &state)?;
-    Ok(state)
+    with_lock(homes, || {
+        let path = state_path(homes);
+        let mut state = load(&path)?;
+        state.pending = None;
+        state.magents_home = homes.magents.clone();
+        save(&path, &state)?;
+        Ok(state)
+    })
 }
 
 pub fn decide(homes: &Homes, decision: &Decision) -> Result<Value> {
@@ -185,22 +192,36 @@ pub fn decide(homes: &Homes, decision: &Decision) -> Result<Value> {
         "decision": decision.decision,
         "undo": decision.undo,
     });
-    let path = homes.learn_dir().join("decisions.jsonl");
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| io(parent, source))?;
-    }
-    let mut body = if path.is_file() {
-        fs::read_to_string(&path).map_err(|source| io(&path, source))?
-    } else {
-        String::new()
-    };
-    if !body.is_empty() && !body.ends_with('\n') {
-        body.push('\n');
-    }
-    body.push_str(&serde_json::to_string(&line)?);
-    body.push('\n');
-    fs::write(&path, body).map_err(|source| io(path, source))?;
-    Ok(line)
+    with_lock(homes, || {
+        let path = homes.learn_dir().join("decisions.jsonl");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|source| io(parent, source))?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|source| io(&path, source))?;
+        let len = file.metadata().map_err(|source| io(&path, source))?.len();
+        if len > 0 {
+            file.seek(SeekFrom::End(-1))
+                .map_err(|source| io(&path, source))?;
+            let mut last = [0u8; 1];
+            file.read_exact(&mut last)
+                .map_err(|source| io(&path, source))?;
+            if last[0] != b'\n' {
+                file.seek(SeekFrom::End(0))
+                    .map_err(|source| io(&path, source))?;
+                file.write_all(b"\n").map_err(|source| io(&path, source))?;
+            }
+        }
+        file.seek(SeekFrom::End(0))
+            .map_err(|source| io(&path, source))?;
+        writeln!(file, "{}", serde_json::to_string(&line)?).map_err(|source| io(&path, source))?;
+        Ok(line)
+    })
 }
 
 pub fn trash(homes: &Homes, run_name: &str, paths: &[PathBuf]) -> Result<Value> {
@@ -254,11 +275,10 @@ pub fn restrict(paths: &[PathBuf]) -> Result<Value> {
     {
         use std::os::unix::fs::PermissionsExt;
         for path in paths {
-            if let Ok(meta) = fs::metadata(path) {
-                let mut permissions = meta.permissions();
-                permissions.set_mode(0o600);
-                let _ = fs::set_permissions(path, permissions);
-            }
+            let meta = fs::metadata(path).map_err(|source| io(path, source))?;
+            let mut permissions = meta.permissions();
+            permissions.set_mode(0o600);
+            fs::set_permissions(path, permissions).map_err(|source| io(path, source))?;
         }
     }
     Ok(json!({ "restricted": paths }))
@@ -276,9 +296,72 @@ fn save(path: &Path, state: &LearnState) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| io(parent, source))?;
     }
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, serde_json::to_vec_pretty(state)?).map_err(|source| io(&tmp, source))?;
-    fs::rename(&tmp, path).map_err(|source| io(path, source))
+    let tmp = atomic_tmp(path);
+    if let Err(source) = fs::write(&tmp, serde_json::to_vec_pretty(state)?) {
+        let _ = fs::remove_file(&tmp);
+        return Err(io(&tmp, source));
+    }
+    if let Err(source) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(io(path, source));
+    }
+    Ok(())
+}
+
+fn with_lock<T>(homes: &Homes, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let lock_path = state_path(homes).with_file_name(".state.json.lock");
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| io(parent, source))?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|source| io(&lock_path, source))?;
+    lock_exclusive(&file, &lock_path)?;
+    let result = f();
+    unlock(&file);
+    result
+}
+
+fn lock_exclusive(file: &File, path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if rc != 0 {
+            return Err(io(path, std::io::Error::last_os_error()));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, path);
+    }
+    Ok(())
+}
+
+fn unlock(file: &File) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+    }
+}
+
+fn atomic_tmp(path: &Path) -> PathBuf {
+    path.with_file_name(format!(
+        ".{}.{}.{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id(),
+        uuid::Uuid::new_v4().as_simple()
+    ))
 }
 
 pub fn copy_decisions(homes: &Homes, run_dir: &Path) -> Result<()> {
@@ -509,7 +592,26 @@ mod tests {
         let out = restrict(std::slice::from_ref(&path)).unwrap();
         assert_eq!(out["restricted"][0], path.display().to_string());
         let missing = dir.path().join("gone.toml");
-        assert!(restrict(std::slice::from_ref(&missing)).is_ok());
+        assert!(restrict(std::slice::from_ref(&missing)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_exclusive_errors_when_the_descriptor_is_invalid() {
+        use std::fs::File;
+        use std::os::unix::io::{FromRawFd, IntoRawFd};
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        fs::write(&path, "{}\n").unwrap();
+        let file = File::open(&path).unwrap();
+        let fd = file.into_raw_fd();
+        unsafe { libc::close(fd) };
+        let file = unsafe { File::from_raw_fd(fd) };
+        assert!(super::lock_exclusive(&file, &path).is_err());
+        std::mem::forget(file);
+        let first = super::atomic_tmp(&path);
+        let second = super::atomic_tmp(&path);
+        assert_ne!(first, second);
     }
 
     #[test]
@@ -615,6 +717,32 @@ mod tests {
         assert!(copy_dir(&dir.path().join("missing"), &dir.path().join("x")).is_err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn set_fails_when_learn_dir_is_not_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, homes) = homes();
+        fs::create_dir_all(homes.learn_dir()).unwrap();
+        fs::write(homes.learn_dir().join(".state.json.lock"), "").unwrap();
+        let mut permissions = fs::metadata(homes.learn_dir()).unwrap().permissions();
+        permissions.set_mode(0o555);
+        fs::set_permissions(homes.learn_dir(), permissions).unwrap();
+        let err = set(
+            &homes,
+            &StateUpdate {
+                run_dir: homes.magents.join("run"),
+                status: "collected".into(),
+                mode: None,
+                scope: None,
+                note: None,
+            },
+        );
+        let mut permissions = fs::metadata(homes.learn_dir()).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(homes.learn_dir(), permissions).unwrap();
+        assert!(err.is_err());
+    }
+
     #[test]
     fn set_fails_when_learn_dir_is_a_file() {
         let (_dir, homes) = homes();
@@ -637,7 +765,7 @@ mod tests {
     fn set_fails_when_tmp_or_state_path_is_a_directory() {
         let (_dir, homes) = homes();
         fs::create_dir_all(homes.learn_dir()).unwrap();
-        fs::create_dir_all(homes.learn_dir().join("state.json.tmp")).unwrap();
+        fs::create_dir_all(homes.learn_dir().join(".state.json.lock")).unwrap();
         let err = set(
             &homes,
             &StateUpdate {
@@ -649,7 +777,7 @@ mod tests {
             },
         );
         assert!(err.is_err());
-        fs::remove_dir_all(homes.learn_dir().join("state.json.tmp")).unwrap();
+        fs::remove_dir_all(homes.learn_dir().join(".state.json.lock")).unwrap();
         fs::create_dir_all(homes.learn_dir().join("state.json")).unwrap();
         let err = set(
             &homes,

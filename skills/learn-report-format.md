@@ -20,13 +20,16 @@ Actions: <N> total — <a> new skills, <b> skill updates, <c> enables, <d> delet
 
 ## 1. Repeated phrases -> skills
 | # | Phrase (quoted) | Sessions | Owner | Action |
+| --- | --- | --- | --- | --- |
 Owner is an existing skill (name, path, agent home) or NEW <name>. Action is the action id from actions.json.
 
 ## 2. Skills to update
 | # | Skill (path) | Stale line (quoted) | Evidence (session ids) | Replacement | Action |
+| --- | --- | --- | --- | --- | --- |
 
 ## 3. Unused -> delete or disable
 | # | Name | Kind | Count | Last used | Why safe | Action |
+| --- | --- | --- | --- | --- | --- | --- |
 Kind is skill, plugin, mcp, workflow, or hook. "Why safe" names what still does the job, or says `only copy — ask`, or `referenced by <names> — ask`.
 
 ## 4. Gaps

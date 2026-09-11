@@ -454,7 +454,7 @@ pub fn estimate_cost(n: usize, batch: usize) -> Estimate {
     let per_session = if batch == 1 {
         MAP_TOKENS_PER_TRACE
     } else {
-        MAP_TOKENS_BATCH * 10 / batch
+        (MAP_TOKENS_BATCH * 10 / batch).min(MAP_TOKENS_PER_TRACE)
     };
     let tokens = n * per_session + reducers * REDUCER_TOKENS + 3 * VERIFIER_TOKENS + REPORT_TOKENS;
     let mid = 30 + (n / 6) as u32;
@@ -902,6 +902,7 @@ mod tests {
         assert!(small.tokens > 0);
         let per_trace = estimate_cost(2, 1);
         assert!(per_trace.tokens > estimate_cost(2, 10).tokens);
+        assert!(estimate_cost(10, 2).tokens <= estimate_cost(10, 1).tokens);
     }
 
     #[test]
@@ -1411,6 +1412,10 @@ mod tests {
         write(
             &project.join(".claude/commands/ship.md"),
             "---\nname: ship\ndescription: ship the branch\n---\n",
+        );
+        write(
+            &project.join(".grok/skills/local-copy/SKILL.md"),
+            "---\nname: local\ndescription: same name different folder\n---\n",
         );
         write(
             &project.join("nested/.grok/skills/local/SKILL.md"),

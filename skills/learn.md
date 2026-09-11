@@ -8,7 +8,7 @@ description: >-
   from all agents", "what skills do I never use". Not for summarizing sessions
   into notes or memory.
 user-invocable: true
-argument-hint: "[--mode step|auto|report] [--days N | --since-last | --limit N] [--per-trace] [--include-headless] [--cwd PATH] [--focus TEXT] [--resume]"
+argument-hint: "[--mode step|auto|report] [--days N | --since-last | --limit N] [--per-trace] [--include-headless] [--cwd PATH] [--agent NAME] [--focus TEXT] [--resume]"
 ---
 
 # learn

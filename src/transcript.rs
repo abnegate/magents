@@ -435,7 +435,7 @@ fn unwrap_cursor_user(text: &str) -> String {
     human_prompts(text)
         .into_iter()
         .next()
-        .unwrap_or_else(|| text.to_string())
+        .unwrap_or_else(|| collapse_ws(text))
 }
 
 pub(crate) fn human_prompts(text: &str) -> Vec<String> {
@@ -853,6 +853,7 @@ mod tests {
             "<timestamp>Sunday</timestamp>\n<user_query>\nPull the 109 point matrix\n</user_query>";
         assert_eq!(super::unwrap_cursor_user(raw), "Pull the 109 point matrix");
         assert_eq!(super::unwrap_cursor_user("plain"), "plain");
+        assert!(super::unwrap_cursor_user("   ").is_empty());
         assert_eq!(
             super::human_prompts(
                 "<user_query>one</user_query>\n<user_query>two extra</user_query>"

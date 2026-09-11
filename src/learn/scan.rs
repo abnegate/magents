@@ -195,7 +195,7 @@ pub fn compact(
             git.as_str()
         },
     );
-    let tools = tools.into_iter().take(25).collect();
+    let tools = top_counts(tools, 25);
     Ok(CompactSession {
         index: 0,
         agent: session.agent.as_str().to_string(),
@@ -391,14 +391,14 @@ fn add_path(
 
 fn top_dirs(paths: &BTreeMap<String, usize>, base: &str) -> BTreeMap<String, usize> {
     let mut dirs: BTreeMap<String, usize> = BTreeMap::new();
+    let base_norm = norm(base);
     for (path, count) in paths {
-        let rel = if under(path, base) {
-            path[base.len()..]
-                .trim_start_matches(['/', '\\'])
-                .to_string()
-        } else {
-            path.clone()
-        };
+        let path_norm = norm(path);
+        let rel = path_norm
+            .strip_prefix(&base_norm)
+            .map(|rest| rest.trim_start_matches('/').to_string())
+            .filter(|_| under(path, base))
+            .unwrap_or_else(|| path_norm.clone());
         let parts: Vec<&str> = rel
             .split(['/', '\\'])
             .filter(|part| !part.is_empty())
@@ -410,7 +410,13 @@ fn top_dirs(paths: &BTreeMap<String, usize>, base: &str) -> BTreeMap<String, usi
         };
         *dirs.entry(key).or_default() += *count;
     }
-    dirs.into_iter().take(10).collect()
+    top_counts(dirs, 10)
+}
+
+fn top_counts(map: BTreeMap<String, usize>, limit: usize) -> BTreeMap<String, usize> {
+    let mut rows: Vec<(String, usize)> = map.into_iter().collect();
+    rows.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    rows.into_iter().take(limit).collect()
 }
 
 pub fn filename(index: usize, agent: &str, session_id: &str) -> String {
@@ -457,6 +463,14 @@ mod tests {
         assert!(!under("", "/tmp"));
         assert!(under("/a/b/../c", "/a"));
         assert_eq!(filename(3, "grok", "01ab/c"), "0003-grok-01ab-c.json");
+        let mut paths = std::collections::BTreeMap::new();
+        paths.insert("/a/b/src/lib.rs".into(), 1);
+        let dirs = super::top_dirs(&paths, "/a/b/");
+        assert!(dirs.contains_key("src"), "{dirs:?}");
+        paths.insert("/Users/me/app/../app/src/main.rs".into(), 9);
+        paths.insert("/Users/me/app/zzz/other.rs".into(), 1);
+        let ranked = super::top_dirs(&paths, "/Users/me/app");
+        assert!(ranked.contains_key("src"), "{ranked:?}");
         assert!(git_root("").is_none());
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".git")).unwrap();
