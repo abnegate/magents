@@ -1,0 +1,23 @@
+{
+  "name": "magents",
+  "displayName": "magents",
+  "description": "Shared session bus MCP + skill for Claude Code: list/read/handoff/send/spawn across Claude, Codex, Cursor, Grok, and friends. Requires magents on PATH.",
+  "version": "0.11.0",
+  "author": {
+    "name": "abnegate",
+    "url": "https://github.com/abnegate"
+  },
+  "homepage": "https://abnegate.github.io/magents",
+  "repository": "https://github.com/abnegate/magents",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "agents",
+    "sessions",
+    "handoff",
+    "codex",
+    "cursor",
+    "grok"
+  ],
+  "mcpServers": "./.mcp.json"
+}

@@ -12,7 +12,7 @@ It is not a second copy of history and not a fire-and-forget council. Existing
 chats stay the default unit of work; new chats are for independent work that
 benefits from its own session and working directory.
 
-[Install](#install) · [What you can do](#what-you-can-do) · [Quick start](#quick-start) · [Tools](#tools) · [CLI](#cli) · [Releases](https://github.com/abnegate/magents/releases)
+[Install](#install) · [Plugins](#plugins) · [What you can do](#what-you-can-do) · [Quick start](#quick-start) · [Tools](#tools) · [CLI](#cli) · [Releases](https://github.com/abnegate/magents/releases)
 
 ## Why
 
@@ -90,6 +90,21 @@ docker run --rm --user "$(id -u):$(id -g)" \
 cargo install --path .
 magents install --all
 ```
+
+
+## Plugins
+
+Host plugins package the magents skill plus an MCP entry that runs `magents mcp`.
+Install the CLI first (`brew install abnegate/tap/magents`), then load the matching
+folder under [`plugins/`](plugins/).
+
+| Host | Path |
+| --- | --- |
+| Claude Code | [`plugins/claude`](plugins/claude) |
+| Codex | [`plugins/codex`](plugins/codex) |
+| Cursor | [`plugins/cursor`](plugins/cursor) |
+
+Details and marketplace notes: [`plugins/README.md`](plugins/README.md).
 
 ## Quick start
 

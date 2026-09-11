@@ -1,0 +1,24 @@
+{
+  "name": "magents",
+  "displayName": "magents",
+  "version": "0.11.0",
+  "description": "Shared session bus MCP + skill for Cursor: hand off across Claude/Codex/Grok without pasting context. Requires magents on PATH.",
+  "author": {
+    "name": "abnegate"
+  },
+  "homepage": "https://abnegate.github.io/magents",
+  "repository": "https://github.com/abnegate/magents",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "agents",
+    "sessions",
+    "handoff",
+    "claude",
+    "codex",
+    "grok"
+  ],
+  "logo": "assets/logo.svg",
+  "skills": "./skills/",
+  "mcpServers": "./mcp.json"
+}
