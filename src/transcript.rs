@@ -432,12 +432,42 @@ fn scan_opencode_db(path: &Path, session_id: &str, needle: &str) -> Option<(usiz
 }
 
 fn unwrap_cursor_user(text: &str) -> String {
-    if let Some(start) = text.find("<user_query>") {
-        let rest = &text[start + "<user_query>".len()..];
-        let body = rest.split("</user_query>").next().unwrap_or(rest);
-        return body.split_whitespace().collect::<Vec<_>>().join(" ");
+    human_prompts(text)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| text.to_string())
+}
+
+pub(crate) fn human_prompts(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("<user_query>") {
+        rest = &rest[start + "<user_query>".len()..];
+        let body = if let Some(end) = rest.find("</user_query>") {
+            let body = &rest[..end];
+            rest = &rest[end + "</user_query>".len()..];
+            body
+        } else {
+            let body = rest;
+            rest = "";
+            body
+        };
+        let collapsed = collapse_ws(body);
+        if !collapsed.is_empty() {
+            found.push(collapsed);
+        }
     }
-    text.to_string()
+    if found.is_empty() {
+        let collapsed = collapse_ws(text);
+        if !collapsed.is_empty() {
+            found.push(collapsed);
+        }
+    }
+    found
+}
+
+fn collapse_ws(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn read_gemini(path: &Path) -> Result<Vec<Turn>> {
@@ -769,7 +799,7 @@ pub(crate) fn extract_snippet(line: &str, needle: &str) -> String {
     clip(&snippet, 400)
 }
 
-fn jsonl(path: &Path) -> Result<Vec<Value>> {
+pub(crate) fn jsonl(path: &Path) -> Result<Vec<Value>> {
     let file = File::open(path).map_err(|source| Error::Io {
         path: path.to_path_buf(),
         source,
@@ -823,6 +853,13 @@ mod tests {
             "<timestamp>Sunday</timestamp>\n<user_query>\nPull the 109 point matrix\n</user_query>";
         assert_eq!(super::unwrap_cursor_user(raw), "Pull the 109 point matrix");
         assert_eq!(super::unwrap_cursor_user("plain"), "plain");
+        assert_eq!(
+            super::human_prompts(
+                "<user_query>one</user_query>\n<user_query>two extra</user_query>"
+            ),
+            vec!["one".to_string(), "two extra".to_string()]
+        );
+        assert!(super::human_prompts("   ").is_empty());
     }
 
     #[test]

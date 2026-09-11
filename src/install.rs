@@ -9,6 +9,9 @@ use std::process::Command;
 use toml_edit::{Array, DocumentMut, value};
 
 const SKILL: &str = include_str!("../skills/magents.md");
+const LEARN_SKILL: &str = include_str!("../skills/learn.md");
+const LEARN_SIGNALS: &str = include_str!("../skills/learn-signals.md");
+const LEARN_REPORT: &str = include_str!("../skills/learn-report-format.md");
 
 #[derive(Clone, Copy, Default)]
 pub struct InstallSpec {
@@ -94,7 +97,7 @@ pub fn install_spec_with(
         &mut notes,
         "grok",
         || install_grok(&homes, &exe),
-        Some(skill_path(
+        Some(host_skills(
             dirs::home_dir().unwrap_or_default().join(".grok"),
         )),
         &mut on_event,
@@ -105,7 +108,7 @@ pub fn install_spec_with(
         &mut notes,
         "claude",
         || install_claude(&homes, &exe),
-        Some(skill_path(
+        Some(host_skills(
             dirs::home_dir().unwrap_or_default().join(".claude"),
         )),
         &mut on_event,
@@ -125,7 +128,7 @@ pub fn install_spec_with(
         &mut notes,
         "cursor",
         || install_cursor(&exe),
-        Some(skill_path(
+        Some(host_skills(
             dirs::home_dir().unwrap_or_default().join(".cursor"),
         )),
         &mut on_event,
@@ -136,7 +139,7 @@ pub fn install_spec_with(
         &mut notes,
         "opencode",
         || install_opencode(&exe),
-        Some(skill_path(
+        Some(host_skills(
             dirs::home_dir()
                 .unwrap_or_default()
                 .join(".config")
@@ -150,7 +153,7 @@ pub fn install_spec_with(
         &mut notes,
         "gemini",
         || install_gemini(&homes, &exe),
-        Some(skill_path(homes.gemini.clone())),
+        Some(host_skills(homes.gemini.clone())),
         &mut on_event,
     )?;
     try_host(
@@ -159,14 +162,14 @@ pub fn install_spec_with(
         &mut notes,
         "copilot",
         || install_copilot(&homes, &exe),
-        Some(skill_path(homes.copilot.clone())),
+        Some(host_skills(homes.copilot.clone())),
         &mut on_event,
     )?;
     Ok(notes)
 }
 
-fn skill_path(root: PathBuf) -> PathBuf {
-    root.join("skills").join("magents").join("SKILL.md")
+fn host_skills(root: PathBuf) -> PathBuf {
+    root.join("skills")
 }
 
 fn try_host(
@@ -185,7 +188,7 @@ fn try_host(
     match install() {
         Ok(status) => {
             if let Some(path) = skill {
-                write_skill(path)?;
+                write_host_skills(path)?;
             }
             let result = HostInstall {
                 host: program,
@@ -864,14 +867,29 @@ fn with_config_update<T>(
     })
 }
 
+fn write_host_skills(skills_dir: PathBuf) -> Result<()> {
+    write_skill(skills_dir.join("magents").join("SKILL.md"))?;
+    write_skill_file(skills_dir.join("learn").join("SKILL.md"), LEARN_SKILL)?;
+    write_skill_file(skills_dir.join("learn").join("signals.md"), LEARN_SIGNALS)?;
+    write_skill_file(
+        skills_dir.join("learn").join("report-format.md"),
+        LEARN_REPORT,
+    )?;
+    Ok(())
+}
+
 fn write_skill(path: PathBuf) -> Result<()> {
+    write_skill_file(path, SKILL)
+}
+
+fn write_skill_file(path: PathBuf, body: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| Error::Io {
             path: parent.to_path_buf(),
             source,
         })?;
     }
-    fs::write(&path, SKILL).map_err(|source| Error::Io {
+    fs::write(&path, body).map_err(|source| Error::Io {
         path: path.clone(),
         source,
     })
@@ -1004,8 +1022,14 @@ mod tests {
             assert!(opencode_raw.contains("$schema"));
             assert!(opencode_raw.contains("\"type\": \"local\""));
             assert!(home.join(".cursor/skills/magents/SKILL.md").is_file());
+            assert!(home.join(".cursor/skills/learn/SKILL.md").is_file());
+            assert!(home.join(".cursor/skills/learn/signals.md").is_file());
             assert!(
                 home.join(".config/opencode/skills/magents/SKILL.md")
+                    .is_file()
+            );
+            assert!(
+                home.join(".config/opencode/skills/learn/SKILL.md")
                     .is_file()
             );
         });
@@ -1539,10 +1563,12 @@ printf '%s\n' "$@" > "$HOME/.gemini-argv"
             let notes = install(false, false, false, false, false, true, true).unwrap();
             assert_eq!(host(&notes, "gemini").status, HostStatus::Added);
             assert!(home.join("custom-gemini/skills/magents/SKILL.md").is_file());
+            assert!(home.join("custom-gemini/skills/learn/SKILL.md").is_file());
             assert!(
                 home.join("custom-copilot/skills/magents/SKILL.md")
                     .is_file()
             );
+            assert!(home.join("custom-copilot/skills/learn/SKILL.md").is_file());
             assert!(!home.join(".gemini/skills/magents/SKILL.md").is_file());
             assert!(!home.join(".copilot/skills/magents/SKILL.md").is_file());
         });

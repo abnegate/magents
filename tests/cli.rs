@@ -1343,6 +1343,114 @@ fn cli_installs_cursor_and_opencode_mcp_config() {
     let opencode = fs::read_to_string(harness.root.join(".config/opencode/opencode.json")).unwrap();
     assert!(opencode.contains("magents"));
     assert!(opencode.contains("\"type\": \"local\""));
+    assert!(harness.root.join(".cursor/skills/learn/SKILL.md").is_file());
+    assert!(
+        harness
+            .root
+            .join(".config/opencode/skills/learn/SKILL.md")
+            .is_file()
+    );
+}
+
+#[test]
+fn cli_learn_collects_across_agents() {
+    let _lock = ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let harness = Harness::new();
+    let sid = "01learncli00000000000000";
+    write(
+        &harness
+            .root
+            .join("grok/sessions/%2FUsers%2Ftest%2Fapp")
+            .join(sid)
+            .join("summary.json"),
+        &format!(
+            r#"{{"info":{{"id":"{sid}","cwd":"/Users/test/app"}},"generated_title":"learn cli","session_kind":"main","last_active_at":"2026-09-11T00:00:00Z"}}"#
+        ),
+    );
+    write(
+        &harness
+            .root
+            .join("grok/sessions/%2FUsers%2Ftest%2Fapp")
+            .join(sid)
+            .join("updates.jsonl"),
+        r#"{"params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"always run cargo test --locked --all-targets before commit"}}}}
+{"params":{"update":{"sessionUpdate":"tool_call","toolCall":{"name":"read_file"}}}}
+{"params":{"update":{"sessionUpdate":"turn_completed"}}}
+"#,
+    );
+    write(
+        &harness.root.join("grok/skills/unused/SKILL.md"),
+        "---\nname: unused\ndescription: never\n---\n",
+    );
+    let estimate = harness.json(&[
+        "learn",
+        "estimate",
+        "--out",
+        &harness.root.join("est").display().to_string(),
+    ]);
+    assert_eq!(estimate["recommended"], "all");
+    let collected = harness.json(&[
+        "learn",
+        "collect",
+        "--out",
+        &harness.root.join("run").display().to_string(),
+    ]);
+    assert!(collected["kept"].as_u64().unwrap() >= 1, "{collected}");
+    assert!(collected["shards"].as_u64().unwrap() >= 1, "{collected}");
+    let planned = harness.json(&[
+        "learn",
+        "plan",
+        "--run-dir",
+        collected["run_dir"].as_str().unwrap(),
+        "--batch",
+        "1",
+    ]);
+    assert_eq!(planned["batch"], 1);
+    assert!(
+        !planned["shards"].as_array().unwrap().is_empty(),
+        "{planned}"
+    );
+    let pending_plan = harness.json(&["learn", "plan"]);
+    assert_eq!(
+        pending_plan["run_dir"].as_str().unwrap(),
+        collected["run_dir"].as_str().unwrap()
+    );
+    let state = harness.json(&["learn", "state"]);
+    assert_eq!(state["pending"]["status"], "collected");
+    let set = harness.json(&[
+        "learn",
+        "set",
+        "--run-dir",
+        collected["run_dir"].as_str().unwrap(),
+        "--status",
+        "running",
+        "--mode",
+        "step",
+    ]);
+    assert_eq!(set["pending"]["status"], "running");
+    let decided = harness.json(&[
+        "learn",
+        "decide",
+        "--run-dir",
+        collected["run_dir"].as_str().unwrap(),
+        "--id",
+        "A1",
+        "--kind",
+        "skill",
+        "--action",
+        "delete",
+        "--target",
+        "unused",
+        "--path",
+        &harness
+            .root
+            .join("grok/skills/unused")
+            .display()
+            .to_string(),
+        "--decision",
+        "deferred",
+    ]);
+    assert_eq!(decided["decision"], "deferred");
 }
 
 #[test]

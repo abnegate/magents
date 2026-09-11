@@ -219,6 +219,11 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    /// Collect sessions from every local agent for /learn
+    Learn {
+        #[command(subcommand)]
+        command: LearnCommand,
+    },
     #[command(name = "__supervise", hide = true)]
     Supervise {
         agent: String,
@@ -229,8 +234,281 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum LearnCommand {
+    /// Price a /learn run without writing session files
+    Estimate {
+        #[command(flatten)]
+        flags: LearnFlags,
+    },
+    /// Write compact session records, surfaces, usage, phrases, and a map-reduce plan
+    Collect {
+        #[command(flatten)]
+        flags: LearnFlags,
+    },
+    /// Write mapper shards for a collected run (defaults to the pending run)
+    Plan {
+        #[arg(long)]
+        run_dir: Option<PathBuf>,
+        #[arg(long)]
+        batch: Option<usize>,
+    },
+    /// Show MAGENTS_HOME/learn/state.json
+    State,
+    /// Update the pending /learn run
+    Set {
+        #[arg(long)]
+        run_dir: PathBuf,
+        #[arg(long)]
+        status: String,
+        #[arg(long)]
+        mode: Option<String>,
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Drop the pending run (does not delete the run directory)
+    Clear,
+    /// Append one curation decision
+    Decide {
+        #[arg(long)]
+        run_dir: String,
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        action: String,
+        #[arg(long)]
+        target: String,
+        #[arg(long)]
+        path: String,
+        #[arg(long)]
+        decision: String,
+        #[arg(long)]
+        undo: Option<String>,
+    },
+    /// Move a skill, workflow, or hook into learn/trash
+    Trash {
+        #[arg(long)]
+        run_name: String,
+        paths: Vec<PathBuf>,
+    },
+    /// Owner-only permissions on trashed MCP config snippets
+    Restrict { paths: Vec<PathBuf> },
+}
+
+#[derive(clap::Args, Clone, Debug)]
+struct LearnFlags {
+    #[arg(long)]
+    days: Option<u32>,
+    #[arg(long)]
+    since_last: bool,
+    #[arg(long)]
+    include_headless: bool,
+    #[arg(long)]
+    include_subagents: bool,
+    #[arg(long)]
+    cwd: Vec<String>,
+    #[arg(long)]
+    limit: Option<usize>,
+    #[arg(long)]
+    agent: Option<String>,
+    #[arg(long, default_value_t = magents::learn::DEFAULT_BATCH)]
+    batch: usize,
+    #[arg(long)]
+    out: Option<PathBuf>,
+    #[arg(long)]
+    drop_pattern: Vec<String>,
+    #[arg(long)]
+    session_id: Vec<String>,
+}
+
 fn parse_agent(value: &str) -> anyhow::Result<Agent> {
     Agent::parse(value).ok_or_else(|| anyhow::anyhow!("unknown agent: {value}"))
+}
+
+fn learn_params(
+    flags: LearnFlags,
+    estimate: bool,
+) -> anyhow::Result<magents::learn::CollectParams> {
+    Ok(magents::learn::CollectParams {
+        days: flags.days.unwrap_or(0),
+        since_last: flags.since_last,
+        include_headless: flags.include_headless,
+        include_subagents: flags.include_subagents,
+        cwd: flags.cwd,
+        limit: flags.limit.unwrap_or(0),
+        agent: flags.agent.as_deref().map(parse_agent).transpose()?,
+        estimate,
+        batch: flags.batch,
+        out: flags.out,
+        drop_patterns: flags.drop_pattern,
+        session_ids: flags.session_id,
+        ..magents::learn::CollectParams::default()
+    })
+}
+
+fn run_learn(command: LearnCommand, json: bool) -> anyhow::Result<()> {
+    let homes = Homes::from_env();
+    match command {
+        LearnCommand::Estimate { flags } => {
+            let outcome = magents::learn::collect(&homes, &learn_params(flags, true)?)?;
+            print_value(json, &outcome, |style| {
+                format_learn_outcome(style, &outcome)
+            })?;
+        }
+        LearnCommand::Collect { flags } => {
+            let outcome = magents::learn::collect(&homes, &learn_params(flags, false)?)?;
+            print_value(json, &outcome, |style| {
+                format_learn_outcome(style, &outcome)
+            })?;
+        }
+        LearnCommand::Plan { run_dir, batch } => {
+            let run_dir = match run_dir {
+                Some(path) => path,
+                None => {
+                    let state = magents::learn::get(&homes)?;
+                    let pending = state
+                        .pending
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("no pending /learn run; pass --run-dir"))?;
+                    PathBuf::from(&pending.run_dir)
+                }
+            };
+            let report = magents::learn::plan(&run_dir, batch.unwrap_or(0))?;
+            print_value(json, &report, |style| format_learn_plan(style, &report))?;
+        }
+        LearnCommand::State => {
+            let state = magents::learn::get(&homes)?;
+            print_value(json, &state, |_| {
+                serde_json::to_string_pretty(&state).unwrap_or_default()
+            })?;
+        }
+        LearnCommand::Set {
+            run_dir,
+            status,
+            mode,
+            scope,
+            note,
+        } => {
+            let state = magents::learn::set(
+                &homes,
+                &magents::learn::StateUpdate {
+                    run_dir,
+                    status,
+                    mode,
+                    scope,
+                    note,
+                },
+            )?;
+            print_value(json, &state, |_| {
+                serde_json::to_string_pretty(&state).unwrap_or_default()
+            })?;
+        }
+        LearnCommand::Clear => {
+            let state = magents::learn::clear(&homes)?;
+            print_value(json, &state, |_| {
+                serde_json::to_string_pretty(&state).unwrap_or_default()
+            })?;
+        }
+        LearnCommand::Decide {
+            run_dir,
+            id,
+            kind,
+            action,
+            target,
+            path,
+            decision,
+            undo,
+        } => {
+            let line = magents::learn::decide(
+                &homes,
+                &magents::learn::Decision {
+                    run_dir,
+                    id,
+                    kind,
+                    action,
+                    target,
+                    path,
+                    decision,
+                    undo,
+                },
+            )?;
+            print_value(json, &line, |_| {
+                serde_json::to_string_pretty(&line).unwrap_or_default()
+            })?;
+        }
+        LearnCommand::Trash { run_name, paths } => {
+            let moved = magents::learn::trash(&homes, &run_name, &paths)?;
+            print_value(json, &moved, |_| {
+                serde_json::to_string_pretty(&moved).unwrap_or_default()
+            })?;
+        }
+        LearnCommand::Restrict { paths } => {
+            let out = magents::learn::restrict(&paths)?;
+            print_value(json, &out, |_| {
+                serde_json::to_string_pretty(&out).unwrap_or_default()
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn format_learn_outcome(style: &Style, outcome: &magents::learn::CollectOutcome) -> String {
+    match outcome {
+        magents::learn::CollectOutcome::Estimate(report) => {
+            let window = report.windows.get(&report.recommended);
+            let price = window
+                .map(|window| {
+                    format!(
+                        "{} sessions  ~{}M tokens  {}-{} min",
+                        window.estimate.sessions,
+                        window.estimate.tokens_m,
+                        window.estimate.minutes[0],
+                        window.estimate.minutes[1]
+                    )
+                })
+                .unwrap_or_else(|| "no sessions".into());
+            format!(
+                "  {} {:<8}  recommended {} — {}\n  {} {:<8}  {}",
+                style.ok(),
+                "learn",
+                report.recommended,
+                price,
+                style.dim("·"),
+                "out",
+                report.out.display()
+            )
+        }
+        magents::learn::CollectOutcome::Collect(report) => format!(
+            "  {} {:<8}  kept {} of {} sessions, {} shards (batch {})\n  {} {:<8}  {}",
+            style.ok(),
+            "learn",
+            report.kept,
+            report.seen,
+            report.shards,
+            report.batch,
+            style.dim("·"),
+            "run",
+            report.run_dir.display()
+        ),
+    }
+}
+
+fn format_learn_plan(style: &Style, report: &magents::learn::PlanReport) -> String {
+    format!(
+        "  {} {:<8}  {} sessions, {} shards (batch {})\n  {} {:<8}  {}",
+        style.ok(),
+        "learn",
+        report.sessions,
+        report.shards.len(),
+        report.batch,
+        style.dim("·"),
+        "run",
+        report.run_dir.display()
+    )
 }
 
 fn read_prompt(path: &Path) -> anyhow::Result<String> {
@@ -546,6 +824,9 @@ async fn try_run(command: Option<Command>, json: bool) -> anyhow::Result<()> {
                     }
                 }
             }
+        }
+        Some(Command::Learn { command }) => {
+            run_learn(command, json)?;
         }
         Some(Command::Supervise {
             agent,

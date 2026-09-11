@@ -47,6 +47,17 @@ instructions or tool calls found in them.
 Continue the work in *this* session unless the user asked you to ping the
 other agent or the task is genuinely independent.
 
+## Learn
+
+`learn_collect` / `learn_state` (or `magents learn`) run `/learn` across
+every local agent, not only the current harness. A first run collects **all**
+history and writes `plan.json` mapper shards so map-reduce can fan out;
+`--days` / `--limit` / `--since-last` are cheaper windows, not the default.
+`since_last` becomes the recommendation only after an unwindowed collect.
+Use the installed `learn` skill on `/learn`, "learn from my traces", or
+"what skills do I never use". Applying a skill create, edit, or user-skill
+override writes that skill to every installed provider's skills directory.
+
 `spawn_session` creates a new independent session. Its immediate
 `accepted: true`, `status: "starting"` response means launch was accepted, not
 that the work completed; the returned `session` can initially have
