@@ -2,7 +2,7 @@
   "name": "magents",
   "displayName": "magents",
   "description": "Shared session bus MCP + skill for Claude Code: list/read/handoff/send/spawn across Claude, Codex, Cursor, Grok, and friends. Requires magents on PATH.",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "author": {
     "name": "abnegate",
     "url": "https://github.com/abnegate"
