@@ -71,13 +71,33 @@ pub(crate) mod test_env {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        std::fs::write(path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::write(
+            path,
+            format!("#!/bin/sh\n[ -z \"${{{WARM}-}}\" ] || exit 0\n{script}\n"),
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mut permissions = std::fs::metadata(path).unwrap().permissions();
             permissions.set_mode(0o755);
             std::fs::set_permissions(path, permissions).unwrap();
+            warm(path);
         }
+    }
+
+    const WARM: &str = "MAGENTS_TEST_WARM";
+
+    #[cfg(unix)]
+    fn warm(path: &std::path::Path) {
+        let status = std::process::Command::new(path)
+            .env_clear()
+            .env(WARM, "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "warming {} failed", path.display());
     }
 }

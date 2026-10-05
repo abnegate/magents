@@ -11,6 +11,8 @@ use tempfile::TempDir;
 
 static ENV: Mutex<()> = Mutex::new(());
 
+const WARM: &str = "MAGENTS_TEST_WARM";
+
 const CLAUDE_ID: &str = "11111111-1111-4111-8111-111111111111";
 const CODEX_SPAWN_ID: &str = "22222222-2222-4222-8222-222222222222";
 const CURSOR_SPAWN_ID: &str = "33333333-3333-4333-8333-333333333333";
@@ -152,8 +154,20 @@ fn write(path: &Path, body: &str) {
 }
 
 fn write_executable(path: &Path, body: &str) {
-    write(path, &format!("#!/bin/sh\nset -eu\n{body}\n"));
+    write(
+        path,
+        &format!("#!/bin/sh\nset -eu\n[ -z \"${{{WARM}-}}\" ] || exit 0\n{body}\n"),
+    );
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    let status = Command::new(path)
+        .env_clear()
+        .env(WARM, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "warming {} failed", path.display());
 }
 
 fn output_with_stdin(command: &mut Command, input: &str) -> Output {
