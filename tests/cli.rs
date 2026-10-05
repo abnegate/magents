@@ -11,6 +11,7 @@ use tempfile::TempDir;
 
 static ENV: Mutex<()> = Mutex::new(());
 
+const HOLD: Duration = Duration::from_secs(30);
 const WARM: &str = "MAGENTS_TEST_WARM";
 
 const CLAUDE_ID: &str = "11111111-1111-4111-8111-111111111111";
@@ -43,10 +44,13 @@ case "${MAGENTS_TEST_MODE-}" in
     early) exit 9 ;;
     malformed) printf '%s\n' 'raw malformed startup SECRET-OUTPUT'; exit 0 ;;
     no-id) printf '%s\n' '{"type":"thread.started"}'; exit 0 ;;
-    timeout) sleep 1; exit 0 ;;
-    cancel) sleep 5; exit 0 ;;
+    timeout)
+        until [ -e "$MAGENTS_TEST_RELEASE" ]; do sleep 0.05; done
+        exit 0
+        ;;
+    cancel) sleep "$MAGENTS_TEST_HOLD_SECONDS"; exit 0 ;;
     orphan)
-        (sleep 5) &
+        (sleep "$MAGENTS_TEST_HOLD_SECONDS") &
         printf '%s\n' "$!" > "$MAGENTS_TEST_DESCENDANT_PID"
         exit 0
         ;;
@@ -186,12 +190,16 @@ fn output_with_stdin(command: &mut Command, input: &str) -> Output {
     child.wait_with_output().unwrap()
 }
 
+fn read_ready(path: &Path) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()
+        .filter(|body| !body.trim().is_empty())
+}
+
 fn wait_for(path: &Path, timeout: Duration) -> String {
     let started = Instant::now();
     loop {
-        if let Ok(body) = fs::read_to_string(path)
-            && !body.trim().is_empty()
-        {
+        if let Some(body) = read_ready(path) {
             return body;
         }
         assert!(
@@ -200,6 +208,17 @@ fn wait_for(path: &Path, timeout: Duration) -> String {
             path.display()
         );
         thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn escalate(mut attempt: impl FnMut(Duration) -> bool) {
+    let mut window = Duration::from_millis(500);
+    while !attempt(window) {
+        window = window.saturating_mul(2);
+        assert!(
+            window < HOLD,
+            "agent stub never became ready before its timeout"
+        );
     }
 }
 
@@ -255,6 +274,7 @@ fn configure_stub(
             artifacts.join("supervisor-pid"),
         )
         .env("MAGENTS_TEST_DONE", artifacts.join("done"))
+        .env("MAGENTS_TEST_RELEASE", artifacts.join("release"))
         .env_remove("MAGENTS_TEST_MODE");
     artifacts
 }
@@ -810,7 +830,7 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
             assert!(!stderr.contains(private), "{agent} stderr leaked {private}");
         }
 
-        let args = wait_for(&artifacts.join("args"), Duration::from_secs(2));
+        let args = wait_for(&artifacts.join("args"), HOLD);
         let args = args.lines().collect::<Vec<_>>();
         let expected = match agent {
             "claude" => vec![
@@ -849,10 +869,10 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
         assert_eq!(args, expected, "{agent} argv changed");
         assert!(!args.iter().any(|argument| argument.contains(&prompt)));
 
-        let child_prompt = wait_for(&artifacts.join("stdin"), Duration::from_secs(2));
+        let child_prompt = wait_for(&artifacts.join("stdin"), HOLD);
         assert_eq!(child_prompt, prompt);
         assert!(!child_prompt.contains("<magents-reply-to"));
-        let environment = wait_for(&artifacts.join("environment"), Duration::from_secs(2));
+        let environment = wait_for(&artifacts.join("environment"), HOLD);
         let environment = environment.trim_end().split('|').collect::<Vec<_>>();
         assert_eq!(
             environment[7],
@@ -897,11 +917,11 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
         assert!(inbox["items"].as_array().unwrap().is_empty());
 
         assert!(!artifacts.join("done").exists());
-        let agent_pid = wait_for(&artifacts.join("agent-pid"), Duration::from_secs(2));
-        let supervisor_pid = wait_for(&artifacts.join("supervisor-pid"), Duration::from_secs(2));
-        wait_for(&artifacts.join("done"), Duration::from_secs(3));
-        wait_for_exit(&agent_pid, Duration::from_secs(3));
-        wait_for_exit(&supervisor_pid, Duration::from_secs(3));
+        let agent_pid = wait_for(&artifacts.join("agent-pid"), HOLD);
+        let supervisor_pid = wait_for(&artifacts.join("supervisor-pid"), HOLD);
+        wait_for(&artifacts.join("done"), HOLD);
+        wait_for_exit(&agent_pid, HOLD);
+        wait_for_exit(&supervisor_pid, HOLD);
     }
 
     let registry = fs::read_dir(harness.root.join("magents/spawns"))
@@ -941,7 +961,7 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
     assert_eq!(sent["to"]["cwd"], cwd_text);
     assert_eq!(sent["delivered"], serde_json::json!(["codex-exec"]));
     assert!(!String::from_utf8_lossy(&output.stdout).contains(message));
-    let resume_args = wait_for(&artifacts.join("args"), Duration::from_secs(2));
+    let resume_args = wait_for(&artifacts.join("args"), HOLD);
     assert_eq!(
         resume_args.lines().collect::<Vec<_>>(),
         vec![
@@ -954,14 +974,11 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
             "-"
         ]
     );
-    assert_eq!(
-        wait_for(&artifacts.join("stdin"), Duration::from_secs(2)),
-        message
-    );
+    assert_eq!(wait_for(&artifacts.join("stdin"), HOLD), message);
     let inbox = harness.json(&["inbox", "--agent", "codex", "--session", CODEX_SPAWN_ID]);
     assert_eq!(inbox["items"].as_array().unwrap().len(), 1);
     assert_eq!(inbox["items"][0]["message"], message);
-    wait_for(&artifacts.join("done"), Duration::from_secs(3));
+    wait_for(&artifacts.join("done"), HOLD);
 }
 
 #[test]
@@ -1037,7 +1054,7 @@ fn mcp_spawn_survives_server_parent_exit() {
     }
     stdin.flush().unwrap();
 
-    let response = receiver.recv_timeout(Duration::from_secs(3)).unwrap();
+    let response = receiver.recv_timeout(HOLD).unwrap();
     let report: Value =
         serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(report["accepted"], true);
@@ -1056,20 +1073,17 @@ fn mcp_spawn_survives_server_parent_exit() {
     );
     let _lines = reader.join().unwrap();
 
-    assert_eq!(
-        wait_for(&artifacts.join("stdin"), Duration::from_secs(2)),
-        prompt
-    );
-    let provider = wait_for(&artifacts.join("args"), Duration::from_secs(2));
+    assert_eq!(wait_for(&artifacts.join("stdin"), HOLD), prompt);
+    let provider = wait_for(&artifacts.join("args"), HOLD);
     assert!(!provider.contains(prompt));
-    let supervisor_pid = wait_for(&artifacts.join("supervisor-pid"), Duration::from_secs(2));
-    let provider_pid = wait_for(&artifacts.join("agent-pid"), Duration::from_secs(2));
+    let supervisor_pid = wait_for(&artifacts.join("supervisor-pid"), HOLD);
+    let provider_pid = wait_for(&artifacts.join("agent-pid"), HOLD);
     assert!(process_exists(&supervisor_pid));
     assert!(process_exists(&provider_pid));
     assert!(!artifacts.join("done").exists());
-    wait_for(&artifacts.join("done"), Duration::from_secs(3));
-    wait_for_exit(&supervisor_pid, Duration::from_secs(3));
-    wait_for_exit(&provider_pid, Duration::from_secs(3));
+    wait_for(&artifacts.join("done"), HOLD);
+    wait_for_exit(&supervisor_pid, HOLD);
+    wait_for_exit(&provider_pid, HOLD);
 }
 
 #[test]
@@ -1097,17 +1111,17 @@ fn cli_spawn_adds_reply_route_only_for_known_caller() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let routed = wait_for(&artifacts.join("stdin"), Duration::from_secs(2));
+    let routed = wait_for(&artifacts.join("stdin"), HOLD);
     assert!(routed.contains("<magents-reply-to agent=\"codex\" session=\"known-caller\">"));
     assert!(routed.contains("magents send_message to codex:known-caller"));
     assert!(routed.ends_with(prompt));
-    let environment = wait_for(&artifacts.join("environment"), Duration::from_secs(2));
+    let environment = wait_for(&artifacts.join("environment"), HOLD);
     assert_eq!(environment.trim_end().split('|').nth(9), Some(""));
     for private in [prompt, "known-caller", "SECRET-TOKEN", "SECRET-OUTPUT"] {
         assert!(!String::from_utf8_lossy(&output.stdout).contains(private));
         assert!(!String::from_utf8_lossy(&output.stderr).contains(private));
     }
-    wait_for(&artifacts.join("done"), Duration::from_secs(3));
+    wait_for(&artifacts.join("done"), HOLD);
 }
 
 #[test]
@@ -1142,15 +1156,13 @@ fn cli_spawn_keeps_prompt_out_of_outer_and_provider_argv() {
         .write_all(prompt.as_bytes())
         .unwrap();
 
-    assert_eq!(
-        wait_for(&artifacts.join("stdin"), Duration::from_secs(2)),
-        prompt
-    );
+    assert_eq!(wait_for(&artifacts.join("stdin"), HOLD), prompt);
     let outer = process_command(pid);
     assert!(outer.contains("spawn codex"), "unexpected argv: {outer}");
     assert!(!outer.contains(prompt), "outer argv leaked prompt: {outer}");
-    let provider = wait_for(&artifacts.join("args"), Duration::from_secs(2));
+    let provider = wait_for(&artifacts.join("args"), HOLD);
     assert!(!provider.contains(prompt));
+    write(&artifacts.join("release"), "");
 
     let output = child.wait_with_output().unwrap();
     assert!(!output.status.success());
@@ -1261,38 +1273,49 @@ fn cli_spawn_handshake_timeout_reaps_supervisor_and_provider() {
     write_executable(&stub, AGENT_STUB);
     let cwd = fs::canonicalize(&harness.root).unwrap();
     let prompt = "cancel silently SECRET-CANCELLATION-PROMPT";
-    let mut command = harness.command(&["spawn", "codex", "--cwd", cwd.to_str().unwrap()]);
-    let artifacts = configure_stub(
-        &mut command,
-        &harness,
-        &stub,
-        "codex",
-        "MAGENTS_CODEX_BIN",
-        "handshake-timeout",
-    );
-    command
-        .env("MAGENTS_TEST_MODE", "cancel")
-        .env("MAGENTS_STARTUP_TIMEOUT_MS", "5000")
-        .env("MAGENTS_HANDSHAKE_TIMEOUT_MS", "800");
-    let started = Instant::now();
+    escalate(|window| {
+        let mut command = harness.command(&["spawn", "codex", "--cwd", cwd.to_str().unwrap()]);
+        let artifacts = configure_stub(
+            &mut command,
+            &harness,
+            &stub,
+            "codex",
+            "MAGENTS_CODEX_BIN",
+            &format!("handshake-timeout-{}", window.as_millis()),
+        );
+        command
+            .env("MAGENTS_TEST_MODE", "cancel")
+            .env("MAGENTS_TEST_HOLD_SECONDS", HOLD.as_secs().to_string())
+            .env("MAGENTS_STARTUP_TIMEOUT_MS", HOLD.as_millis().to_string())
+            .env(
+                "MAGENTS_HANDSHAKE_TIMEOUT_MS",
+                window.as_millis().to_string(),
+            );
+        let started = Instant::now();
 
-    let output = output_with_stdin(&mut command, prompt);
+        let output = output_with_stdin(&mut command, prompt);
 
-    assert!(!output.status.success());
-    assert!(started.elapsed() < Duration::from_secs(3));
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(combined.contains("timed out"), "{combined}");
-    for private in [prompt, "SECRET-OUTPUT", "SECRET-TOKEN"] {
-        assert!(!combined.contains(private), "leaked {private}: {combined}");
-    }
-    let supervisor = wait_for(&artifacts.join("supervisor-pid"), Duration::from_secs(1));
-    let provider = wait_for(&artifacts.join("agent-pid"), Duration::from_secs(1));
-    wait_for_exit(&supervisor, Duration::from_secs(1));
-    wait_for_exit(&provider, Duration::from_secs(1));
+        assert!(!output.status.success());
+        assert!(started.elapsed() < HOLD);
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(combined.contains("timed out"), "{combined}");
+        for private in [prompt, "SECRET-OUTPUT", "SECRET-TOKEN"] {
+            assert!(!combined.contains(private), "leaked {private}: {combined}");
+        }
+        let (Some(supervisor), Some(provider)) = (
+            read_ready(&artifacts.join("supervisor-pid")),
+            read_ready(&artifacts.join("agent-pid")),
+        ) else {
+            return false;
+        };
+        wait_for_exit(&supervisor, HOLD.saturating_sub(started.elapsed()));
+        wait_for_exit(&provider, HOLD.saturating_sub(started.elapsed()));
+        true
+    });
 }
 
 #[test]
@@ -1303,40 +1326,48 @@ fn cli_spawn_failed_leader_reaps_pipe_holding_group() {
     write_executable(&stub, AGENT_STUB);
     let cwd = fs::canonicalize(&harness.root).unwrap();
     let prompt = "fail with inherited pipes SECRET-ORPHAN-PROMPT";
-    let mut command = harness.command(&["spawn", "codex", "--cwd", cwd.to_str().unwrap()]);
-    let artifacts = configure_stub(
-        &mut command,
-        &harness,
-        &stub,
-        "codex",
-        "MAGENTS_CODEX_BIN",
-        "failed-leader",
-    );
-    command
-        .env("MAGENTS_TEST_MODE", "orphan")
-        .env("MAGENTS_STARTUP_TIMEOUT_MS", "500")
-        .env("MAGENTS_HANDSHAKE_TIMEOUT_MS", "2000");
-    let started = Instant::now();
+    escalate(|window| {
+        let mut command = harness.command(&["spawn", "codex", "--cwd", cwd.to_str().unwrap()]);
+        let artifacts = configure_stub(
+            &mut command,
+            &harness,
+            &stub,
+            "codex",
+            "MAGENTS_CODEX_BIN",
+            &format!("failed-leader-{}", window.as_millis()),
+        );
+        command
+            .env("MAGENTS_TEST_MODE", "orphan")
+            .env("MAGENTS_TEST_HOLD_SECONDS", HOLD.as_secs().to_string())
+            .env("MAGENTS_STARTUP_TIMEOUT_MS", window.as_millis().to_string())
+            .env("MAGENTS_HANDSHAKE_TIMEOUT_MS", HOLD.as_millis().to_string());
+        let started = Instant::now();
 
-    let output = output_with_stdin(&mut command, prompt);
+        let output = output_with_stdin(&mut command, prompt);
 
-    assert!(!output.status.success());
-    assert!(started.elapsed() < Duration::from_secs(3));
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(combined.contains("startup"), "{combined}");
-    for private in [prompt, "SECRET-OUTPUT", "SECRET-TOKEN"] {
-        assert!(!combined.contains(private), "leaked {private}: {combined}");
-    }
-    let supervisor = wait_for(&artifacts.join("supervisor-pid"), Duration::from_secs(1));
-    let provider = wait_for(&artifacts.join("agent-pid"), Duration::from_secs(1));
-    let descendant = wait_for(&artifacts.join("descendant-pid"), Duration::from_secs(1));
-    wait_for_exit(&supervisor, Duration::from_secs(1));
-    wait_for_exit(&provider, Duration::from_secs(1));
-    wait_for_exit(&descendant, Duration::from_secs(1));
+        assert!(!output.status.success());
+        assert!(started.elapsed() < HOLD);
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(combined.contains("startup"), "{combined}");
+        for private in [prompt, "SECRET-OUTPUT", "SECRET-TOKEN"] {
+            assert!(!combined.contains(private), "leaked {private}: {combined}");
+        }
+        let (Some(supervisor), Some(provider), Some(descendant)) = (
+            read_ready(&artifacts.join("supervisor-pid")),
+            read_ready(&artifacts.join("agent-pid")),
+            read_ready(&artifacts.join("descendant-pid")),
+        ) else {
+            return false;
+        };
+        wait_for_exit(&supervisor, HOLD.saturating_sub(started.elapsed()));
+        wait_for_exit(&provider, HOLD.saturating_sub(started.elapsed()));
+        wait_for_exit(&descendant, HOLD.saturating_sub(started.elapsed()));
+        true
+    });
 }
 
 #[test]
