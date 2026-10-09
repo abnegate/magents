@@ -733,12 +733,7 @@ fn launch_new(
         }
         Agent::OpenCode => {
             let mut command = agent_command(homes, agent, cwd);
-            command
-                .arg("run")
-                .arg("--format")
-                .arg("json")
-                .arg("--dir")
-                .arg(cwd);
+            command.arg("run").arg("--format").arg("json");
             Ok((
                 launch(command, agent, message, reporter)?,
                 None,
@@ -835,8 +830,6 @@ fn launch_resume(
                 .arg("run")
                 .arg("--format")
                 .arg("json")
-                .arg("--dir")
-                .arg(cwd)
                 .arg("--session")
                 .arg(session_id);
             Transport::OpenCodeRun
@@ -875,7 +868,7 @@ fn agent_command(homes: &Homes, agent: Agent, cwd: &Path) -> Command {
         Agent::OpenCode => ("MAGENTS_OPENCODE_BIN", "opencode"),
     };
     let mut command = Command::new(std::env::var_os(variable).unwrap_or_else(|| fallback.into()));
-    command.current_dir(cwd);
+    command.current_dir(cwd).env("PWD", cwd);
     isolate_environment(&mut command, homes, agent);
     command
 }
@@ -1492,6 +1485,7 @@ mod tests {
         "MAGENTS_TEST_STDIN",
         "MAGENTS_TEST_REPLY",
         "OPENCODE_SESSION_ID",
+        "PWD",
         "XDG_CONFIG_HOME",
         "XDG_DATA_HOME",
     ];
@@ -1899,6 +1893,43 @@ esac
             assert_eq!(fs::read_to_string(&stdin).unwrap(), message);
         }
         assert!(records(&homes).unwrap().is_empty());
+    }
+
+    #[test]
+    fn opencode_runs_in_cwd_without_the_removed_dir_flag() {
+        let _guard = test_env::lock(ENV);
+        let directory = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(directory.path());
+        let cwd = fs::canonicalize(directory.path()).unwrap();
+        let binary = directory.path().join("opencode");
+        let args = directory.path().join("args");
+        let working = directory.path().join("pwd");
+        test_env::write_executable(
+            &binary,
+            &format!(
+                "printf '%s\\n' \"$@\" > '{}'\nprintf '%s' \"$PWD\" > '{}'\ncat >/dev/null\nprintf '%s\\n' '{{\"type\":\"step_start\",\"sessionID\":\"ses_v2\"}}'",
+                args.display(),
+                working.display()
+            ),
+        );
+        unsafe {
+            std::env::set_var("MAGENTS_OPENCODE_BIN", &binary);
+            std::env::set_var("PWD", "/");
+        }
+
+        for (session_id, expected) in [
+            (None, "run\n--format\njson\n"),
+            (Some("ses_v2"), "run\n--format\njson\n--session\nses_v2\n"),
+        ] {
+            let (session, launch) =
+                supervise_request(&homes, Agent::OpenCode, &cwd, session_id, "private prompt")
+                    .unwrap();
+            launch.wait();
+
+            assert_eq!(session.session_id, "ses_v2");
+            assert_eq!(fs::read_to_string(&args).unwrap(), expected);
+            assert_eq!(fs::read_to_string(&working).unwrap(), cwd.to_string_lossy());
+        }
     }
 
     #[test]

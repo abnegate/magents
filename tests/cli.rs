@@ -867,7 +867,7 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
                 "--prompt-file",
                 "/dev/stdin",
             ],
-            "opencode" => vec!["run", "--format", "json", "--dir", cwd_text],
+            "opencode" => vec!["run", "--format", "json"],
             "gemini" => vec!["--output-format", "stream-json", "--session-id", session_id],
             "copilot" => vec!["--output-format", "json", "--session-id", session_id],
             _ => unreachable!(),
@@ -1391,16 +1391,13 @@ fn cli_installs_cursor_and_opencode_mcp_config() {
     );
     let cursor = fs::read_to_string(harness.root.join(".cursor/mcp.json")).unwrap();
     assert!(cursor.contains("magents"));
-    let opencode = fs::read_to_string(harness.root.join(".config/opencode/opencode.json")).unwrap();
+    let opencode_config = harness.root.join("opencode-config").join("opencode");
+    let opencode = fs::read_to_string(opencode_config.join("opencode.json")).unwrap();
     assert!(opencode.contains("magents"));
     assert!(opencode.contains("\"type\": \"local\""));
     assert!(harness.root.join(".cursor/skills/learn/SKILL.md").is_file());
-    assert!(
-        harness
-            .root
-            .join(".config/opencode/skills/learn/SKILL.md")
-            .is_file()
-    );
+    assert!(opencode_config.join("skills/learn/SKILL.md").is_file());
+    assert!(!harness.root.join(".config/opencode").exists());
 }
 
 #[test]

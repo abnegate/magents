@@ -254,9 +254,107 @@ fn read_opencode(session: &crate::model::Session, path: &Path) -> Result<Vec<Tur
     read_opencode_json_tree(path, &session.session_id)
 }
 
+const OPENCODE_MESSAGES: &str = "session_message";
+const OPENCODE_LEGACY_MESSAGES: &str = "message";
+const OPENCODE_LEGACY_PARTS: &str = "part";
+
 fn read_opencode_sqlite(path: &Path, session_id: &str) -> Result<Vec<Turn>> {
     let connection =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let tables = opencode_tables(&connection)?;
+    if tables.iter().any(|table| table == OPENCODE_MESSAGES) {
+        let turns = read_opencode_session_messages(&connection, session_id)?;
+        if !turns.is_empty() || !tables.iter().any(|table| table == OPENCODE_LEGACY_MESSAGES) {
+            return Ok(turns);
+        }
+    }
+    read_opencode_legacy_messages(&connection, session_id)
+}
+
+fn opencode_tables(connection: &rusqlite::Connection) -> Result<Vec<String>> {
+    Ok(connection
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn read_opencode_session_messages(
+    connection: &rusqlite::Connection,
+    session_id: &str,
+) -> Result<Vec<Turn>> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT type, data FROM {OPENCODE_MESSAGES}
+         WHERE session_id = ?1
+         ORDER BY seq"
+    ))?;
+    let rows = statement.query_map([session_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut turns = Vec::new();
+    for row in rows {
+        let (kind, raw) = row?;
+        let Ok(data) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        match kind.as_str() {
+            "user" => {
+                let text = data.get("text").and_then(Value::as_str).unwrap_or_default();
+                push_turn(&mut turns, "user", text.to_string(), Vec::new());
+            }
+            "assistant" => {
+                let mut text = Vec::new();
+                let mut tools = Vec::new();
+                for content in data
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    match content.get("type").and_then(Value::as_str) {
+                        Some("text") => text.extend(content.get("text").and_then(Value::as_str)),
+                        Some("tool") => tools.extend(
+                            content
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        ),
+                        _ => {}
+                    }
+                }
+                push_turn(&mut turns, "assistant", text.join("\n"), tools);
+            }
+            _ => {}
+        }
+    }
+    Ok(turns)
+}
+
+fn push_turn(turns: &mut Vec<Turn>, role: &str, text: String, tools: Vec<String>) {
+    if text.is_empty() && tools.is_empty() {
+        return;
+    }
+    match turns.last_mut() {
+        Some(last) if last.role == role => {
+            if !text.is_empty() {
+                if !last.text.is_empty() {
+                    last.text.push('\n');
+                }
+                last.text.push_str(&text);
+            }
+            last.tools.extend(tools);
+        }
+        _ => turns.push(Turn {
+            role: role.to_string(),
+            text,
+            tools,
+        }),
+    }
+}
+
+fn read_opencode_legacy_messages(
+    connection: &rusqlite::Connection,
+    session_id: &str,
+) -> Result<Vec<Turn>> {
     let mut statement = connection.prepare(
         "SELECT m.data, p.data
          FROM message m
@@ -288,7 +386,9 @@ fn read_opencode_sqlite(path: &Path, session_id: &str) -> Result<Vec<Turn>> {
         };
     for row in rows {
         let (message_raw, part_raw) = row?;
-        let message: Value = serde_json::from_str(&message_raw)?;
+        let Ok(message) = serde_json::from_str::<Value>(&message_raw) else {
+            continue;
+        };
         let role = message
             .get("role")
             .and_then(Value::as_str)
@@ -298,8 +398,7 @@ fn read_opencode_sqlite(path: &Path, session_id: &str) -> Result<Vec<Turn>> {
             flush(&mut current_role, &mut text, &mut tools, &mut turns);
             current_role = role;
         }
-        if let Some(part_raw) = part_raw {
-            let part: Value = serde_json::from_str(&part_raw)?;
+        if let Some(part) = part_raw.and_then(|raw| serde_json::from_str::<Value>(&raw).ok()) {
             match part.get("type").and_then(Value::as_str) {
                 Some("text") => {
                     if let Some(chunk) = part.get("text").and_then(Value::as_str) {
@@ -410,22 +509,28 @@ fn scan_opencode_db(path: &Path, session_id: &str, needle: &str) -> Option<(usiz
     let connection =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .ok()?;
-    let mut statement = connection
-        .prepare("SELECT data FROM part WHERE session_id = ?1")
-        .ok()?;
-    let rows = statement
-        .query_map([session_id], |row| row.get::<_, String>(0))
-        .ok()?;
+    let tables = opencode_tables(&connection).ok()?;
     let mut matches = 0usize;
     let mut snippet = None;
-    for row in rows.flatten() {
-        let lowered = row.to_ascii_lowercase();
-        if !lowered.contains(needle) {
+    for source in [OPENCODE_MESSAGES, OPENCODE_LEGACY_PARTS] {
+        if !tables.iter().any(|table| table == source) {
             continue;
         }
-        matches += 1;
-        if snippet.is_none() {
-            snippet = Some(extract_snippet(&row, needle));
+        let mut statement = connection
+            .prepare(&format!("SELECT data FROM {source} WHERE session_id = ?1"))
+            .ok()?;
+        let rows = statement
+            .query_map([session_id], |row| row.get::<_, String>(0))
+            .ok()?;
+        for row in rows.flatten() {
+            let lowered = row.to_ascii_lowercase();
+            if !lowered.contains(needle) {
+                continue;
+            }
+            matches += 1;
+            if snippet.is_none() {
+                snippet = Some(extract_snippet(&row, needle));
+            }
         }
     }
     snippet.map(|snippet| (matches, snippet))
