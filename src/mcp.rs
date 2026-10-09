@@ -18,6 +18,7 @@ use std::path::PathBuf;
 #[derive(Clone)]
 pub struct Magents {
     homes: Homes,
+    host: Option<Agent>,
     #[allow(dead_code)]
     tool_router: rmcp::handler::server::router::tool::ToolRouter<Magents>,
 }
@@ -201,9 +202,10 @@ pub struct LearnStateArgs {
 
 #[tool_router]
 impl Magents {
-    pub fn new(homes: Homes) -> Self {
+    pub fn new(homes: Homes, host: Option<Agent>) -> Self {
         Self {
             homes,
+            host,
             tool_router: Self::tool_router(),
         }
     }
@@ -314,7 +316,13 @@ impl Magents {
         self.wrap((|| {
             let agent = Agent::parse(&args.agent)
                 .ok_or_else(|| Error::msg(format!("unknown agent: {}", args.agent)))?;
-            spawn::run(&self.homes, agent, &args.message, args.cwd.as_deref())
+            spawn::run(
+                &self.homes,
+                &self.caller(),
+                agent,
+                &args.message,
+                args.cwd.as_deref(),
+            )
         })())
     }
 
@@ -327,7 +335,7 @@ impl Magents {
     ) -> Result<CallToolResult, McpError> {
         self.wrap(mailbox::send(
             &self.homes,
-            &Caller::from_env(),
+            &self.caller(),
             &args.to,
             &args.message,
         ))
@@ -339,7 +347,7 @@ impl Magents {
     fn inbox(&self, Parameters(args): Parameters<InboxArgs>) -> Result<CallToolResult, McpError> {
         self.wrap(mailbox::inbox(
             &self.homes,
-            &Caller::from_env(),
+            &self.caller(),
             InboxQuery {
                 session_id: args.session_id,
                 agent: args.agent.as_deref().and_then(Agent::parse),
@@ -353,7 +361,7 @@ impl Magents {
     fn ack(&self, Parameters(args): Parameters<AckArgs>) -> Result<CallToolResult, McpError> {
         self.wrap(mailbox::ack(
             &self.homes,
-            &Caller::from_env(),
+            &self.caller(),
             args.through.as_deref(),
             args.session_id.as_deref(),
             args.agent.as_deref().and_then(Agent::parse),
@@ -369,7 +377,7 @@ impl Magents {
     ) -> Result<CallToolResult, McpError> {
         self.wrap(mailbox::await_reply(
             &self.homes,
-            &Caller::from_env(),
+            &self.caller(),
             args.from.as_deref(),
             args.timeout_secs,
             args.session_id.as_deref(),
@@ -383,7 +391,7 @@ impl Magents {
     fn reply(&self, Parameters(args): Parameters<ReplyArgs>) -> Result<CallToolResult, McpError> {
         self.wrap(mailbox::reply(
             &self.homes,
-            &Caller::from_env(),
+            &self.caller(),
             &args.message,
             args.mail_id.as_deref(),
             args.session_id.as_deref(),
@@ -457,7 +465,7 @@ impl Magents {
         self.wrap(notes::get_note(
             &self.homes,
             args.cwd.as_deref(),
-            &Caller::from_env(),
+            &self.caller(),
         ))
     }
 
@@ -469,15 +477,15 @@ impl Magents {
             &self.homes,
             args.content.as_deref().unwrap_or(""),
             args.cwd.as_deref(),
-            &Caller::from_env(),
+            &self.caller(),
         ))
     }
 
     #[tool(
-        description = "Who this MCP connection is running as. Resolves session id from env, messaging socket, or a unique live cwd match."
+        description = "Who this MCP connection is running as. Resolves session id from env, messaging socket, or a unique live cwd match. Falls back to the host process when the harness passes no session env."
     )]
     fn whoami(&self) -> Result<CallToolResult, McpError> {
-        self.wrap(Ok(identify(&self.homes)))
+        self.wrap(Ok(identify(&self.homes, &self.caller())))
     }
 
     #[tool(
@@ -489,6 +497,7 @@ impl Magents {
     ) -> Result<CallToolResult, McpError> {
         self.wrap(handoff::run(
             &self.homes,
+            &self.caller(),
             args.to.as_deref(),
             args.reason.as_deref(),
         ))
@@ -612,6 +621,18 @@ fn learn_state_action(
 }
 
 impl Magents {
+    fn caller(&self) -> Caller {
+        let caller = Caller::from_env().with_host(self.host);
+        if caller.agent.is_none() || caller.session_id.is_some() {
+            return caller;
+        }
+        let identity = identify(&self.homes, &caller);
+        Caller {
+            agent: identity.agent,
+            session_id: identity.session_id,
+        }
+    }
+
     fn wrap<T: serde::Serialize>(
         &self,
         result: crate::error::Result<T>,
@@ -662,7 +683,9 @@ impl ServerHandler for Magents {
 pub async fn serve() -> anyhow::Result<()> {
     use rmcp::ServiceExt;
     let homes = Homes::from_env();
-    let service = Magents::new(homes).serve(rmcp::transport::stdio()).await?;
+    let service = Magents::new(homes, crate::host::detect())
+        .serve(rmcp::transport::stdio())
+        .await?;
     service.waiting().await?;
     Ok(())
 }
@@ -673,7 +696,7 @@ mod tests {
         HandoffArgs, InboxArgs, ListArgs, Magents, MemoryCreateArgs, MemorySearchArgs, SearchArgs,
         SendArgs, SessionArgs, SpawnArgs,
     };
-    use crate::handoff_tests::World;
+    use crate::handoff_tests::{CLAUDE_ID, World};
     use crate::test_env;
     use rmcp::ServerHandler;
     use rmcp::handler::server::wrapper::Parameters;
@@ -725,7 +748,7 @@ mod tests {
             std::env::set_var("GROK_SESSION_ID", "01testgrok0000000000000000");
         }
         let world = World::new();
-        let server = Magents::new(world.homes.clone());
+        let server = Magents::new(world.homes.clone(), None);
 
         let info = server.get_info();
         assert_eq!(info.server_info.name, "magents");
@@ -876,7 +899,7 @@ mod tests {
             unsafe { std::env::remove_var(key) };
         }
         let world = World::new();
-        let server = Magents::new(world.homes.clone());
+        let server = Magents::new(world.homes.clone(), None);
         let listed = server
             .list_sessions(Parameters(ListArgs {
                 agent: None,
@@ -917,7 +940,7 @@ mod tests {
             }
             fs::write(&path, "DEFAULT_LIMIT_NEEDLE\n").unwrap();
         }
-        let server = Magents::new(homes);
+        let server = Magents::new(homes, None);
         let empty = server
             .search_memories(Parameters(MemorySearchArgs {
                 query: "   ".into(),
@@ -945,7 +968,7 @@ mod tests {
         use crate::homes::Homes;
 
         let homes = Homes::isolated(tempfile::tempdir().unwrap().path());
-        let server = Magents::new(homes);
+        let server = Magents::new(homes, None);
         let missing = server
             .create_memory(Parameters(MemoryCreateArgs {
                 agent: "  ".into(),
@@ -984,6 +1007,58 @@ mod tests {
     }
 
     #[test]
+    fn host_process_identifies_caller_without_session_env() {
+        let _guard = test_env::lock(CALLER_ENV);
+        for key in CALLER_ENV {
+            unsafe { std::env::remove_var(key) };
+        }
+        let world = World::new();
+
+        let anonymous = Magents::new(world.homes.clone(), None);
+        let unknown: serde_json::Value =
+            serde_json::from_str(&text(anonymous.whoami().unwrap())).unwrap();
+        assert!(unknown["agent"].is_null(), "{unknown}");
+        assert!(unknown["session_id"].is_null(), "{unknown}");
+
+        let hosted = Magents::new(world.homes.clone(), Some(crate::model::Agent::Claude));
+        let known: serde_json::Value =
+            serde_json::from_str(&text(hosted.whoami().unwrap())).unwrap();
+        assert_eq!(known["agent"], "claude", "{known}");
+        assert_eq!(known["session_id"], CLAUDE_ID, "{known}");
+
+        let sent = hosted
+            .send_message(Parameters(SendArgs {
+                to: "grok:latest".into(),
+                message: "hosted ping".into(),
+            }))
+            .unwrap();
+        let sent = text(sent);
+        assert!(sent.contains("mail_id"), "{sent}");
+        let mailbox = world.homes.mailbox_dir();
+        let stamped = walkdir::WalkDir::new(&mailbox)
+            .into_iter()
+            .flatten()
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| std::fs::read_to_string(entry.path()).unwrap())
+            .collect::<String>();
+        assert!(
+            stamped.contains(&format!("\"from_session\":\"{CLAUDE_ID}\"")),
+            "{stamped}"
+        );
+
+        let inbox = hosted
+            .inbox(Parameters(InboxArgs {
+                session_id: None,
+                agent: None,
+                since: None,
+                unread_only: Some(true),
+            }))
+            .unwrap();
+        let inbox: serde_json::Value = serde_json::from_str(&text(inbox)).unwrap();
+        assert_eq!(inbox["unread"], 0, "{inbox}");
+    }
+
+    #[test]
     fn coordination_tools() {
         use super::{AckArgs, AwaitArgs, MemoryReadArgs, NoteArgs, ReplyArgs, StopArgs};
 
@@ -992,7 +1067,7 @@ mod tests {
             std::env::set_var("GROK_SESSION_ID", "01testgrok0000000000000000");
         }
         let world = World::new();
-        let server = Magents::new(world.homes.clone());
+        let server = Magents::new(world.homes.clone(), None);
 
         let digest = server
             .session_digest(Parameters(SessionArgs {
@@ -1143,7 +1218,7 @@ mod tests {
             "---\nname: unused\ndescription: never\n---\n",
         )
         .unwrap();
-        let server = Magents::new(homes.clone());
+        let server = Magents::new(homes.clone(), None);
         let unknown = server
             .learn_collect(Parameters(LearnCollectArgs {
                 estimate: Some(true),

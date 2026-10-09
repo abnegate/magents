@@ -58,7 +58,7 @@ fn resolve_cwd(homes: &Homes, cwd: Option<&str>, caller: &Caller) -> Result<Stri
     if let Some(cwd) = cwd.map(str::trim).filter(|value| !value.is_empty()) {
         return canonicalize_cwd(cwd);
     }
-    let identity = identify(homes);
+    let identity = identify(homes, caller);
     if let Some(cwd) = identity.cwd.as_deref().filter(|value| !value.is_empty()) {
         return canonicalize_cwd(cwd);
     }
@@ -311,7 +311,7 @@ mod tests {
         .unwrap();
         assert!(!from_caller.exists);
 
-        let from_process = get_note(&homes, None, &caller()).unwrap();
+        let from_process = get_note(&homes, None, &Caller::from_env()).unwrap();
         assert_eq!(
             from_process.cwd,
             std::fs::canonicalize(std::env::current_dir().unwrap())

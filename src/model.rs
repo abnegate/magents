@@ -525,4 +525,11 @@ impl Caller {
             session_id: None,
         }
     }
+
+    pub fn with_host(self, host: Option<Agent>) -> Self {
+        Self {
+            agent: self.agent.or(host),
+            session_id: self.session_id,
+        }
+    }
 }

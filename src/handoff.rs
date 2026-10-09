@@ -16,10 +16,14 @@ pub struct Report {
     pub mail_id: String,
 }
 
-pub fn run(homes: &Homes, to: Option<&str>, reason: Option<&str>) -> Result<Report> {
-    let caller = Caller::from_env();
-    let from = source_session(homes, &caller)?;
-    send(homes, &caller, from, to, reason)
+pub fn run(
+    homes: &Homes,
+    caller: &Caller,
+    to: Option<&str>,
+    reason: Option<&str>,
+) -> Result<Report> {
+    let from = source_session(homes, caller)?;
+    send(homes, caller, from, to, reason)
 }
 
 fn send(
@@ -245,6 +249,7 @@ mod tests {
         let world = World::new();
         let report = run(
             &world.homes,
+            &Caller::from_env(),
             Some("cursor:Test rounds"),
             Some("switching windows"),
         )
@@ -274,7 +279,7 @@ mod tests {
             std::env::remove_var("CLAUDE_PROJECT_DIR");
         }
         let world = World::new();
-        let report = run(&world.homes, None, Some("auto peer")).unwrap();
+        let report = run(&world.homes, &Caller::from_env(), None, Some("auto peer")).unwrap();
         assert_ne!(report.to.agent, Agent::Grok);
         assert_eq!(report.reason, "auto peer");
     }
@@ -409,7 +414,13 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("cannot detect"));
         unsafe { std::env::set_var("GROK_SESSION_ID", "01testgrok0000000000000000") };
-        let report = run(&world.homes, Some("cursor:Test rounds"), Some("   ")).unwrap();
+        let report = run(
+            &world.homes,
+            &Caller::from_env(),
+            Some("cursor:Test rounds"),
+            Some("   "),
+        )
+        .unwrap();
         assert_eq!(report.reason, "handoff");
     }
 }

@@ -4,6 +4,7 @@ pub mod discover;
 pub mod error;
 pub mod handoff;
 pub mod homes;
+pub mod host;
 pub mod install;
 pub mod learn;
 pub mod mailbox;

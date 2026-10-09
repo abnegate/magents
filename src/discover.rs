@@ -186,8 +186,7 @@ pub fn resolve(homes: &Homes, reference: &str) -> Result<Session> {
     }
 }
 
-pub fn identify(homes: &Homes) -> Identity {
-    let caller = Caller::from_env();
+pub fn identify(homes: &Homes, caller: &Caller) -> Identity {
     let env_cwd = env_project_dir();
 
     if let (Some(agent), Some(session_id)) = (caller.agent, caller.session_id.as_deref())
@@ -244,7 +243,7 @@ pub fn identify(homes: &Homes) -> Identity {
 
     Identity {
         agent: caller.agent,
-        session_id: caller.session_id,
+        session_id: caller.session_id.clone(),
         cwd: env_cwd,
         branch: None,
         session: None,
@@ -1982,7 +1981,7 @@ mod tests {
         unsafe {
             std::env::set_var("CLAUDE_CODE_MESSAGING_SOCKET", &socket);
         }
-        let who = identify(&world.homes);
+        let who = identify(&world.homes, &crate::model::Caller::from_env());
         assert_eq!(
             who.session_id.as_deref(),
             Some("11111111-1111-4111-8111-111111111111")
@@ -1992,7 +1991,7 @@ mod tests {
             std::env::remove_var("CLAUDE_CODE_MESSAGING_SOCKET");
             std::env::set_var("CLAUDE_PROJECT_DIR", "/tmp/unrelated-identify-cwd");
         }
-        let who = identify(&world.homes);
+        let who = identify(&world.homes, &crate::model::Caller::from_env());
         assert_eq!(
             who.session_id.as_deref(),
             Some("11111111-1111-4111-8111-111111111111")
