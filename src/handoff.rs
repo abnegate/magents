@@ -1,5 +1,5 @@
 use crate::deliver;
-use crate::discover::{ListFilter, list_sessions, resolve};
+use crate::discover::{ListFilter, identify, list_sessions, resolve};
 use crate::error::{Error, Result};
 use crate::homes::Homes;
 use crate::mailbox;
@@ -141,11 +141,13 @@ fn source_session(homes: &Homes, caller: &Caller) -> Result<Session> {
         }
         return resolve(homes, session_id);
     }
-    if let Some(agent) = caller.agent {
-        return resolve(homes, &format!("{agent}:latest"));
+    if caller.agent.is_some()
+        && let Some(session) = identify(homes, caller).session
+    {
+        return Ok(session);
     }
     Err(Error::msg(
-        "cannot detect this session; pass to= or call from a Claude/Codex/Cursor/Grok/OpenCode MCP session",
+        "cannot detect this session; call from a single live Claude/Codex/Cursor/Grok/OpenCode session or set its session id",
     ))
 }
 
@@ -285,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn source_session_uses_agent_latest() {
+    fn source_session_uses_unique_live_match() {
         let _guard = test_env::lock(ENV);
         unsafe {
             std::env::remove_var("GROK_SESSION_ID");
@@ -301,6 +303,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(session.agent, Agent::Claude);
+    }
+
+    #[test]
+    fn source_session_rejects_ambiguous_caller_instead_of_latest() {
+        let _guard = test_env::lock(ENV);
+        unsafe {
+            std::env::remove_var("GROK_SESSION_ID");
+            std::env::remove_var("CLAUDE_PROJECT_DIR");
+        }
+        let world = World::new();
+        assert!(resolve(&world.homes, "opencode:latest").is_ok());
+        let error = source_session(
+            &world.homes,
+            &Caller {
+                agent: Some(Agent::OpenCode),
+                session_id: None,
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot detect"), "{error}");
     }
 
     #[test]
