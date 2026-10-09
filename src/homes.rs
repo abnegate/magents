@@ -142,9 +142,15 @@ pub fn pid_alive(pid: u32) -> bool {
     }
 }
 
+#[cfg(target_os = "macos")]
+const PGREP_ARGS: &[&str] = &["-a", "-x"];
+#[cfg(not(target_os = "macos"))]
+const PGREP_ARGS: &[&str] = &["-x"];
+
 pub fn named_process_alive(name: &str) -> bool {
     Command::new("pgrep")
-        .args(["-x", name])
+        .args(PGREP_ARGS)
+        .arg(name)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -181,6 +187,25 @@ mod tests {
         assert!(!pid_alive(0));
         assert!(pid_alive(std::process::id()));
         assert!(!named_process_alive("magents-no-such-process-xyz"));
+        let parent = std::process::Command::new("ps")
+            .args([
+                "-o",
+                "comm=",
+                "-p",
+                &std::os::unix::process::parent_id().to_string(),
+            ])
+            .output()
+            .unwrap();
+        let parent = String::from_utf8_lossy(&parent.stdout);
+        let parent = std::path::Path::new(parent.trim())
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            named_process_alive(&parent),
+            "ancestor {parent} should count as alive"
+        );
     }
 
     #[test]
