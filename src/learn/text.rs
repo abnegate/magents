@@ -1,3 +1,4 @@
+use abnegate_secret::REDACTED;
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -63,21 +64,11 @@ pub static SLASH_STOP: &[&str] = &[
     "system-reminder",
 ];
 
-fn secret_res() -> &'static [Regex] {
-    static RES: OnceLock<Vec<Regex>> = OnceLock::new();
-    RES.get_or_init(|| {
-        [
-            r#"\b(?:xai|sk|ghp|gho|ghu|ghs|glpat|npm)[-_][A-Za-z0-9_\-]{16,}\b"#,
-            r#"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"#,
-            r#"\bxox[abpsr]-\d[A-Za-z0-9-]{20,}\b"#,
-            r#"\b[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\b"#,
-            r#"(?i)\bbearer\s+[A-Za-z0-9_\-./+=]{20,}"#,
-            r#"(?i)\b(?:token|api[_-]?key|secret|password|passwd)\b\s*[:=]\s*['"]?[A-Za-z0-9_\-./+=]{16,}"#,
-            r#"\b[a-f0-9]{64,}\b"#,
-        ]
-        .into_iter()
-        .map(|pattern| Regex::new(pattern).expect("secret pattern"))
-        .collect()
+fn secret_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\b(?:(?:xai|sk)[-_][A-Za-z0-9_\-]{16,}|[a-f0-9]{64,})\b")
+            .expect("secret pattern")
     })
 }
 
@@ -117,17 +108,9 @@ fn skill_path_re() -> &'static Regex {
 }
 
 pub fn redact(text: &str) -> String {
-    let mut out = text.to_string();
-    for regex in secret_res() {
-        out = regex
-            .replace_all(&out, |caps: &regex::Captures| {
-                let matched = caps.get(0).map(|m| m.as_str()).unwrap_or("");
-                let keep = matched.chars().take(8).collect::<String>();
-                format!("{keep}...[redacted]")
-            })
-            .into_owned();
-    }
-    out
+    secret_re()
+        .replace_all(&abnegate_secret::redact(text), REDACTED)
+        .into_owned()
 }
 
 pub fn cap_turn(text: &str) -> String {
@@ -263,11 +246,7 @@ pub fn frontmatter(path: &Path) -> (String, String) {
     if !head.starts_with("---") {
         return (fallback, String::new());
     }
-    let mut parts = head.splitn(3, "---");
-    let _ = parts.next();
-    let Some(fm) = parts.next() else {
-        return (fallback, String::new());
-    };
+    let fm = head.split("---").nth(1).unwrap_or_default();
     let name = line_value(fm, "name").unwrap_or(fallback);
     let description = description_value(fm);
     (name, description)
@@ -435,9 +414,51 @@ mod tests {
     #[test]
     fn redacts_prefixed_keys_and_hex() {
         let text = "key sk-abc123def456ghi789 token=abcdefghijklmnop1 and deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
-        let out = redact(text);
-        assert!(out.contains("...[redacted]"), "{out}");
-        assert!(!out.contains("sk-abc123def456ghi789"));
+        assert_eq!(
+            redact(text),
+            "key [REDACTED] token=[REDACTED] and [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn redacts_bare_hex_digests() {
+        let digest = "0123456789abcdef".repeat(4);
+        assert_eq!(redact(&format!("sha {digest} done")), "sha [REDACTED] done");
+        assert_eq!(redact(&digest[..63]), &digest[..63]);
+    }
+
+    #[test]
+    fn redacts_xai_keys() {
+        assert_eq!(
+            redact("XAI_API_KEY xai-abcdefghij0123456789 xai_ABCDEFGHIJ0123456789"),
+            "XAI_API_KEY [REDACTED] [REDACTED]"
+        );
+        assert_eq!(redact("xai-short"), "xai-short");
+    }
+
+    #[test]
+    fn redacts_bare_sk_keys() {
+        assert_eq!(
+            redact("key sk_0123456789abcdef0123456789abcdef0123456789abcdef"),
+            "key [REDACTED]"
+        );
+        assert_eq!(redact("key sk_abcdefghij0123456789"), "key [REDACTED]");
+        assert_eq!(
+            redact("live sk_live_abcdefghij0123456789 dash sk-abcdefghij0123456789"),
+            "live [REDACTED] dash [REDACTED]"
+        );
+        assert_eq!(redact("sk_short"), "sk_short");
+    }
+
+    #[test]
+    fn keeps_commit_shas() {
+        let sha = "4f8494f0c3d4d85eac6c6d7c7a0cc2c54eb5b8a1";
+        assert_eq!(redact(&format!("commit {sha}")), format!("commit {sha}"));
+    }
+
+    #[test]
+    fn leaves_clean_text_untouched() {
+        assert_eq!(redact("nothing to see here"), "nothing to see here");
     }
 
     #[test]
@@ -471,6 +492,7 @@ mod tests {
         assert_eq!(mcp_server(""), None);
         assert_eq!(mcp_server("mcp__"), None);
         assert!(slash_commands("src/lib.rs").is_empty());
+        assert!(slash_commands("run /foo/bar").is_empty());
         assert!(slash_commands("</summary> and </task-id>").is_empty());
         assert_eq!(
             slash_commands("<command-name>/shepherd</command-name>"),
@@ -549,6 +571,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frontmatter(&command).0, "shepherd");
+        let unnamed = dir.path().join("commands").join("unnamed.md");
+        fs::write(&unnamed, "---\ndescription: x\n---\n").unwrap();
+        assert_eq!(
+            frontmatter(&unnamed),
+            ("unnamed".to_string(), "x".to_string())
+        );
+        let spaced = dir.path().join("spaced").join("SKILL.md");
+        fs::create_dir_all(spaced.parent().unwrap()).unwrap();
+        fs::write(
+            &spaced,
+            "---\nname: spaced\ndescription: >\n  first\n\n  second\n---\n",
+        )
+        .unwrap();
+        assert_eq!(frontmatter(&spaced).1, "first second");
         let nameless = dir.path().join("commands").join("audit.md");
         fs::write(&nameless, "Run the audit.\n").unwrap();
         assert_eq!(frontmatter(&nameless).0, "audit");
@@ -600,8 +636,9 @@ mod tests {
 
     #[test]
     fn redacts_bearer_and_akia() {
-        let out =
-            redact("Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345 AKIAIOSFODNN7EXAMPLE");
-        assert!(out.contains("...[redacted]"), "{out}");
+        assert_eq!(
+            redact("Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345 AKIAIOSFODNN7EXAMPLE"),
+            "Authorization: Bearer [REDACTED] [REDACTED]"
+        );
     }
 }
