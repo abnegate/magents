@@ -7,12 +7,12 @@
     "url": "https://github.com/abnegate/magents",
     "source": "github"
   },
-  "version": "0.13.1",
+  "version": "0.13.2",
   "websiteUrl": "https://abnegate.github.io/magents",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/abnegate/magents:0.13.1",
+      "identifier": "ghcr.io/abnegate/magents:0.13.2",
       "transport": {
         "type": "stdio"
       }
