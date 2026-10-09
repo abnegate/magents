@@ -313,11 +313,26 @@ mod tests {
             std::env::remove_var("CLAUDE_PROJECT_DIR");
         }
         let world = World::new();
-        assert!(resolve(&world.homes, "opencode:latest").is_ok());
+        let parent = std::os::unix::process::parent_id();
+        std::fs::write(
+            world
+                .homes
+                .claude
+                .join("sessions")
+                .join(format!("{parent}.json")),
+            serde_json::json!({
+                "pid": parent,
+                "sessionId": "44444444-4444-4444-8444-444444444444",
+                "cwd": "/tmp/second-claude",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(resolve(&world.homes, "claude:latest").is_ok());
         let error = source_session(
             &world.homes,
             &Caller {
-                agent: Some(Agent::OpenCode),
+                agent: Some(Agent::Claude),
                 session_id: None,
             },
         )

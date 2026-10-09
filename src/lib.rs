@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod memory;
 pub mod model;
 pub mod notes;
+pub mod requester;
 pub mod runtime;
 pub mod spawn;
 pub mod transcript;

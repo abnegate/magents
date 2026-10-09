@@ -191,9 +191,17 @@ pub fn identify(homes: &Homes, caller: &Caller) -> Identity {
 
     if let (Some(agent), Some(session_id)) = (caller.agent, caller.session_id.as_deref())
         && !session_id.is_empty()
-        && let Ok(session) = resolve(homes, &format!("{agent}:{session_id}"))
     {
-        return identity_from_session(session);
+        if let Ok(session) = resolve(homes, &format!("{agent}:{session_id}")) {
+            return identity_from_session(session);
+        }
+        return Identity {
+            agent: Some(agent),
+            session_id: Some(session_id.to_string()),
+            cwd: env_cwd,
+            branch: None,
+            session: None,
+        };
     }
 
     let live = list_sessions(
