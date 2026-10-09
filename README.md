@@ -103,6 +103,13 @@ folder under [`plugins/`](plugins/).
 | Claude Code | [`plugins/claude`](plugins/claude) |
 | Codex | [`plugins/codex`](plugins/codex) |
 | Cursor | [`plugins/cursor`](plugins/cursor) |
+| Gemini CLI | repo root ([`gemini-extension.json`](gemini-extension.json)) |
+
+Gemini CLI installs the extension straight from this repository:
+
+```bash
+gemini extensions install https://github.com/abnegate/magents
+```
 
 Details and marketplace notes: [`plugins/README.md`](plugins/README.md).
 
@@ -130,6 +137,20 @@ For Grok and Codex only, point a host at the binary yourself:
 [mcp_servers.magents]
 command = "/path/to/magents"
 args = ["mcp"]
+```
+
+For Cline, open **MCP Servers → Configure MCP Servers** and add this to
+`cline_mcp_settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "magents": {
+      "command": "magents",
+      "args": ["mcp"]
+    }
+  }
+}
 ```
 
 Restart the agent session (or refresh `/mcps`) so the tools appear.
