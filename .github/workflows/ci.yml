@@ -158,6 +158,49 @@ jobs:
           RELEASE_SHA: ${{ github.sha }}
         run: .github/scripts/commit-release-version.sh
 
+  # Trusted Publishing: crates.io trusts this workflow (ci.yml) for
+  # abnegate/magents, so no registry token is stored in the repo. The crate
+  # must already exist on crates.io for OIDC to work, and a version that is
+  # already published is skipped so a manual publish never fails the release.
+  publish-crate:
+    name: crates.io
+    if: github.event_name == 'release' && !contains(github.event.release.tag_name, '-')
+    needs: [fmt, clippy, test, coverage, prepare-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-version
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: stable
+      - name: Check whether this version is already on crates.io
+        id: exists
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          if curl -fsS -A "magents-release (github.com/abnegate/magents)" "https://crates.io/api/v1/crates/magents/${VERSION}" >/dev/null 2>&1; then
+            echo "::notice::magents ${VERSION} is already on crates.io; skipping"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        if: steps.exists.outputs.published == 'false'
+        id: auth
+      - name: Publish
+        if: steps.exists.outputs.published == 'false'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked --allow-dirty
+
   docker:
     name: Docker
     if: github.event_name != 'release'

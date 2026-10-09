@@ -84,6 +84,13 @@ docker run --rm --user "$(id -u):$(id -g)" \
   ghcr.io/abnegate/magents list --live
 ```
 
+### Cargo
+
+```bash
+cargo install magents --locked
+magents install --all
+```
+
 ### From source
 
 ```bash
