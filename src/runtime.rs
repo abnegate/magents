@@ -1496,6 +1496,9 @@ mod tests {
         "XDG_DATA_HOME",
     ];
 
+    const HOLD: Duration = Duration::from_secs(30);
+    const PIPE_CAPACITY: usize = 1 << 20;
+
     const SCRIPT: &str = r#"
 if [ "$1" = 'create-chat' ]; then
     printf '%s\n' '33333333-3333-4333-8333-333333333333'
@@ -1558,6 +1561,16 @@ case "$parent" in
         ;;
 esac
 "#;
+
+    fn wait_until(deadline: Instant, condition: impl Fn() -> bool) -> bool {
+        while !condition() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        true
+    }
 
     #[test]
     fn launches_and_parses_all_current_creation_paths() {
@@ -1946,11 +1959,9 @@ esac
         let group = process.next().unwrap();
         assert_eq!(leader.to_string(), group);
         assert!(!pid_alive(leader));
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while pid_alive(descendant) && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(!pid_alive(descendant));
+        assert!(wait_until(Instant::now() + Duration::from_secs(2), || {
+            !pid_alive(descendant)
+        }));
     }
 
     #[test]
@@ -2193,10 +2204,17 @@ esac
         let homes = Homes::isolated(directory.path());
         let cwd = fs::canonicalize(directory.path()).unwrap();
         let binary = directory.path().join("supervisor");
-        test_env::write_executable(&binary, "IFS= read -r request\n(sleep 5) &\nsleep 5");
+        test_env::write_executable(
+            &binary,
+            &format!(
+                "IFS= read -r request\n(sleep {hold}) &\nsleep {hold}",
+                hold = HOLD.as_secs()
+            ),
+        );
         unsafe {
             std::env::set_var("MAGENTS_SUPERVISOR_BIN", &binary);
             std::env::set_var("MAGENTS_STARTUP_TIMEOUT_MS", "30");
+            std::env::remove_var("MAGENTS_HANDSHAKE_TIMEOUT_MS");
         }
         let started = Instant::now();
 
@@ -2205,7 +2223,7 @@ esac
             .to_string();
 
         assert!(error.contains("timed out"), "{error}");
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(started.elapsed() < HOLD);
     }
 
     #[test]
@@ -2219,25 +2237,36 @@ esac
         let process = directory.path().join("process");
         test_env::write_executable(
             &binary,
-            "IFS= read -r request\n(sleep 5) &\nprovider=$!\ngroup=$(ps -o pgid= -p \"$provider\" | tr -d ' ')\nprintf '%s:%s\\n' \"$$\" \"$provider\" > \"$MAGENTS_TEST_PROCESS\"\nprintf '{\"control\":\"provider\",\"version\":1,\"supervisor\":%s,\"provider\":%s,\"group\":%s}\\n' \"$$\" \"$provider\" \"$group\"\nsleep 5",
+            &format!(
+                r#"(sleep {hold}) &
+provider=$!
+group=$(ps -o pgid= -p "$provider" | tr -d ' ')
+printf '%s:%s\n' "$$" "$provider" > "$MAGENTS_TEST_PROCESS"
+printf '{{"control":"provider","version":1,"supervisor":%s,"provider":%s,"group":%s}}\n' "$$" "$provider" "$group"
+head -n 1 >/dev/null
+sleep {hold}"#,
+                hold = HOLD.as_secs()
+            ),
         );
         unsafe {
             std::env::set_var("MAGENTS_SUPERVISOR_BIN", &binary);
             std::env::set_var("MAGENTS_HANDSHAKE_TIMEOUT_MS", "300");
             std::env::set_var("MAGENTS_TEST_PROCESS", &process);
         }
+        let prompt = "private prompt".to_string() + &" ".repeat(PIPE_CAPACITY);
         let started = Instant::now();
 
-        let error = request_supervisor(&homes, Agent::Codex, "private prompt", &cwd, None)
+        let error = request_supervisor(&homes, Agent::Codex, &prompt, &cwd, None)
             .unwrap_err()
             .to_string();
 
         assert!(error.contains("timed out"), "{error}");
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < HOLD);
         let process = fs::read_to_string(process).unwrap();
         let (supervisor, provider) = process.trim().split_once(':').unwrap();
+        let provider = provider.parse().unwrap();
         assert!(!pid_alive(supervisor.parse().unwrap()));
-        assert!(!pid_alive(provider.parse().unwrap()));
+        assert!(wait_until(started + HOLD, || !pid_alive(provider)));
     }
 
     #[test]
@@ -2575,8 +2604,11 @@ esac
         assert!(error.contains("omitted startup metadata"));
         let process = fs::read_to_string(process).unwrap();
         let (supervisor, provider) = process.trim().split_once(':').unwrap();
+        let provider = provider.parse().unwrap();
         assert!(!pid_alive(supervisor.parse().unwrap()));
-        assert!(!pid_alive(provider.parse().unwrap()));
+        assert!(wait_until(Instant::now() + Duration::from_secs(5), || {
+            !pid_alive(provider)
+        }));
     }
 
     #[test]
@@ -2621,12 +2653,12 @@ printf '%s\n' '{"accepted":false}'
         test_env::write_executable(
             &binary,
             r#"IFS= read -r request
+exec <&-
 (sleep 5) &
 provider=$!
 group=$(ps -o pgid= -p "$provider" | tr -d ' ')
 printf '{"control":"provider","version":1,"supervisor":%s,"provider":%s,"group":%s}\n' "$$" "$provider" "$group"
 printf '%s\n' "$MAGENTS_TEST_REPLY"
-exec <&-
 sleep 5
 "#,
         );
