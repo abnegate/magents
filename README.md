@@ -129,7 +129,7 @@ skipping hosts whose required binaries are unavailable:
 - Claude Code (`claude mcp add --scope user magents -- magents mcp`)
 - Codex (`codex mcp add magents -- magents mcp`)
 - Cursor (`~/.cursor/mcp.json`)
-- OpenCode (`~/.config/opencode/opencode.json`)
+- OpenCode (`$XDG_CONFIG_HOME/opencode/opencode.json`, default `~/.config/opencode`)
 - Gemini CLI (`gemini mcp add -s user magents magents mcp`)
 - GitHub Copilot CLI (`copilot mcp add magents -- magents mcp`)
 

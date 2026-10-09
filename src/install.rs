@@ -138,13 +138,8 @@ pub fn install_spec_with(
         spec.skip_missing,
         &mut notes,
         "opencode",
-        || install_opencode(&exe),
-        Some(host_skills(
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(".config")
-                .join("opencode"),
-        )),
+        || install_opencode(&homes, &exe),
+        Some(host_skills(homes.opencode_config.clone())),
         &mut on_event,
     )?;
     try_host(
@@ -457,12 +452,8 @@ fn install_cursor(exe: &Path) -> Result<HostStatus> {
     })
 }
 
-fn install_opencode(exe: &Path) -> Result<HostStatus> {
-    let path = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".config")
-        .join("opencode")
-        .join("opencode.json");
+fn install_opencode(homes: &Homes, exe: &Path) -> Result<HostStatus> {
+    let path = homes.opencode_config.join("opencode.json");
     let command = exe.to_str().unwrap_or("magents").to_string();
     with_config_update(&path, |raw| {
         let mut root = json_object_from_bytes(&path, raw)?;
@@ -941,6 +932,7 @@ mod tests {
         "COPILOT_HOME",
         "GROK_HOME",
         "CODEX_HOME",
+        "XDG_CONFIG_HOME",
     ];
 
     fn with_home(run: impl FnOnce(&Path, &Path)) {
@@ -956,6 +948,7 @@ mod tests {
             std::env::remove_var("CODEX_HOME");
             std::env::remove_var("GEMINI_CLI_HOME");
             std::env::remove_var("COPILOT_HOME");
+            std::env::remove_var("XDG_CONFIG_HOME");
         }
         run(home, &bin);
     }
@@ -1032,6 +1025,23 @@ mod tests {
                 home.join(".config/opencode/skills/learn/SKILL.md")
                     .is_file()
             );
+        });
+    }
+
+    #[test]
+    fn install_opencode_honours_xdg_config_home() {
+        with_home(|home, _bin| {
+            let config = home.join("xdg-config");
+            unsafe { std::env::set_var("XDG_CONFIG_HOME", &config) };
+
+            let notes = install(false, false, false, false, true, false, false).unwrap();
+
+            assert_eq!(host(&notes, "opencode").status, HostStatus::Added);
+            let opencode = fs::read_to_string(config.join("opencode/opencode.json")).unwrap();
+            assert!(opencode.contains("\"magents\""), "{opencode}");
+            assert!(config.join("opencode/skills/magents/SKILL.md").is_file());
+            assert!(config.join("opencode/skills/learn/SKILL.md").is_file());
+            assert!(!home.join(".config/opencode").exists());
         });
     }
 
