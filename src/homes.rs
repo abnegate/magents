@@ -184,6 +184,7 @@ mod tests {
 
     #[test]
     fn pid_and_named_process() {
+        let _guard = test_env::lock(&["PATH"]);
         assert!(!pid_alive(0));
         assert!(pid_alive(std::process::id()));
         assert!(!named_process_alive("magents-no-such-process-xyz"));
