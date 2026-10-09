@@ -947,18 +947,34 @@ fn opencode_channel_database(path: &Path) -> bool {
 
 fn discover_opencode_sqlite(db: &Path, live_app: bool) -> Result<Option<Vec<Session>>> {
     let connection = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let stores_sessions = connection.query_row(
-        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session')",
-        [],
-        |row| row.get::<_, bool>(0),
-    )?;
-    if !stores_sessions {
+    let tables = connection
+        .prepare(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table' AND name IN ('session', 'session_v2')
+             ORDER BY name",
+        )?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if tables.is_empty() {
         return Ok(None);
     }
-    let mut statement = connection.prepare(
+    let mut sessions = Vec::new();
+    for table in tables {
+        sessions.extend(read_opencode_sessions(&connection, &table, db, live_app)?);
+    }
+    Ok(Some(sessions))
+}
+
+fn read_opencode_sessions(
+    connection: &Connection,
+    table: &str,
+    db: &Path,
+    live_app: bool,
+) -> Result<Vec<Session>> {
+    let mut statement = connection.prepare(&format!(
         "SELECT id, parent_id, directory, title, time_updated, time_archived
-         FROM session",
-    )?;
+         FROM {table}"
+    ))?;
     let rows = statement.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -995,7 +1011,7 @@ fn discover_opencode_sqlite(db: &Path, live_app: bool) -> Result<Option<Vec<Sess
             tmux: None,
         });
     }
-    Ok(Some(sessions))
+    Ok(sessions)
 }
 
 fn discover_opencode_json(homes: &Homes) -> Result<Vec<Session>> {

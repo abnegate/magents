@@ -1463,3 +1463,229 @@ fn digest_files_cwd_branch_identify_and_reply() {
     .unwrap();
     assert_eq!(note.content, "shared plan");
 }
+
+fn write_opencode_v2(path: &Path) -> Connection {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let connection = Connection::open(path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE session_v2 (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                parent_id TEXT,
+                slug TEXT NOT NULL,
+                directory TEXT NOT NULL,
+                title TEXT,
+                version TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                time_archived INTEGER
+            );
+            CREATE TABLE session_message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+    connection
+}
+
+fn insert_opencode_v2_message(
+    connection: &Connection,
+    session: &str,
+    seq: i64,
+    kind: &str,
+    data: serde_json::Value,
+) {
+    connection
+        .execute(
+            "INSERT INTO session_message VALUES (?1, ?2, ?3, ?4, ?4, ?4, ?5)",
+            rusqlite::params![
+                format!("msg_{session}_{seq}"),
+                session,
+                kind,
+                seq,
+                data.to_string()
+            ],
+        )
+        .unwrap();
+}
+
+#[test]
+fn reads_opencode_v2_sessions_transcripts_search_and_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let homes = Homes::isolated(dir.path());
+    let db = homes.opencode.join("opencode.db");
+    let connection = write_opencode_v2(&db);
+    for (id, parent, title) in [
+        ("ses_v2_parity", None, Some("v2 parity checks")),
+        ("ses_v2_child", Some("ses_v2_parity"), Some("child")),
+        ("ses_v2_untitled", None, None),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO session_v2 VALUES (?1, 'proj', ?2, 'slug', '/tmp/v2', ?3, '2.0.23', 1, ?4, NULL)",
+                rusqlite::params![id, parent, title, now_ms()],
+            )
+            .unwrap();
+    }
+    insert_opencode_v2_message(
+        &connection,
+        "ses_v2_parity",
+        1,
+        "user",
+        json!({"text": "run the flux-capacitor parity checks"}),
+    );
+    insert_opencode_v2_message(
+        &connection,
+        "ses_v2_parity",
+        2,
+        "assistant",
+        json!({"content": [
+            {"type": "reasoning", "text": "private reasoning"},
+            {"type": "text", "text": "checking src/lib.rs"},
+            {"type": "tool", "id": "call_1", "name": "read", "state": {"status": "completed"}}
+        ]}),
+    );
+    insert_opencode_v2_message(
+        &connection,
+        "ses_v2_parity",
+        3,
+        "assistant",
+        json!({"content": [{"type": "text", "text": "all v2 checks passed"}]}),
+    );
+    insert_opencode_v2_message(
+        &connection,
+        "ses_v2_parity",
+        4,
+        "synthetic",
+        json!({"text": "synthetic reminder"}),
+    );
+    insert_opencode_v2_message(
+        &connection,
+        "ses_v2_parity",
+        5,
+        "idle",
+        json!({"outcome": "succeeded"}),
+    );
+
+    let sessions = list_sessions(
+        &homes,
+        &ListFilter {
+            agent: Some(Agent::OpenCode),
+            include_archived: true,
+            limit: 0,
+            ..ListFilter::default()
+        },
+    )
+    .unwrap();
+    let mut ids = sessions
+        .iter()
+        .map(|session| session.session_id.as_str())
+        .collect::<Vec<_>>();
+    ids.sort();
+    assert_eq!(ids, vec!["ses_v2_parity", "ses_v2_untitled"]);
+    let parity = sessions
+        .iter()
+        .find(|session| session.session_id == "ses_v2_parity")
+        .unwrap();
+    assert_eq!(parity.title.as_deref(), Some("v2 parity checks"));
+    assert_eq!(parity.cwd.as_deref(), Some("/tmp/v2"));
+    assert_eq!(parity.transcript_path.as_deref(), Some(db.as_path()));
+
+    let transcript = read_transcript(&homes, "opencode:ses_v2_parity", 10).unwrap();
+    let turns = transcript
+        .turns
+        .iter()
+        .map(|turn| (turn.role.as_str(), turn.text.as_str(), turn.tools.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        turns,
+        vec![
+            ("user", "run the flux-capacitor parity checks", Vec::new()),
+            (
+                "assistant",
+                "checking src/lib.rs\nall v2 checks passed",
+                vec!["read".to_string()]
+            ),
+        ]
+    );
+
+    let hits =
+        search_transcripts(&homes, "flux-capacitor", Some(Agent::OpenCode), false, 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    let files = crate::transcript::files_touched(&homes, "opencode:ses_v2_parity").unwrap();
+    assert!(
+        files.files.iter().any(|file| file == "src/lib.rs"),
+        "{:?}",
+        files.files
+    );
+}
+
+#[test]
+fn opencode_mid_migration_lists_once_and_falls_back_to_legacy_messages() {
+    let dir = tempfile::tempdir().unwrap();
+    let homes = Homes::isolated(dir.path());
+    let db = homes.opencode.join("opencode.db");
+    let connection = write_opencode_v2(&db);
+    connection
+        .execute_batch(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT,
+                directory TEXT,
+                title TEXT,
+                time_updated INTEGER,
+                time_archived INTEGER
+            );
+            CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+            CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO session VALUES ('ses_migrating', NULL, '/tmp/v1', 'migrating checks', 1, NULL)",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO session_v2 VALUES ('ses_migrating', 'proj', NULL, 'slug', '/tmp/v1', 'migrating checks', '2.0.23', 1, ?1, NULL)",
+            [now_ms()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO message VALUES ('msg_v1', 'ses_migrating', 1, ?1)",
+            [json!({"role": "user"}).to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO part VALUES ('prt_v1', 'msg_v1', 'ses_migrating', 1, ?1)",
+            [json!({"type": "text", "text": "legacy only history"}).to_string()],
+        )
+        .unwrap();
+
+    let sessions = list_sessions(
+        &homes,
+        &ListFilter {
+            agent: Some(Agent::OpenCode),
+            include_archived: true,
+            limit: 0,
+            ..ListFilter::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(sessions.len(), 1);
+    let transcript = read_transcript(&homes, "opencode:ses_migrating", 10).unwrap();
+    assert_eq!(transcript.turns.len(), 1);
+    assert_eq!(transcript.turns[0].text, "legacy only history");
+    let hits = search_transcripts(&homes, "legacy only", Some(Agent::OpenCode), false, 10).unwrap();
+    assert_eq!(hits.len(), 1);
+}
