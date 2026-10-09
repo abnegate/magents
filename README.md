@@ -248,7 +248,7 @@ CI runs format, clippy (`-D warnings`), the full test suite, and a 98% line-cove
 
 ## Requirements
 
-- Rust 1.88+
+- Rust 1.97+
 - macOS or Linux (Claude UDS inject is Unix-only)
 
 ## License

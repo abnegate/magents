@@ -67,17 +67,67 @@ pub(crate) mod test_env {
         let _guard = lock(&[]);
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn warm_waits_for_open_writers() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("script");
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\n[ -z \"${{{WARM}-}}\" ] || exit 0\nexit 1\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let warming = {
+            let path = path.clone();
+            std::thread::spawn(move || warm(&path))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(writer);
+        warming.join().unwrap();
+    }
+
     pub fn write_executable(path: &std::path::Path, script: &str) {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        std::fs::write(path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::write(
+            path,
+            format!("#!/bin/sh\n[ -z \"${{{WARM}-}}\" ] || exit 0\n{script}\n"),
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mut permissions = std::fs::metadata(path).unwrap().permissions();
             permissions.set_mode(0o755);
             std::fs::set_permissions(path, permissions).unwrap();
+            warm(path);
         }
+    }
+
+    const WARM: &str = "MAGENTS_TEST_WARM";
+
+    #[cfg(unix)]
+    fn warm(path: &std::path::Path) {
+        use std::io::ErrorKind::ExecutableFileBusy;
+        use std::process::{Command, Stdio};
+        let mut command = Command::new(path);
+        command
+            .env_clear()
+            .env(WARM, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // Linux refuses the exec while another test thread's fork still holds the write descriptor.
+        let status = loop {
+            match command.status() {
+                Err(error) if error.kind() == ExecutableFileBusy => std::thread::yield_now(),
+                result => break result.unwrap(),
+            }
+        };
+        assert!(status.success(), "warming {} failed", path.display());
     }
 }

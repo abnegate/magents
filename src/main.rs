@@ -1,3 +1,4 @@
+use abnegate_secret::sanitize;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use magents::discover::{ListFilter, identify, list_sessions, resolve};
@@ -1005,12 +1006,6 @@ impl Drop for Spinner {
     }
 }
 
-fn sanitize(text: &str) -> String {
-    text.chars()
-        .filter(|&ch| ch == '\n' || ch == '\t' || !ch.is_control())
-        .collect()
-}
-
 fn row(mark: &str, label: &str, primary: &str) -> String {
     format!(
         "  {mark} {label:<8}  {}",
@@ -1707,10 +1702,13 @@ mod tests {
 
     #[test]
     fn sanitizes_terminal_controls_from_human_text() {
-        assert_eq!(super::sanitize("ok\x1b[31mRED\x07"), "ok[31mRED");
-        assert_eq!(super::clip("hello\x1b[0m world", 20), "hello[0m world");
-        assert!(super::row("✓", "note", "hi\x1b[2J").contains("hi[2J"));
-        assert!(!super::row("✓", "note", "hi\x1b[2J").contains('\u{1b}'));
+        assert_eq!(super::clip("hello\x1b[0m world", 20), "hello world");
+        assert_eq!(super::row("✓", "note", "hi\x1b[2J"), "  ✓ note      hi");
+        assert_eq!(super::row("✓", "note", "a\rb"), "  ✓ note      a b");
+        assert_eq!(
+            super::sub("token ghp_0123456789abcdefghij"),
+            "              token [REDACTED]"
+        );
         let style = super::Style {
             stderr_tty: false,
             color: false,
