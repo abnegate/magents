@@ -867,7 +867,7 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
                 "--prompt-file",
                 "/dev/stdin",
             ],
-            "opencode" => vec!["run", "--format", "json", "--dir", cwd_text],
+            "opencode" => vec!["run", "--format", "json"],
             "gemini" => vec!["--output-format", "stream-json", "--session-id", session_id],
             "copilot" => vec!["--output-format", "json", "--session-id", session_id],
             _ => unreachable!(),
