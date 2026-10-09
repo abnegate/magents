@@ -1689,3 +1689,69 @@ fn opencode_mid_migration_lists_once_and_falls_back_to_legacy_messages() {
     let hits = search_transcripts(&homes, "legacy only", Some(Agent::OpenCode), false, 10).unwrap();
     assert_eq!(hits.len(), 1);
 }
+
+#[test]
+fn opencode_transcripts_skip_malformed_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let homes = Homes::isolated(dir.path());
+    let connection = write_opencode_v2(&homes.opencode.join("opencode.db"));
+    connection
+        .execute_batch(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+            CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);",
+        )
+        .unwrap();
+    for id in ["ses_v2_corrupt", "ses_v1_corrupt"] {
+        connection
+            .execute(
+                "INSERT INTO session_v2 VALUES (?1, 'proj', NULL, 'slug', '/tmp/v2', ?1, '2.0.23', 1, ?2, NULL)",
+                rusqlite::params![id, now_ms()],
+            )
+            .unwrap();
+    }
+    insert_opencode_v2_message(
+        &connection,
+        "ses_v2_corrupt",
+        1,
+        "user",
+        json!({"text": "before corruption"}),
+    );
+    connection
+        .execute(
+            "INSERT INTO session_message VALUES ('msg_bad', 'ses_v2_corrupt', 'assistant', 2, 2, 2, '{not json')",
+            [],
+        )
+        .unwrap();
+    insert_opencode_v2_message(
+        &connection,
+        "ses_v2_corrupt",
+        3,
+        "assistant",
+        json!({"content": [{"type": "text", "text": "after corruption"}]}),
+    );
+    connection
+        .execute_batch(
+            "INSERT INTO message VALUES ('msg_bad', 'ses_v1_corrupt', 1, '{not json');
+            INSERT INTO message VALUES ('msg_user', 'ses_v1_corrupt', 2, '{\"role\":\"user\"}');
+            INSERT INTO part VALUES ('prt_bad', 'msg_user', 'ses_v1_corrupt', 2, '{not json');
+            INSERT INTO part VALUES ('prt_user', 'msg_user', 'ses_v1_corrupt', 3, '{\"type\":\"text\",\"text\":\"legacy survives\"}');",
+        )
+        .unwrap();
+
+    let v2 = read_transcript(&homes, "opencode:ses_v2_corrupt", 10).unwrap();
+    let v2 = v2
+        .turns
+        .iter()
+        .map(|turn| (turn.role.as_str(), turn.text.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        v2,
+        vec![
+            ("user", "before corruption"),
+            ("assistant", "after corruption")
+        ]
+    );
+    let v1 = read_transcript(&homes, "opencode:ses_v1_corrupt", 10).unwrap();
+    assert_eq!(v1.turns.len(), 1);
+    assert_eq!(v1.turns[0].text, "legacy survives");
+}

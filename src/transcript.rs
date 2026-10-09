@@ -293,7 +293,9 @@ fn read_opencode_session_messages(
     let mut turns = Vec::new();
     for row in rows {
         let (kind, raw) = row?;
-        let data: Value = serde_json::from_str(&raw)?;
+        let Ok(data) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
         match kind.as_str() {
             "user" => {
                 let text = data.get("text").and_then(Value::as_str).unwrap_or_default();
@@ -384,7 +386,9 @@ fn read_opencode_legacy_messages(
         };
     for row in rows {
         let (message_raw, part_raw) = row?;
-        let message: Value = serde_json::from_str(&message_raw)?;
+        let Ok(message) = serde_json::from_str::<Value>(&message_raw) else {
+            continue;
+        };
         let role = message
             .get("role")
             .and_then(Value::as_str)
@@ -394,8 +398,7 @@ fn read_opencode_legacy_messages(
             flush(&mut current_role, &mut text, &mut tools, &mut turns);
             current_role = role;
         }
-        if let Some(part_raw) = part_raw {
-            let part: Value = serde_json::from_str(&part_raw)?;
+        if let Some(part) = part_raw.and_then(|raw| serde_json::from_str::<Value>(&raw).ok()) {
             match part.get("type").and_then(Value::as_str) {
                 Some("text") => {
                     if let Some(chunk) = part.get("text").and_then(Value::as_str) {
