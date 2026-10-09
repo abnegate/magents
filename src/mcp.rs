@@ -196,7 +196,8 @@ pub struct LearnStateArgs {
     pub decision: Option<String>,
     pub undo: Option<String>,
     pub run_name: Option<String>,
-    pub paths: Option<Vec<String>>,
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 #[tool_router]
@@ -588,21 +589,11 @@ fn learn_state_action(
             let run_name = args
                 .run_name
                 .ok_or_else(|| Error::msg("run_name is required"))?;
-            let paths: Vec<PathBuf> = args
-                .paths
-                .unwrap_or_default()
-                .into_iter()
-                .map(PathBuf::from)
-                .collect();
+            let paths: Vec<PathBuf> = args.paths.into_iter().map(PathBuf::from).collect();
             crate::learn::trash(homes, &run_name, &paths)
         }
         "restrict" => {
-            let paths: Vec<PathBuf> = args
-                .paths
-                .unwrap_or_default()
-                .into_iter()
-                .map(PathBuf::from)
-                .collect();
+            let paths: Vec<PathBuf> = args.paths.into_iter().map(PathBuf::from).collect();
             crate::learn::restrict(&paths)
         }
         _ => Err(Error::msg(
@@ -709,6 +700,51 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn array_schema_violations(
+        schema: &serde_json::Value,
+        path: &str,
+        violations: &mut Vec<String>,
+    ) {
+        match schema {
+            serde_json::Value::Object(object) => {
+                match object.get("type") {
+                    Some(serde_json::Value::String(kind)) if kind == "array" => {
+                        if !object.contains_key("items") {
+                            violations.push(format!("{path}: array without items"));
+                        }
+                    }
+                    Some(serde_json::Value::Array(kinds))
+                        if kinds.iter().any(|kind| kind == "array" || kind == "object") =>
+                    {
+                        violations.push(format!("{path}: nullable composite type {kinds:?}"));
+                    }
+                    _ => {}
+                }
+                for (key, value) in object {
+                    array_schema_violations(value, &format!("{path}.{key}"), violations);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for (index, value) in values.iter().enumerate() {
+                    array_schema_violations(value, &format!("{path}[{index}]"), violations);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn tool_input_schemas_are_gemini_compatible() {
+        let tools = Magents::tool_router().list_all();
+        assert!(!tools.is_empty());
+        let mut violations = Vec::new();
+        for tool in tools {
+            let schema = serde_json::Value::Object((*tool.input_schema).clone());
+            array_schema_violations(&schema, &tool.name, &mut violations);
+        }
+        assert!(violations.is_empty(), "{violations:#?}");
     }
 
     #[test]
@@ -1219,7 +1255,7 @@ mod tests {
                 decision: None,
                 undo: None,
                 run_name: None,
-                paths: None,
+                paths: Vec::new(),
             }))
             .unwrap();
         let state_text = text(state);
@@ -1264,7 +1300,7 @@ mod tests {
                 decision: None,
                 undo: None,
                 run_name: None,
-                paths: None,
+                paths: Vec::new(),
             }))
             .unwrap();
         assert!(text(set).contains("running"));
@@ -1285,7 +1321,7 @@ mod tests {
                 decision: None,
                 undo: None,
                 run_name: None,
-                paths: None,
+                paths: Vec::new(),
             }))
             .unwrap();
         assert_eq!(bad_status.is_error, Some(true));
@@ -1306,7 +1342,7 @@ mod tests {
                 decision: None,
                 undo: None,
                 run_name: None,
-                paths: None,
+                paths: Vec::new(),
             }))
             .unwrap();
         assert_eq!(missing_set.is_error, Some(true));
@@ -1327,7 +1363,7 @@ mod tests {
                 decision: Some("deferred".into()),
                 undo: None,
                 run_name: None,
-                paths: None,
+                paths: Vec::new(),
             }))
             .unwrap();
         assert!(text(decided).contains("deferred"));
@@ -1350,7 +1386,7 @@ mod tests {
                 decision: None,
                 undo: None,
                 run_name: Some("mcp-run".into()),
-                paths: Some(vec![homes.grok.join("skills/gone").display().to_string()]),
+                paths: vec![homes.grok.join("skills/gone").display().to_string()],
             }))
             .unwrap();
         assert!(text(trashed).contains("moved"));
@@ -1371,7 +1407,7 @@ mod tests {
                 decision: None,
                 undo: None,
                 run_name: None,
-                paths: None,
+                paths: Vec::new(),
             }))
             .unwrap();
         assert_eq!(missing_trash.is_error, Some(true));
@@ -1394,7 +1430,7 @@ mod tests {
                 decision: None,
                 undo: None,
                 run_name: None,
-                paths: Some(vec![secret.display().to_string()]),
+                paths: vec![secret.display().to_string()],
             }))
             .unwrap();
         assert!(text(restricted).contains("restricted"));
@@ -1415,7 +1451,7 @@ mod tests {
                 decision: None,
                 undo: None,
                 run_name: None,
-                paths: None,
+                paths: Vec::new(),
             }))
             .unwrap();
         let cleared = text(cleared);
@@ -1437,7 +1473,7 @@ mod tests {
                 decision: None,
                 undo: None,
                 run_name: None,
-                paths: None,
+                paths: Vec::new(),
             }))
             .unwrap();
         assert_eq!(bad.is_error, Some(true));
