@@ -13,6 +13,8 @@ pub struct Homes {
     /// Cursor Desktop application support.
     pub cursor_app: PathBuf,
     pub opencode: PathBuf,
+    /// Database chosen with `OPENCODE_DB`, resolved against the OpenCode data directory.
+    pub opencode_database: Option<PathBuf>,
     pub opencode_config: PathBuf,
     pub gemini: PathBuf,
     pub copilot: PathBuf,
@@ -42,6 +44,9 @@ impl Homes {
         let opencode = env_path("OPENCODE_DATA")
             .or_else(|| env_path("XDG_DATA_HOME").map(|path| path.join("opencode")))
             .unwrap_or_else(|| home.join(".local").join("share").join("opencode"));
+        let opencode_database = std::env::var_os("OPENCODE_DB")
+            .filter(|value| !value.is_empty() && value != ":memory:")
+            .map(|value| opencode.join(value));
         let opencode_config = env_path("XDG_CONFIG_HOME")
             .map(|path| path.join("opencode"))
             .unwrap_or_else(|| home.join(".config").join("opencode"));
@@ -65,6 +70,7 @@ impl Homes {
             cursor,
             cursor_app,
             opencode,
+            opencode_database,
             opencode_config,
             gemini,
             copilot,
@@ -107,6 +113,7 @@ impl Homes {
             cursor: root.join("cursor"),
             cursor_app: root.join("cursor-app"),
             opencode: root.join("opencode"),
+            opencode_database: None,
             opencode_config: root.join("opencode-config").join("opencode"),
             gemini: root.join("gemini"),
             copilot: root.join("copilot"),
@@ -164,6 +171,7 @@ mod tests {
         "XDG_DATA_HOME",
         "MAGENTS_HOME",
         "OPENCODE_DATA",
+        "OPENCODE_DB",
         "GEMINI_CLI_HOME",
         "COPILOT_HOME",
     ];
@@ -194,6 +202,7 @@ mod tests {
             std::env::set_var("GEMINI_CLI_HOME", root.join("gm"));
             std::env::set_var("COPILOT_HOME", root.join("cp"));
             std::env::remove_var("OPENCODE_DATA");
+            std::env::set_var("OPENCODE_DB", "opencode-custom.db");
         }
         let homes = Homes::from_env();
         assert_eq!(homes.claude, root.join("c"));
@@ -203,6 +212,10 @@ mod tests {
         assert_eq!(homes.cursor, root.join("cursor-data"));
         assert_eq!(homes.cursor_app, root.join("cursor-app"));
         assert_eq!(homes.opencode, root.join("xdg").join("opencode"));
+        assert_eq!(
+            homes.opencode_database,
+            Some(root.join("xdg").join("opencode").join("opencode-custom.db"))
+        );
         assert_eq!(homes.opencode_data_home(), root.join("xdg"));
         assert_eq!(
             homes.opencode_config,
@@ -219,13 +232,16 @@ mod tests {
 
         unsafe {
             std::env::set_var("OPENCODE_DATA", root.join("legacy").join("opencode"));
+            std::env::set_var("OPENCODE_DB", root.join("absolute.db"));
         }
         let homes = Homes::from_env();
         assert_eq!(homes.opencode, root.join("legacy").join("opencode"));
+        assert_eq!(homes.opencode_database, Some(root.join("absolute.db")));
         assert_eq!(homes.opencode_data_home(), root.join("legacy"));
 
         unsafe {
             std::env::remove_var("OPENCODE_DATA");
+            std::env::set_var("OPENCODE_DB", ":memory:");
             std::env::remove_var("XDG_DATA_HOME");
             std::env::remove_var("XDG_CONFIG_HOME");
             std::env::remove_var("CLAUDE_CONFIG_DIR");
@@ -256,6 +272,7 @@ mod tests {
             root.join(".local").join("share").join("opencode")
         );
         assert_eq!(homes.opencode_config, root.join(".config").join("opencode"));
+        assert_eq!(homes.opencode_database, None);
         assert_eq!(homes.opencode_data_home(), root.join(".local/share"));
         assert!(homes.magents.ends_with("magents"));
 
@@ -279,6 +296,7 @@ mod tests {
             cursor: PathBuf::new(),
             cursor_app: PathBuf::new(),
             opencode: PathBuf::new(),
+            opencode_database: None,
             opencode_config: PathBuf::new(),
             gemini: PathBuf::new(),
             copilot: PathBuf::new(),
