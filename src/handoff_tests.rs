@@ -16,7 +16,7 @@ use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
 
-const CLAUDE_ID: &str = "11111111-1111-4111-8111-111111111111";
+pub(crate) const CLAUDE_ID: &str = "11111111-1111-4111-8111-111111111111";
 const CURSOR_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const CURSOR_SUB_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const GROK_ID: &str = "01testgrok0000000000000000";
@@ -1400,7 +1400,7 @@ fn digest_files_cwd_branch_identify_and_reply() {
     assert!(none.is_empty());
 
     unsafe { std::env::set_var("CLAUDE_PROJECT_DIR", "/tmp/dr") };
-    let who = identify(&world.homes);
+    let who = identify(&world.homes, &crate::model::Caller::from_env());
     assert_eq!(who.agent, Some(Agent::Claude));
     assert_eq!(who.session_id.as_deref(), Some(CLAUDE_ID));
     unsafe { std::env::remove_var("CLAUDE_PROJECT_DIR") };

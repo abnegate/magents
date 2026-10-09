@@ -683,7 +683,13 @@ async fn try_run(command: Option<Command>, json: bool) -> anyhow::Result<()> {
             let agent = parse_agent(&agent)?;
             let prompt = read_prompt(&prompt_file)?;
             let report = with_spin(json, "spawn", || {
-                magents::spawn::run(&Homes::from_env(), agent, &prompt, cwd.as_deref())
+                magents::spawn::run(
+                    &Homes::from_env(),
+                    &Caller::from_env(),
+                    agent,
+                    &prompt,
+                    cwd.as_deref(),
+                )
             })?;
             print_value(json, &report, |style| format_spawn(style, &report))?;
         }
@@ -717,7 +723,12 @@ async fn try_run(command: Option<Command>, json: bool) -> anyhow::Result<()> {
         }
         Some(Command::Handoff { to, reason }) => {
             let report = with_spin(json, "handoff", || {
-                handoff::run(&Homes::from_env(), to.as_deref(), reason.as_deref())
+                handoff::run(
+                    &Homes::from_env(),
+                    &Caller::from_env(),
+                    to.as_deref(),
+                    reason.as_deref(),
+                )
             })?;
             print_value(json, &report, |style| format_handoff(style, &report))?;
         }
@@ -785,7 +796,7 @@ async fn try_run(command: Option<Command>, json: bool) -> anyhow::Result<()> {
             print_value(json, &note, |style| format_note(style, &note, true))?;
         }
         Some(Command::Whoami) => {
-            let identity = identify(&Homes::from_env());
+            let identity = identify(&Homes::from_env(), &Caller::from_env());
             print_value(json, &identity, |style| format_whoami(style, &identity))?;
         }
         Some(Command::Install {

@@ -267,7 +267,7 @@ fn target(
     if let (Some(agent), Some(session_id)) = (agent, session_id) {
         return Ok((agent, session_id.to_string()));
     }
-    let identity = identify(homes);
+    let identity = identify(homes, caller);
     let agent = agent.or(caller.agent).or(identity.agent).ok_or_else(|| {
         Error::msg("pass session_id, or call from a Claude/Codex/Cursor/Grok/OpenCode MCP session")
     })?;

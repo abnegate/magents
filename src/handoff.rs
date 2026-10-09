@@ -1,5 +1,5 @@
 use crate::deliver;
-use crate::discover::{ListFilter, list_sessions, resolve};
+use crate::discover::{ListFilter, identify, list_sessions, resolve};
 use crate::error::{Error, Result};
 use crate::homes::Homes;
 use crate::mailbox;
@@ -16,10 +16,14 @@ pub struct Report {
     pub mail_id: String,
 }
 
-pub fn run(homes: &Homes, to: Option<&str>, reason: Option<&str>) -> Result<Report> {
-    let caller = Caller::from_env();
-    let from = source_session(homes, &caller)?;
-    send(homes, &caller, from, to, reason)
+pub fn run(
+    homes: &Homes,
+    caller: &Caller,
+    to: Option<&str>,
+    reason: Option<&str>,
+) -> Result<Report> {
+    let from = source_session(homes, caller)?;
+    send(homes, caller, from, to, reason)
 }
 
 fn send(
@@ -137,11 +141,13 @@ fn source_session(homes: &Homes, caller: &Caller) -> Result<Session> {
         }
         return resolve(homes, session_id);
     }
-    if let Some(agent) = caller.agent {
-        return resolve(homes, &format!("{agent}:latest"));
+    if caller.agent.is_some()
+        && let Some(session) = identify(homes, caller).session
+    {
+        return Ok(session);
     }
     Err(Error::msg(
-        "cannot detect this session; pass to= or call from a Claude/Codex/Cursor/Grok/OpenCode MCP session",
+        "cannot detect this session; call from a single live Claude/Codex/Cursor/Grok/OpenCode session or set its session id",
     ))
 }
 
@@ -245,6 +251,7 @@ mod tests {
         let world = World::new();
         let report = run(
             &world.homes,
+            &Caller::from_env(),
             Some("cursor:Test rounds"),
             Some("switching windows"),
         )
@@ -274,13 +281,13 @@ mod tests {
             std::env::remove_var("CLAUDE_PROJECT_DIR");
         }
         let world = World::new();
-        let report = run(&world.homes, None, Some("auto peer")).unwrap();
+        let report = run(&world.homes, &Caller::from_env(), None, Some("auto peer")).unwrap();
         assert_ne!(report.to.agent, Agent::Grok);
         assert_eq!(report.reason, "auto peer");
     }
 
     #[test]
-    fn source_session_uses_agent_latest() {
+    fn source_session_uses_unique_live_match() {
         let _guard = test_env::lock(ENV);
         unsafe {
             std::env::remove_var("GROK_SESSION_ID");
@@ -296,6 +303,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(session.agent, Agent::Claude);
+    }
+
+    #[test]
+    fn source_session_rejects_ambiguous_caller_instead_of_latest() {
+        let _guard = test_env::lock(ENV);
+        unsafe {
+            std::env::remove_var("GROK_SESSION_ID");
+            std::env::remove_var("CLAUDE_PROJECT_DIR");
+        }
+        let world = World::new();
+        let parent = std::os::unix::process::parent_id();
+        std::fs::write(
+            world
+                .homes
+                .claude
+                .join("sessions")
+                .join(format!("{parent}.json")),
+            serde_json::json!({
+                "pid": parent,
+                "sessionId": "44444444-4444-4444-8444-444444444444",
+                "cwd": "/tmp/second-claude",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(resolve(&world.homes, "claude:latest").is_ok());
+        let error = source_session(
+            &world.homes,
+            &Caller {
+                agent: Some(Agent::Claude),
+                session_id: None,
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot detect"), "{error}");
     }
 
     #[test]
@@ -409,7 +451,13 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("cannot detect"));
         unsafe { std::env::set_var("GROK_SESSION_ID", "01testgrok0000000000000000") };
-        let report = run(&world.homes, Some("cursor:Test rounds"), Some("   ")).unwrap();
+        let report = run(
+            &world.homes,
+            &Caller::from_env(),
+            Some("cursor:Test rounds"),
+            Some("   "),
+        )
+        .unwrap();
         assert_eq!(report.reason, "handoff");
     }
 }

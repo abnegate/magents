@@ -92,13 +92,18 @@ impl Record {
     }
 }
 
-pub fn run(homes: &Homes, agent: Agent, prompt: &str, cwd: Option<&Path>) -> Result<Report> {
+pub fn run(
+    homes: &Homes,
+    caller: &Caller,
+    agent: Agent,
+    prompt: &str,
+    cwd: Option<&Path>,
+) -> Result<Report> {
     if prompt.trim().is_empty() {
         return Err(Error::msg("prompt must not be empty"));
     }
-    let caller = Caller::from_env();
-    let cwd = canonical_cwd(homes, cwd, &caller)?;
-    let prompt = routed_prompt(&caller, prompt);
+    let cwd = canonical_cwd(homes, cwd, caller)?;
+    let prompt = routed_prompt(caller, prompt);
     crate::runtime::start(homes, agent, &prompt, &cwd)
 }
 
@@ -754,7 +759,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let homes = Homes::isolated(directory.path());
         assert!(
-            run(&homes, Agent::Codex, " ", None)
+            run(&homes, &Caller::from_env(), Agent::Codex, " ", None)
                 .unwrap_err()
                 .to_string()
                 .contains("must not be empty")

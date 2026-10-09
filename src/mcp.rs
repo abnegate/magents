@@ -5,6 +5,7 @@ use crate::homes::Homes;
 use crate::mailbox::{self, InboxQuery};
 use crate::model::{Agent, Caller};
 use crate::notes;
+use crate::requester::Requester;
 use crate::spawn;
 use crate::transcript::{files_touched, read_transcript, search_transcripts, session_digest};
 use rmcp::handler::server::wrapper::Parameters;
@@ -18,6 +19,7 @@ use std::path::PathBuf;
 #[derive(Clone)]
 pub struct Magents {
     homes: Homes,
+    host: Option<Agent>,
     #[allow(dead_code)]
     tool_router: rmcp::handler::server::router::tool::ToolRouter<Magents>,
 }
@@ -202,9 +204,10 @@ pub struct LearnStateArgs {
 
 #[tool_router]
 impl Magents {
-    pub fn new(homes: Homes) -> Self {
+    pub fn new(homes: Homes, host: Option<Agent>) -> Self {
         Self {
             homes,
+            host,
             tool_router: Self::tool_router(),
         }
     }
@@ -310,12 +313,19 @@ impl Magents {
     )]
     fn spawn_session(
         &self,
+        requester: Requester,
         Parameters(args): Parameters<SpawnArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.wrap((|| {
             let agent = Agent::parse(&args.agent)
                 .ok_or_else(|| Error::msg(format!("unknown agent: {}", args.agent)))?;
-            spawn::run(&self.homes, agent, &args.message, args.cwd.as_deref())
+            spawn::run(
+                &self.homes,
+                &self.caller(requester),
+                agent,
+                &args.message,
+                args.cwd.as_deref(),
+            )
         })())
     }
 
@@ -324,11 +334,12 @@ impl Magents {
     )]
     fn send_message(
         &self,
+        requester: Requester,
         Parameters(args): Parameters<SendArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.wrap(mailbox::send(
             &self.homes,
-            &Caller::from_env(),
+            &self.caller(requester),
             &args.to,
             &args.message,
         ))
@@ -337,10 +348,14 @@ impl Magents {
     #[tool(
         description = "Read the magents inbox for this session (or a given session_id). Cross-agent messages land here."
     )]
-    fn inbox(&self, Parameters(args): Parameters<InboxArgs>) -> Result<CallToolResult, McpError> {
+    fn inbox(
+        &self,
+        requester: Requester,
+        Parameters(args): Parameters<InboxArgs>,
+    ) -> Result<CallToolResult, McpError> {
         self.wrap(mailbox::inbox(
             &self.homes,
-            &Caller::from_env(),
+            &self.caller(requester),
             InboxQuery {
                 session_id: args.session_id,
                 agent: args.agent.as_deref().and_then(Agent::parse),
@@ -351,10 +366,14 @@ impl Magents {
     }
 
     #[tool(description = "Mark inbox mail as read through a mail_id (or all current mail).")]
-    fn ack(&self, Parameters(args): Parameters<AckArgs>) -> Result<CallToolResult, McpError> {
+    fn ack(
+        &self,
+        requester: Requester,
+        Parameters(args): Parameters<AckArgs>,
+    ) -> Result<CallToolResult, McpError> {
         self.wrap(mailbox::ack(
             &self.homes,
-            &Caller::from_env(),
+            &self.caller(requester),
             args.through.as_deref(),
             args.session_id.as_deref(),
             args.agent.as_deref().and_then(Agent::parse),
@@ -366,11 +385,12 @@ impl Magents {
     )]
     fn await_reply(
         &self,
+        requester: Requester,
         Parameters(args): Parameters<AwaitArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.wrap(mailbox::await_reply(
             &self.homes,
-            &Caller::from_env(),
+            &self.caller(requester),
             args.from.as_deref(),
             args.timeout_secs,
             args.session_id.as_deref(),
@@ -381,10 +401,14 @@ impl Magents {
     #[tool(
         description = "Reply to the latest inbox mail (or a mail_id) by sending to its sender session."
     )]
-    fn reply(&self, Parameters(args): Parameters<ReplyArgs>) -> Result<CallToolResult, McpError> {
+    fn reply(
+        &self,
+        requester: Requester,
+        Parameters(args): Parameters<ReplyArgs>,
+    ) -> Result<CallToolResult, McpError> {
         self.wrap(mailbox::reply(
             &self.homes,
-            &Caller::from_env(),
+            &self.caller(requester),
             &args.message,
             args.mail_id.as_deref(),
             args.session_id.as_deref(),
@@ -454,31 +478,39 @@ impl Magents {
     #[tool(
         description = "Read the magents-owned shared note for a working directory. Not first-party agent memory."
     )]
-    fn get_note(&self, Parameters(args): Parameters<NoteArgs>) -> Result<CallToolResult, McpError> {
+    fn get_note(
+        &self,
+        requester: Requester,
+        Parameters(args): Parameters<NoteArgs>,
+    ) -> Result<CallToolResult, McpError> {
         self.wrap(notes::get_note(
             &self.homes,
             args.cwd.as_deref(),
-            &Caller::from_env(),
+            &self.caller(requester),
         ))
     }
 
     #[tool(
         description = "Write the magents-owned shared note for a working directory. Overwrites. Not first-party agent memory."
     )]
-    fn put_note(&self, Parameters(args): Parameters<NoteArgs>) -> Result<CallToolResult, McpError> {
+    fn put_note(
+        &self,
+        requester: Requester,
+        Parameters(args): Parameters<NoteArgs>,
+    ) -> Result<CallToolResult, McpError> {
         self.wrap(notes::put_note(
             &self.homes,
             args.content.as_deref().unwrap_or(""),
             args.cwd.as_deref(),
-            &Caller::from_env(),
+            &self.caller(requester),
         ))
     }
 
     #[tool(
-        description = "Who this MCP connection is running as. Resolves session id from env, messaging socket, or a unique live cwd match."
+        description = "Who this MCP connection is running as. Resolves session id from env, messaging socket, or a unique live cwd match. Uses the session id the host sends in request _meta, then falls back to the host process when the harness passes no session env."
     )]
-    fn whoami(&self) -> Result<CallToolResult, McpError> {
-        self.wrap(Ok(identify(&self.homes)))
+    fn whoami(&self, requester: Requester) -> Result<CallToolResult, McpError> {
+        self.wrap(Ok(identify(&self.homes, &self.caller(requester))))
     }
 
     #[tool(
@@ -486,10 +518,12 @@ impl Magents {
     )]
     fn handoff(
         &self,
+        requester: Requester,
         Parameters(args): Parameters<HandoffArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.wrap(handoff::run(
             &self.homes,
+            &self.caller(requester),
             args.to.as_deref(),
             args.reason.as_deref(),
         ))
@@ -603,6 +637,21 @@ fn learn_state_action(
 }
 
 impl Magents {
+    fn caller(&self, requester: Requester) -> Caller {
+        if let Requester(Some(caller)) = requester {
+            return caller;
+        }
+        let caller = Caller::from_env().with_host(self.host);
+        if caller.agent.is_none() || caller.session_id.is_some() {
+            return caller;
+        }
+        let identity = identify(&self.homes, &caller);
+        Caller {
+            agent: identity.agent,
+            session_id: identity.session_id,
+        }
+    }
+
     fn wrap<T: serde::Serialize>(
         &self,
         result: crate::error::Result<T>,
@@ -653,7 +702,9 @@ impl ServerHandler for Magents {
 pub async fn serve() -> anyhow::Result<()> {
     use rmcp::ServiceExt;
     let homes = Homes::from_env();
-    let service = Magents::new(homes).serve(rmcp::transport::stdio()).await?;
+    let service = Magents::new(homes, crate::host::detect())
+        .serve(rmcp::transport::stdio())
+        .await?;
     service.waiting().await?;
     Ok(())
 }
@@ -664,7 +715,8 @@ mod tests {
         HandoffArgs, InboxArgs, ListArgs, Magents, MemoryCreateArgs, MemorySearchArgs, SearchArgs,
         SendArgs, SessionArgs, SpawnArgs,
     };
-    use crate::handoff_tests::World;
+    use crate::handoff_tests::{CLAUDE_ID, World};
+    use crate::requester::Requester;
     use crate::test_env;
     use rmcp::ServerHandler;
     use rmcp::handler::server::wrapper::Parameters;
@@ -761,7 +813,7 @@ mod tests {
             std::env::set_var("GROK_SESSION_ID", "01testgrok0000000000000000");
         }
         let world = World::new();
-        let server = Magents::new(world.homes.clone());
+        let server = Magents::new(world.homes.clone(), None);
 
         let info = server.get_info();
         assert_eq!(info.server_info.name, "magents");
@@ -864,42 +916,54 @@ mod tests {
         assert!(text(found).contains("MCP_CREATE_MEMORY_NEEDLE"));
 
         let invalid_spawn = server
-            .spawn_session(Parameters(SpawnArgs {
-                agent: "unknown".into(),
-                message: "do not launch".into(),
-                cwd: None,
-            }))
+            .spawn_session(
+                Requester::default(),
+                Parameters(SpawnArgs {
+                    agent: "unknown".into(),
+                    message: "do not launch".into(),
+                    cwd: None,
+                }),
+            )
             .unwrap();
         assert_eq!(invalid_spawn.is_error, Some(true));
         assert!(text(invalid_spawn).contains("unknown agent: unknown"));
 
         let sent = server
-            .send_message(Parameters(SendArgs {
-                to: "cursor:Test rounds".into(),
-                message: "handoff from mcp tests".into(),
-            }))
+            .send_message(
+                Requester::default(),
+                Parameters(SendArgs {
+                    to: "cursor:Test rounds".into(),
+                    message: "handoff from mcp tests".into(),
+                }),
+            )
             .unwrap();
         let sent = text(sent);
         assert!(sent.contains("\"queued\": true"), "{sent}");
 
         let inbox = server
-            .inbox(Parameters(InboxArgs {
-                session_id: Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into()),
-                agent: Some("cursor".into()),
-                since: None,
-                unread_only: None,
-            }))
+            .inbox(
+                Requester::default(),
+                Parameters(InboxArgs {
+                    session_id: Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into()),
+                    agent: Some("cursor".into()),
+                    since: None,
+                    unread_only: None,
+                }),
+            )
             .unwrap();
         assert!(text(inbox).contains("handoff from mcp tests"));
 
-        let who = text(server.whoami().unwrap());
+        let who = text(server.whoami(Requester::default()).unwrap());
         assert!(who.contains("grok"), "{who}");
 
         let handed = server
-            .handoff(Parameters(HandoffArgs {
-                to: Some("cursor:Test rounds".into()),
-                reason: Some("switching windows".into()),
-            }))
+            .handoff(
+                Requester::default(),
+                Parameters(HandoffArgs {
+                    to: Some("cursor:Test rounds".into()),
+                    reason: Some("switching windows".into()),
+                }),
+            )
             .unwrap();
         let handed = text(handed);
         assert!(handed.contains("switching windows"), "{handed}");
@@ -912,7 +976,7 @@ mod tests {
             unsafe { std::env::remove_var(key) };
         }
         let world = World::new();
-        let server = Magents::new(world.homes.clone());
+        let server = Magents::new(world.homes.clone(), None);
         let listed = server
             .list_sessions(Parameters(ListArgs {
                 agent: None,
@@ -926,15 +990,18 @@ mod tests {
             .unwrap();
         let listed = text(listed);
         assert!(listed.contains("claude"));
-        let who = text(server.whoami().unwrap());
+        let who = text(server.whoami(Requester::default()).unwrap());
         assert!(who.contains("\"agent\": null"), "{who}");
         let inbox = server
-            .inbox(Parameters(InboxArgs {
-                session_id: None,
-                agent: None,
-                since: None,
-                unread_only: None,
-            }))
+            .inbox(
+                Requester::default(),
+                Parameters(InboxArgs {
+                    session_id: None,
+                    agent: None,
+                    since: None,
+                    unread_only: None,
+                }),
+            )
             .unwrap();
         assert_eq!(inbox.is_error, Some(true));
     }
@@ -953,7 +1020,7 @@ mod tests {
             }
             fs::write(&path, "DEFAULT_LIMIT_NEEDLE\n").unwrap();
         }
-        let server = Magents::new(homes);
+        let server = Magents::new(homes, None);
         let empty = server
             .search_memories(Parameters(MemorySearchArgs {
                 query: "   ".into(),
@@ -981,7 +1048,7 @@ mod tests {
         use crate::homes::Homes;
 
         let homes = Homes::isolated(tempfile::tempdir().unwrap().path());
-        let server = Magents::new(homes);
+        let server = Magents::new(homes, None);
         let missing = server
             .create_memory(Parameters(MemoryCreateArgs {
                 agent: "  ".into(),
@@ -1020,6 +1087,108 @@ mod tests {
     }
 
     #[test]
+    fn host_process_identifies_caller_without_session_env() {
+        let _guard = test_env::lock(CALLER_ENV);
+        for key in CALLER_ENV {
+            unsafe { std::env::remove_var(key) };
+        }
+        let world = World::new();
+
+        let anonymous = Magents::new(world.homes.clone(), None);
+        let unknown: serde_json::Value =
+            serde_json::from_str(&text(anonymous.whoami(Requester::default()).unwrap())).unwrap();
+        assert!(unknown["agent"].is_null(), "{unknown}");
+        assert!(unknown["session_id"].is_null(), "{unknown}");
+
+        let hosted = Magents::new(world.homes.clone(), Some(crate::model::Agent::Claude));
+        let known: serde_json::Value =
+            serde_json::from_str(&text(hosted.whoami(Requester::default()).unwrap())).unwrap();
+        assert_eq!(known["agent"], "claude", "{known}");
+        assert_eq!(known["session_id"], CLAUDE_ID, "{known}");
+
+        let sent = hosted
+            .send_message(
+                Requester::default(),
+                Parameters(SendArgs {
+                    to: "grok:latest".into(),
+                    message: "hosted ping".into(),
+                }),
+            )
+            .unwrap();
+        let sent = text(sent);
+        assert!(sent.contains("mail_id"), "{sent}");
+        let mailbox = world.homes.mailbox_dir();
+        let stamped = walkdir::WalkDir::new(&mailbox)
+            .into_iter()
+            .flatten()
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| std::fs::read_to_string(entry.path()).unwrap())
+            .collect::<String>();
+        assert!(
+            stamped.contains(&format!("\"from_session\":\"{CLAUDE_ID}\"")),
+            "{stamped}"
+        );
+
+        let inbox = hosted
+            .inbox(
+                Requester::default(),
+                Parameters(InboxArgs {
+                    session_id: None,
+                    agent: None,
+                    since: None,
+                    unread_only: Some(true),
+                }),
+            )
+            .unwrap();
+        let inbox: serde_json::Value = serde_json::from_str(&text(inbox)).unwrap();
+        assert_eq!(inbox["unread"], 0, "{inbox}");
+    }
+
+    #[test]
+    fn request_meta_session_wins_over_host_and_env() {
+        let _guard = test_env::lock(CALLER_ENV);
+        for key in CALLER_ENV {
+            unsafe { std::env::remove_var(key) };
+        }
+        unsafe { std::env::set_var("GROK_SESSION_ID", "01testgrok0000000000000000") };
+        let world = World::new();
+        let server = Magents::new(world.homes.clone(), Some(crate::model::Agent::Claude));
+        let requester = || {
+            Requester::from_meta(
+                serde_json::json!({ "ai.opencode/sessionID": "ses_meta_caller" })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+
+        let who: serde_json::Value =
+            serde_json::from_str(&text(server.whoami(requester()).unwrap())).unwrap();
+        assert_eq!(who["agent"], "opencode", "{who}");
+        assert_eq!(who["session_id"], "ses_meta_caller", "{who}");
+
+        let sent = server
+            .send_message(
+                requester(),
+                Parameters(SendArgs {
+                    to: "grok:latest".into(),
+                    message: "meta ping".into(),
+                }),
+            )
+            .unwrap();
+        assert!(text(sent).contains("mail_id"));
+        let stamped = walkdir::WalkDir::new(world.homes.mailbox_dir())
+            .into_iter()
+            .flatten()
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| std::fs::read_to_string(entry.path()).unwrap())
+            .collect::<String>();
+        assert!(
+            stamped.contains("\"from_session\":\"ses_meta_caller\""),
+            "{stamped}"
+        );
+    }
+
+    #[test]
     fn coordination_tools() {
         use super::{AckArgs, AwaitArgs, MemoryReadArgs, NoteArgs, ReplyArgs, StopArgs};
 
@@ -1028,7 +1197,7 @@ mod tests {
             std::env::set_var("GROK_SESSION_ID", "01testgrok0000000000000000");
         }
         let world = World::new();
-        let server = Magents::new(world.homes.clone());
+        let server = Magents::new(world.homes.clone(), None);
 
         let digest = server
             .session_digest(Parameters(SessionArgs {
@@ -1047,50 +1216,65 @@ mod tests {
         assert!(text(files).contains("src/lib.rs"));
 
         let sent = server
-            .send_message(Parameters(SendArgs {
-                to: "grok:latest".into(),
-                message: "coord ping".into(),
-            }))
+            .send_message(
+                Requester::default(),
+                Parameters(SendArgs {
+                    to: "grok:latest".into(),
+                    message: "coord ping".into(),
+                }),
+            )
             .unwrap();
         let sent: serde_json::Value = serde_json::from_str(&text(sent)).unwrap();
         let mail_id = sent["mail_id"].as_str().unwrap().to_string();
 
         let unread = server
-            .inbox(Parameters(InboxArgs {
-                session_id: Some("01testgrok0000000000000000".into()),
-                agent: Some("grok".into()),
-                since: None,
-                unread_only: Some(true),
-            }))
+            .inbox(
+                Requester::default(),
+                Parameters(InboxArgs {
+                    session_id: Some("01testgrok0000000000000000".into()),
+                    agent: Some("grok".into()),
+                    since: None,
+                    unread_only: Some(true),
+                }),
+            )
             .unwrap();
         assert!(text(unread).contains("coord ping"));
 
         let acked = server
-            .ack(Parameters(AckArgs {
-                through: Some(mail_id.clone()),
-                session_id: Some("01testgrok0000000000000000".into()),
-                agent: Some("grok".into()),
-            }))
+            .ack(
+                Requester::default(),
+                Parameters(AckArgs {
+                    through: Some(mail_id.clone()),
+                    session_id: Some("01testgrok0000000000000000".into()),
+                    agent: Some("grok".into()),
+                }),
+            )
             .unwrap();
         assert!(text(acked).contains(&mail_id));
 
         let pending = server
-            .await_reply(Parameters(AwaitArgs {
-                from: None,
-                timeout_secs: Some(0),
-                session_id: Some("01testgrok0000000000000000".into()),
-                agent: Some("grok".into()),
-            }))
+            .await_reply(
+                Requester::default(),
+                Parameters(AwaitArgs {
+                    from: None,
+                    timeout_secs: Some(0),
+                    session_id: Some("01testgrok0000000000000000".into()),
+                    agent: Some("grok".into()),
+                }),
+            )
             .unwrap();
         assert!(text(pending).contains("pending"));
 
         let replied = server
-            .reply(Parameters(ReplyArgs {
-                message: "coord pong".into(),
-                mail_id: Some(mail_id),
-                session_id: Some("01testgrok0000000000000000".into()),
-                agent: Some("grok".into()),
-            }))
+            .reply(
+                Requester::default(),
+                Parameters(ReplyArgs {
+                    message: "coord pong".into(),
+                    mail_id: Some(mail_id),
+                    session_id: Some("01testgrok0000000000000000".into()),
+                    agent: Some("grok".into()),
+                }),
+            )
             .unwrap();
         let replied_error = replied.is_error;
         let replied_text = text(replied);
@@ -1111,17 +1295,23 @@ mod tests {
         let cwd = world.homes.magents.to_str().unwrap().to_string();
         std::fs::create_dir_all(&cwd).unwrap();
         let put = server
-            .put_note(Parameters(NoteArgs {
-                cwd: Some(cwd.clone()),
-                content: Some("scratch plan".into()),
-            }))
+            .put_note(
+                Requester::default(),
+                Parameters(NoteArgs {
+                    cwd: Some(cwd.clone()),
+                    content: Some("scratch plan".into()),
+                }),
+            )
             .unwrap();
         assert!(text(put).contains("scratch plan"));
         let got = server
-            .get_note(Parameters(NoteArgs {
-                cwd: Some(cwd),
-                content: None,
-            }))
+            .get_note(
+                Requester::default(),
+                Parameters(NoteArgs {
+                    cwd: Some(cwd),
+                    content: None,
+                }),
+            )
             .unwrap();
         assert!(text(got).contains("scratch plan"));
 
@@ -1179,7 +1369,7 @@ mod tests {
             "---\nname: unused\ndescription: never\n---\n",
         )
         .unwrap();
-        let server = Magents::new(homes.clone());
+        let server = Magents::new(homes.clone(), None);
         let unknown = server
             .learn_collect(Parameters(LearnCollectArgs {
                 estimate: Some(true),
