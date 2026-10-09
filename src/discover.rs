@@ -894,15 +894,67 @@ pub fn cursor_user_text(text: &str) -> String {
 }
 
 fn discover_opencode(homes: &Homes) -> Result<Vec<Session>> {
-    let db = homes.opencode.join("opencode.db");
-    if db.is_file() {
-        return discover_opencode_sqlite(homes, &db);
+    let live_app = named_process_alive("opencode");
+    let mut sessions = Vec::new();
+    let mut stored = false;
+    for database in opencode_databases(homes) {
+        if let Some(found) = discover_opencode_sqlite(&database, live_app)? {
+            stored = true;
+            sessions.extend(found);
+        }
     }
-    discover_opencode_json(homes)
+    if !stored {
+        return discover_opencode_json(homes);
+    }
+    sessions.sort_by(|left, right| {
+        left.session_id
+            .cmp(&right.session_id)
+            .then(right.last_activity_at.cmp(&left.last_activity_at))
+    });
+    sessions.dedup_by(|later, earlier| later.session_id == earlier.session_id);
+    Ok(sessions)
 }
 
-fn discover_opencode_sqlite(homes: &Homes, db: &Path) -> Result<Vec<Session>> {
+fn opencode_databases(homes: &Homes) -> Vec<PathBuf> {
+    let mut channels = fs::read_dir(&homes.opencode)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| opencode_channel_database(path))
+        .collect::<Vec<_>>();
+    channels.sort();
+    let mut databases = Vec::new();
+    for database in homes
+        .opencode_database
+        .iter()
+        .cloned()
+        .chain([homes.opencode.join("opencode.db")])
+        .chain(channels)
+    {
+        if database.is_file() && !databases.contains(&database) {
+            databases.push(database);
+        }
+    }
+    databases
+}
+
+fn opencode_channel_database(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("opencode-") && name.ends_with(".db"))
+}
+
+fn discover_opencode_sqlite(db: &Path, live_app: bool) -> Result<Option<Vec<Session>>> {
     let connection = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let stores_sessions = connection.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !stores_sessions {
+        return Ok(None);
+    }
     let mut statement = connection.prepare(
         "SELECT id, parent_id, directory, title, time_updated, time_archived
          FROM session",
@@ -917,7 +969,6 @@ fn discover_opencode_sqlite(homes: &Homes, db: &Path) -> Result<Vec<Session>> {
             row.get::<_, Option<i64>>(5)?,
         ))
     })?;
-    let live_app = named_process_alive("opencode");
     let mut sessions = Vec::new();
     for row in rows {
         let (id, parent_id, directory, title, updated, archived_at) = row?;
@@ -938,13 +989,13 @@ fn discover_opencode_sqlite(homes: &Homes, db: &Path) -> Result<Vec<Session>> {
             pid: None,
             model: None,
             last_activity_at,
-            transcript_path: Some(homes.opencode.join("opencode.db")),
+            transcript_path: Some(db.to_path_buf()),
             messaging_socket: None,
             origin: Some("opencode".into()),
             tmux: None,
         });
     }
-    Ok(sessions)
+    Ok(Some(sessions))
 }
 
 fn discover_opencode_json(homes: &Homes) -> Result<Vec<Session>> {
@@ -1651,6 +1702,77 @@ mod tests {
         assert!(live.is_empty());
     }
 
+    fn write_opencode_database(path: &std::path::Path, sessions: &[(&str, i64)]) {
+        let connection = rusqlite::Connection::open(path).unwrap();
+        connection
+            .execute(
+                "CREATE TABLE session (
+                    id TEXT PRIMARY KEY,
+                    parent_id TEXT,
+                    directory TEXT,
+                    title TEXT,
+                    time_updated INTEGER,
+                    time_archived INTEGER
+                )",
+                [],
+            )
+            .unwrap();
+        for (id, updated) in sessions {
+            connection
+                .execute(
+                    "INSERT INTO session VALUES (?1, NULL, '/tmp/opencode', ?1, ?2, NULL)",
+                    rusqlite::params![id, updated],
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn opencode_reads_channel_databases_and_skips_stores_without_sessions() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut homes = Homes::isolated(directory.path());
+        fs::create_dir_all(&homes.opencode).unwrap();
+        rusqlite::Connection::open(homes.opencode.join("opencode.db"))
+            .unwrap()
+            .execute("CREATE TABLE control_account (email TEXT)", [])
+            .unwrap();
+        let channel = homes.opencode.join("opencode-dev.db");
+        write_opencode_database(&channel, &[("ses_shared", 2_000), ("ses_channel", 1_000)]);
+        write_opencode_database(
+            &homes.opencode.join("opencode-local.db"),
+            &[("ses_shared", 1_000)],
+        );
+        fs::write(homes.opencode.join("opencode-notes.txt"), "ignored").unwrap();
+        let custom = directory.path().join("custom.db");
+        write_opencode_database(&custom, &[("ses_custom", 3_000)]);
+        homes.opencode_database = Some(custom.clone());
+
+        let sessions = list_sessions(
+            &homes,
+            &ListFilter {
+                agent: Some(Agent::OpenCode),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        )
+        .unwrap();
+
+        let found = sessions
+            .iter()
+            .map(|session| {
+                (
+                    session.session_id.as_str(),
+                    session.transcript_path.as_deref().unwrap(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert_eq!(found["ses_shared"], channel.as_path());
+        assert_eq!(found["ses_channel"], channel.as_path());
+        assert_eq!(found["ses_custom"], custom.as_path());
+    }
+
     #[test]
     fn legacy_opencode_data_override_drives_discovery() {
         const KEYS: &[&str] = &["HOME", "MAGENTS_HOME", "OPENCODE_DATA", "XDG_DATA_HOME"];
@@ -2049,12 +2171,16 @@ mod tests {
         permissions.set_mode(0o644);
         fs::set_permissions(&summary, permissions).unwrap();
 
-        let empty_db = Homes::isolated(tempfile::tempdir().unwrap().path());
-        fs::create_dir_all(&empty_db.opencode).unwrap();
-        rusqlite::Connection::open(empty_db.opencode.join("opencode.db")).unwrap();
+        let corrupt_db = Homes::isolated(tempfile::tempdir().unwrap().path());
+        fs::create_dir_all(&corrupt_db.opencode).unwrap();
+        fs::write(
+            corrupt_db.opencode.join("opencode.db"),
+            "not a sqlite database",
+        )
+        .unwrap();
         assert!(
             list_sessions(
-                &empty_db,
+                &corrupt_db,
                 &ListFilter {
                     agent: Some(Agent::OpenCode),
                     include_archived: true,
