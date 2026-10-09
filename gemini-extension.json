@@ -1,6 +1,6 @@
 {
   "name": "magents",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "description": "Shared session bus for Claude Code, Codex, Copilot, Cursor, Gemini, Grok, and OpenCode: list, read, hand off, send, and spawn across live agent sessions.",
   "mcpServers": {
     "magents": {
