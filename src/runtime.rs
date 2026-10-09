@@ -2214,6 +2214,7 @@ esac
         unsafe {
             std::env::set_var("MAGENTS_SUPERVISOR_BIN", &binary);
             std::env::set_var("MAGENTS_STARTUP_TIMEOUT_MS", "30");
+            std::env::remove_var("MAGENTS_HANDSHAKE_TIMEOUT_MS");
         }
         let started = Instant::now();
 

@@ -1,6 +1,6 @@
 use serde_json::Value;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -163,14 +163,20 @@ fn write_executable(path: &Path, body: &str) {
         &format!("#!/bin/sh\nset -eu\n[ -z \"${{{WARM}-}}\" ] || exit 0\n{body}\n"),
     );
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-    let status = Command::new(path)
+    let mut command = Command::new(path);
+    command
         .env_clear()
         .env(WARM, "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .unwrap();
+        .stderr(Stdio::null());
+    // Linux refuses the exec while another test thread's fork still holds the write descriptor.
+    let status = loop {
+        match command.status() {
+            Err(error) if error.kind() == ErrorKind::ExecutableFileBusy => thread::yield_now(),
+            result => break result.unwrap(),
+        }
+    };
     assert!(status.success(), "warming {} failed", path.display());
 }
 
