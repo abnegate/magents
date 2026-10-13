@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  [![HOL Trust](https://img.shields.io/endpoint?url=https%3A%2F%2Fhol.org%2Fapi%2Fregistry%2Fbadges%2Fplugin%3Fslug%3Dabnegate%252Fmagents%26metric%3Dtrust%26style%3Dflat)](https://hol.org/registry/plugins/abnegate%2Fmagents)
+  <a href="https://hol.org/registry/plugins/abnegate%2Fmagents"><img alt="HOL Trust" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fhol.org%2Fapi%2Fregistry%2Fbadges%2Fplugin%3Fslug%3Dabnegate%252Fmagents%26metric%3Dtrust%26style%3Dflat"></a>
 </p>
 
 Claude Code, Codex, Copilot, Cursor, Gemini, Grok, and OpenCode already keep
