@@ -398,7 +398,7 @@ fn trashable(homes: &Homes, path: &Path) -> bool {
     }) || grand.file_name().and_then(|n| n.to_str()) == Some(".agents")
         || matches!(
             grand.file_name().and_then(|n| n.to_str()),
-            Some(".grok" | ".claude" | ".cursor" | ".gemini" | ".copilot" | ".opencode")
+            Some(".grok" | ".claude" | ".cursor" | ".gemini" | ".agy" | ".copilot" | ".opencode")
         )
 }
 
@@ -411,6 +411,7 @@ fn agent_roots(homes: &Homes) -> Vec<PathBuf> {
         homes.cursor.clone(),
         homes.opencode_config.clone(),
         homes.gemini.clone(),
+        homes.agy.clone(),
         homes.copilot.clone(),
         homes.magents.clone(),
     ]

@@ -58,9 +58,9 @@ pub fn create_memory(
         Agent::Claude => create_claude(homes, content, &file, project, cwd),
         Agent::Codex => create_codex(homes, content, &file),
         Agent::Grok => create_grok(homes, content, &file, project),
-        Agent::Cursor | Agent::OpenCode | Agent::Gemini | Agent::Copilot => Err(Error::msg(
-            format!("{agent} has no first-party memory store"),
-        )),
+        Agent::Agy | Agent::Cursor | Agent::OpenCode | Agent::Gemini | Agent::Copilot => Err(
+            Error::msg(format!("{agent} has no first-party memory store")),
+        ),
     }
 }
 
@@ -139,7 +139,7 @@ fn resolve_read(
             };
             (path, project)
         }
-        Agent::Cursor | Agent::OpenCode | Agent::Gemini | Agent::Copilot => {
+        Agent::Agy | Agent::Cursor | Agent::OpenCode | Agent::Gemini | Agent::Copilot => {
             return Err(Error::msg(format!(
                 "{agent} has no first-party memory store"
             )));
@@ -206,7 +206,7 @@ fn memory_roots(homes: &Homes, agent: Agent) -> Result<Vec<PathBuf>> {
         Agent::Claude => vec![homes.claude.join("projects")],
         Agent::Codex => vec![homes.codex.join("memories")],
         Agent::Grok => vec![homes.grok.join("memory")],
-        Agent::Cursor | Agent::OpenCode | Agent::Gemini | Agent::Copilot => {
+        Agent::Agy | Agent::Cursor | Agent::OpenCode | Agent::Gemini | Agent::Copilot => {
             return Err(Error::msg(format!(
                 "{agent} has no first-party memory store"
             )));
@@ -647,6 +647,11 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        assert!(
+            search_memories(&homes, "needle", Some(Agent::Agy), 10)
+                .unwrap()
+                .is_empty()
+        );
         let all = search_memories(&homes, "needle", None, 10).unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].agent, Agent::Claude);
@@ -774,6 +779,11 @@ mod tests {
         );
         assert!(
             search_memories(&homes, "shared agent needle", Some(Agent::Copilot), 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            search_memories(&homes, "shared agent needle", Some(Agent::Agy), 10)
                 .unwrap()
                 .is_empty()
         );
@@ -1158,6 +1168,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let homes = Homes::isolated(dir.path());
         for agent in [
+            Agent::Agy,
             Agent::Cursor,
             Agent::OpenCode,
             Agent::Gemini,
@@ -1549,6 +1560,9 @@ mod tests {
             10,
         )
         .unwrap_err();
+        assert!(err.to_string().contains("no first-party memory store"));
+        let err =
+            read_memory(&homes, Agent::Agy, Some("note.md"), None, None, None, 10).unwrap_err();
         assert!(err.to_string().contains("no first-party memory store"));
 
         let err = read_memory(&homes, Agent::Claude, None, None, None, None, 10).unwrap_err();

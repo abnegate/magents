@@ -10,6 +10,7 @@ use std::path::{Component, Path, PathBuf};
 
 const SUBAGENT_KINDS: &[&str] = &["subagent", "subagent_resume", "subagent_fork"];
 const HEADLESS_ORIGINS: &[&str] = &[
+    "agy-stream",
     "claude-print",
     "codex-exec",
     "copilot-json",

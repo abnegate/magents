@@ -2,7 +2,7 @@
 name: learn
 description: >-
   Learn from every coding agent on this machine (Claude Code, Codex, Copilot,
-  Cursor, Gemini, Grok, OpenCode) and tune the harness: add skills for things
+  Cursor, Gemini, AGY, Grok, OpenCode) and tune the harness: add skills for things
   you keep typing, fix stale skill instructions, and retire skills, plugins, or
   MCP servers you never use. Use on "/learn", "learn from my traces", "learn
   from all agents", "what skills do I never use". Not for summarizing sessions
@@ -222,7 +222,7 @@ Apply:
 
 Skill `create`, `edit`, and `propose` (plugin/bundled override) fan out to
 **every** installed provider. Read `user_skills_dirs` from
-`<RUN>/surfaces.json` (claude, grok, cursor, gemini, copilot, opencode,
+`<RUN>/surfaces.json` (claude, grok, cursor, gemini, agy, copilot, opencode,
 codex when present). For each directory, the file is
 `<dir>/<target>/SKILL.md`. Consent on the action id authorizes every copy.
 Plugin enable/disable, MCP, workflow, hook, and config actions do **not**

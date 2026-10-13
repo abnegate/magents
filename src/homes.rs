@@ -17,6 +17,7 @@ pub struct Homes {
     pub opencode_database: Option<PathBuf>,
     pub opencode_config: PathBuf,
     pub gemini: PathBuf,
+    pub agy: PathBuf,
     pub copilot: PathBuf,
     pub magents: PathBuf,
     pub claude_desktop: PathBuf,
@@ -51,6 +52,8 @@ impl Homes {
             .map(|path| path.join("opencode"))
             .unwrap_or_else(|| home.join(".config").join("opencode"));
         let gemini = env_path("GEMINI_CLI_HOME").unwrap_or_else(|| home.join(".gemini"));
+        let agy =
+            env_path("ANTIGRAVITY_CLI_HOME").unwrap_or_else(|| gemini.join("antigravity-cli"));
         let copilot = env_path("COPILOT_HOME").unwrap_or_else(|| home.join(".copilot"));
         let magents = env_path("MAGENTS_HOME").unwrap_or_else(|| {
             dirs::data_dir()
@@ -73,6 +76,7 @@ impl Homes {
             opencode_database,
             opencode_config,
             gemini,
+            agy,
             copilot,
             magents,
             claude_desktop,
@@ -116,6 +120,7 @@ impl Homes {
             opencode_database: None,
             opencode_config: root.join("opencode-config").join("opencode"),
             gemini: root.join("gemini"),
+            agy: root.join("agy"),
             copilot: root.join("copilot"),
             magents: root.join("magents"),
             claude_desktop: root.join("claude-desktop"),
@@ -179,6 +184,7 @@ mod tests {
         "OPENCODE_DATA",
         "OPENCODE_DB",
         "GEMINI_CLI_HOME",
+        "ANTIGRAVITY_CLI_HOME",
         "COPILOT_HOME",
     ];
 
@@ -226,6 +232,7 @@ mod tests {
             std::env::set_var("XDG_DATA_HOME", root.join("xdg"));
             std::env::set_var("MAGENTS_HOME", root.join("m"));
             std::env::set_var("GEMINI_CLI_HOME", root.join("gm"));
+            std::env::remove_var("ANTIGRAVITY_CLI_HOME");
             std::env::set_var("COPILOT_HOME", root.join("cp"));
             std::env::remove_var("OPENCODE_DATA");
             std::env::set_var("OPENCODE_DB", "opencode-custom.db");
@@ -248,6 +255,7 @@ mod tests {
             root.join("xdg-config").join("opencode")
         );
         assert_eq!(homes.gemini, root.join("gm"));
+        assert_eq!(homes.agy, root.join("gm").join("antigravity-cli"));
         assert_eq!(homes.copilot, root.join("cp"));
         assert_eq!(homes.magents, root.join("m"));
         assert_eq!(homes.mailbox_dir(), root.join("m").join("mailbox"));
@@ -278,12 +286,14 @@ mod tests {
             std::env::remove_var("CURSOR_DATA_DIR");
             std::env::remove_var("MAGENTS_HOME");
             std::env::remove_var("GEMINI_CLI_HOME");
+            std::env::remove_var("ANTIGRAVITY_CLI_HOME");
             std::env::remove_var("COPILOT_HOME");
             std::env::set_var("CURSOR_HOME", root.join("legacy-cursor"));
         }
         let homes = Homes::from_env();
         assert_eq!(homes.claude, root.join(".claude"));
         assert_eq!(homes.gemini, root.join(".gemini"));
+        assert_eq!(homes.agy, root.join(".gemini").join("antigravity-cli"));
         assert_eq!(homes.copilot, root.join(".copilot"));
         assert_eq!(homes.cursor_config, root.join("legacy-cursor"));
         assert_eq!(homes.cursor, root.join("legacy-cursor"));
@@ -309,6 +319,12 @@ mod tests {
         let homes = Homes::from_env();
         assert_eq!(homes.cursor_config, root.join("xdg-only").join("cursor"));
         assert_eq!(homes.cursor, root.join(".cursor"));
+
+        unsafe {
+            std::env::set_var("ANTIGRAVITY_CLI_HOME", root.join("custom-agy"));
+        }
+        let homes = Homes::from_env();
+        assert_eq!(homes.agy, root.join("custom-agy"));
     }
 
     #[test]
@@ -325,6 +341,7 @@ mod tests {
             opencode_database: None,
             opencode_config: PathBuf::new(),
             gemini: PathBuf::new(),
+            agy: PathBuf::new(),
             copilot: PathBuf::new(),
             magents: PathBuf::new(),
             claude_desktop: PathBuf::new(),
@@ -342,6 +359,7 @@ mod tests {
         assert_eq!(homes.cursor_app, directory.path().join("cursor-app"));
         assert_eq!(homes.opencode_data_home(), directory.path());
         assert_eq!(homes.gemini, directory.path().join("gemini"));
+        assert_eq!(homes.agy, directory.path().join("agy"));
         assert_eq!(homes.copilot, directory.path().join("copilot"));
         assert_ne!(homes.cursor_config, homes.cursor);
         assert_ne!(homes.cursor_config, homes.cursor_app);

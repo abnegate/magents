@@ -24,7 +24,7 @@ use std::time::Duration;
 #[command(
     name = "magents",
     version,
-    about = "Mates + agents: shared session bus for Claude, Codex, Copilot, Cursor, Gemini, Grok, and OpenCode"
+    about = "Mates + agents: shared session bus for Claude, Codex, Copilot, Cursor, Gemini, AGY, Grok, and OpenCode"
 )]
 struct Cli {
     /// Stable machine-readable output (`json` or `text`)
@@ -52,7 +52,7 @@ fn wants_json(output: Option<OutputFormat>) -> bool {
 enum Command {
     /// Run the stdio MCP server
     Mcp,
-    /// List sessions across Claude, Codex, Copilot, Cursor, Gemini, Grok, and OpenCode
+    /// List sessions across Claude, Codex, Copilot, Cursor, Gemini, AGY, Grok, and OpenCode
     List {
         #[arg(long)]
         agent: Option<String>,
@@ -217,6 +217,8 @@ enum Command {
         gemini: bool,
         #[arg(long)]
         copilot: bool,
+        #[arg(long)]
+        agy: bool,
         #[arg(long)]
         all: bool,
     },
@@ -807,6 +809,7 @@ async fn try_run(command: Option<Command>, json: bool) -> anyhow::Result<()> {
             opencode,
             gemini,
             copilot,
+            agy,
             all,
         }) => {
             let spec = magents::install::InstallSpec {
@@ -817,6 +820,7 @@ async fn try_run(command: Option<Command>, json: bool) -> anyhow::Result<()> {
                 opencode: opencode || all,
                 gemini: gemini || all,
                 copilot: copilot || all,
+                agy: agy || all,
                 skip_missing: all,
             };
             if json {

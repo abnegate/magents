@@ -55,7 +55,7 @@ user asks for a skill.
 
 ```
 ### <index> <agent:id> — <title>
-- agent: claude | codex | copilot | cursor | gemini | grok | opencode
+- agent: agy | claude | codex | copilot | cursor | gemini | grok | opencode
 - area: repo and top directories touched
 - task type: feature | bug fix | debugging | ops/infra | research | config/harness | writing | other
 - skills used / mcps used: names from the session file (or none)

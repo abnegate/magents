@@ -60,6 +60,9 @@ pub fn list_sessions(homes: &Homes, filter: &ListFilter) -> Result<Vec<Session>>
     if filter.agent.is_none() || filter.agent == Some(Agent::Copilot) {
         sessions.extend(discover_copilot(homes)?);
     }
+    if filter.agent.is_none() || filter.agent == Some(Agent::Agy) {
+        sessions.extend(discover_agy(homes)?);
+    }
     merge_spawned(homes, &mut sessions, filter.agent)?;
     let needle = filter
         .query
@@ -1379,6 +1382,228 @@ fn discover_copilot(homes: &Homes) -> Result<Vec<Session>> {
     Ok(sessions)
 }
 
+fn discover_agy(homes: &Homes) -> Result<Vec<Session>> {
+    let root = &homes.agy;
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let live_app = named_process_alive("agy");
+    let history = agy_history(root);
+    let mut by_id: HashMap<String, Session> = HashMap::new();
+
+    let conversations = root.join("conversations");
+    if conversations.is_dir() {
+        let entries = fs::read_dir(&conversations).map_err(|source| Error::Io {
+            path: conversations.clone(),
+            source,
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| Error::Io {
+                path: conversations.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("db") {
+                continue;
+            }
+            let Some(id) = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            if !crate::model::valid_session_id(Agent::Agy, &id) {
+                continue;
+            }
+            insert_agy_session(&mut by_id, root, &id, Some(path), &history, live_app);
+        }
+    }
+
+    let brain = root.join("brain");
+    if brain.is_dir() {
+        let entries = fs::read_dir(&brain).map_err(|source| Error::Io {
+            path: brain.clone(),
+            source,
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| Error::Io {
+                path: brain.clone(),
+                source,
+            })?;
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let Some(id) = dir.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !crate::model::valid_session_id(Agent::Agy, id) {
+                continue;
+            }
+            let jsonl = agy_transcript_jsonl(root, id);
+            if jsonl.is_file() {
+                insert_agy_session(&mut by_id, root, id, Some(jsonl), &history, live_app);
+            }
+        }
+    }
+
+    Ok(by_id.into_values().collect())
+}
+
+fn agy_transcript_jsonl(root: &Path, id: &str) -> PathBuf {
+    root.join("brain")
+        .join(id)
+        .join(".system_generated")
+        .join("logs")
+        .join("transcript_full.jsonl")
+}
+
+struct AgyHistory {
+    title: Option<String>,
+    cwd: Option<String>,
+    last_activity_at: Option<DateTime<Utc>>,
+}
+
+fn agy_history(root: &Path) -> HashMap<String, AgyHistory> {
+    let path = root.join("history.jsonl");
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
+    let mut rows = HashMap::new();
+    for line in raw.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(id) = value
+            .get("conversationId")
+            .or_else(|| value.get("conversation_id"))
+            .or_else(|| value.get("id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            continue;
+        };
+        rows.insert(
+            id.to_string(),
+            AgyHistory {
+                title: value
+                    .get("display")
+                    .or_else(|| value.get("title"))
+                    .or_else(|| value.get("name"))
+                    .and_then(Value::as_str)
+                    .filter(|title| !title.is_empty())
+                    .map(ToOwned::to_owned),
+                cwd: value
+                    .get("workspace")
+                    .or_else(|| value.get("cwd"))
+                    .or_else(|| value.get("projectPath"))
+                    .and_then(Value::as_str)
+                    .filter(|cwd| !cwd.is_empty())
+                    .map(ToOwned::to_owned),
+                last_activity_at: parse_gemini_time(
+                    value
+                        .get("timestamp")
+                        .or_else(|| value.get("updatedAt"))
+                        .or_else(|| value.get("lastUpdated")),
+                ),
+            },
+        );
+    }
+    rows
+}
+
+fn insert_agy_session(
+    by_id: &mut HashMap<String, Session>,
+    root: &Path,
+    id: &str,
+    fallback: Option<PathBuf>,
+    history: &HashMap<String, AgyHistory>,
+    live_app: bool,
+) {
+    let jsonl = agy_transcript_jsonl(root, id);
+    let transcript_path = if jsonl.is_file() {
+        jsonl
+    } else if let Some(fallback) = fallback {
+        fallback
+    } else {
+        return;
+    };
+    let meta = history.get(id);
+    let last_activity_at = meta.and_then(|row| row.last_activity_at).or_else(|| {
+        transcript_path
+            .metadata()
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .map(DateTime::<Utc>::from)
+    });
+    let title = meta
+        .and_then(|row| row.title.clone())
+        .or_else(|| agy_title_from_transcript(&transcript_path));
+    let session = Session {
+        agent: Agent::Agy,
+        session_id: id.to_string(),
+        desktop_id: None,
+        name: None,
+        title,
+        cwd: meta.and_then(|row| row.cwd.clone()),
+        branch: None,
+        live: live_app && recently_active(last_activity_at),
+        archived: false,
+        pid: None,
+        model: None,
+        last_activity_at,
+        transcript_path: Some(transcript_path.clone()),
+        messaging_socket: None,
+        origin: Some("agy".into()),
+        tmux: None,
+    };
+    by_id
+        .entry(id.to_string())
+        .and_modify(|existing| {
+            let prefer_jsonl =
+                transcript_path.extension().and_then(|ext| ext.to_str()) == Some("jsonl");
+            if prefer_jsonl || session.activity_ms() >= existing.activity_ms() {
+                *existing = session.clone();
+            }
+        })
+        .or_insert(session);
+}
+
+fn agy_title_from_transcript(path: &Path) -> Option<String> {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+        return None;
+    }
+    let raw = fs::read_to_string(path).ok()?;
+    for line in raw.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(title) = agy_user_title(&value) {
+            return Some(title);
+        }
+    }
+    None
+}
+
+fn agy_user_title(value: &Value) -> Option<String> {
+    let kind = value
+        .get("type")
+        .or_else(|| value.get("source"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !matches!(kind, "user_input" | "user" | "user_message") {
+        return None;
+    }
+    let text = value
+        .get("content")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/message/content").and_then(Value::as_str))
+        .or_else(|| value.get("text").and_then(Value::as_str))?;
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!text.is_empty()).then(|| text.chars().take(80).collect())
+}
+
 struct CopilotStoreRow {
     cwd: Option<String>,
     branch: Option<String>,
@@ -1618,6 +1843,7 @@ mod tests {
     use crate::model::Agent;
     use crate::spawn::Transport;
     use crate::test_env;
+    use crate::transcript::{files_touched, search_transcripts};
     use serde_json::json;
     use std::fs;
 
@@ -1638,6 +1864,12 @@ mod tests {
         let (agent, rest) = split_agent_ref("copilot:abc");
         assert_eq!(agent, Some(Agent::Copilot));
         assert_eq!(rest, "abc");
+        let (agent, rest) = split_agent_ref("agy:latest");
+        assert_eq!(agent, Some(Agent::Agy));
+        assert_eq!(rest, "latest");
+        let (agent, rest) = split_agent_ref("antigravity:latest");
+        assert_eq!(agent, Some(Agent::Agy));
+        assert_eq!(rest, "latest");
         let (agent, rest) = split_agent_ref("disaster recovery");
         assert_eq!(agent, None);
         assert_eq!(rest, "disaster recovery");
@@ -2723,5 +2955,249 @@ not-json
             permissions.set_mode(0o755);
             fs::set_permissions(&root, permissions).unwrap();
         }
+    }
+
+    #[test]
+    fn discovers_agy_jsonl_and_sqlite_conversations() {
+        let directory = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(directory.path());
+        let jsonl_id = "88888888-8888-4888-8888-888888888888";
+        let sqlite_id = "99999999-9999-4999-8999-999999999999";
+        let titled_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let named_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let untitled_db = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+        fs::create_dir_all(homes.agy.join("conversations")).unwrap();
+        fs::write(
+            homes.agy.join("history.jsonl"),
+            format!(
+                r#"{{"conversationId":"{jsonl_id}","display":"from history","timestamp":"2026-08-29T00:00:00Z","workspace":"/tmp/agy"}}
+{{"conversation_id":"{sqlite_id}","title":"sqlite only","cwd":"/tmp/agy-db"}}
+{{"id":"{named_id}","name":"named session","projectPath":"/tmp/agy-named","lastUpdated":"2026-08-29T00:00:00Z"}}
+{{"id":""}}
+{{"display":"no id"}}
+not-json
+"#
+            ),
+        )
+        .unwrap();
+        fs::create_dir_all(
+            homes
+                .agy
+                .join("brain")
+                .join(jsonl_id)
+                .join(".system_generated")
+                .join("logs"),
+        )
+        .unwrap();
+        fs::write(
+            homes
+                .agy
+                .join("brain")
+                .join(jsonl_id)
+                .join(".system_generated")
+                .join("logs")
+                .join("transcript_full.jsonl"),
+            r#"{"step_index":0,"type":"user_input","source":"user","content":"run the agy matrix"}
+{"step_index":1,"type":"model_output","content":"checking src/agy.rs"}
+"#,
+        )
+        .unwrap();
+        let jsonl_db = homes
+            .agy
+            .join("conversations")
+            .join(format!("{jsonl_id}.db"));
+        let connection = rusqlite::Connection::open(&jsonl_db).unwrap();
+        connection
+            .execute_batch("CREATE TABLE steps (idx INTEGER, step_type TEXT, step_payload BLOB);")
+            .unwrap();
+        let sqlite_db = homes
+            .agy
+            .join("conversations")
+            .join(format!("{sqlite_id}.db"));
+        let connection = rusqlite::Connection::open(&sqlite_db).unwrap();
+        connection
+            .execute_batch("CREATE TABLE steps (idx INTEGER, step_type TEXT, step_payload BLOB);")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO steps VALUES (0, 'user_input', ?1)",
+                [b"sqlite user turn".as_slice()],
+            )
+            .unwrap();
+        fs::write(homes.agy.join("conversations").join("not-a-db.txt"), "x").unwrap();
+        fs::write(homes.agy.join("conversations").join("-bad.db"), "x").unwrap();
+        fs::create_dir_all(homes.agy.join("brain")).unwrap();
+        fs::write(homes.agy.join("brain").join("not-a-dir"), "x").unwrap();
+        fs::create_dir_all(homes.agy.join("brain").join("-bad")).unwrap();
+        fs::create_dir_all(homes.agy.join("brain").join("no-transcript-id")).unwrap();
+        fs::create_dir_all(
+            homes
+                .agy
+                .join("brain")
+                .join(titled_id)
+                .join(".system_generated")
+                .join("logs"),
+        )
+        .unwrap();
+        fs::write(
+            homes
+                .agy
+                .join("brain")
+                .join(titled_id)
+                .join(".system_generated")
+                .join("logs")
+                .join("transcript_full.jsonl"),
+            r#"not-json
+{"type":"model_output","content":"skip for title"}
+{"type":"user_message","message":{"content":"title from nested user message that is long enough to clip past eighty characters in the preview"}}
+{"source":"user","text":"later source title"}
+"#,
+        )
+        .unwrap();
+        fs::create_dir_all(
+            homes
+                .agy
+                .join("brain")
+                .join(named_id)
+                .join(".system_generated")
+                .join("logs"),
+        )
+        .unwrap();
+        fs::write(
+            homes
+                .agy
+                .join("brain")
+                .join(named_id)
+                .join(".system_generated")
+                .join("logs")
+                .join("transcript_full.jsonl"),
+            r#"{"type":"user_input","content":"named body"}
+"#,
+        )
+        .unwrap();
+        let untitled = homes
+            .agy
+            .join("conversations")
+            .join(format!("{untitled_db}.db"));
+        let connection = rusqlite::Connection::open(&untitled).unwrap();
+        connection
+            .execute_batch("CREATE TABLE steps (idx INTEGER, step_type TEXT, step_payload BLOB);")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO steps VALUES (0, 'user_input', ?1)",
+                [b"inspecting src/agy-sqlite.rs".as_slice()],
+            )
+            .unwrap();
+
+        let sessions = list_sessions(
+            &homes,
+            &ListFilter {
+                agent: Some(Agent::Agy),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(sessions.len(), 5);
+        let jsonl = sessions
+            .iter()
+            .find(|session| session.session_id == jsonl_id)
+            .unwrap();
+        assert_eq!(jsonl.title.as_deref(), Some("from history"));
+        assert_eq!(jsonl.cwd.as_deref(), Some("/tmp/agy"));
+        assert_eq!(jsonl.origin.as_deref(), Some("agy"));
+        assert!(
+            jsonl
+                .transcript_path
+                .as_ref()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with("transcript_full.jsonl")
+        );
+        let sqlite = sessions
+            .iter()
+            .find(|session| session.session_id == sqlite_id)
+            .unwrap();
+        assert_eq!(sqlite.title.as_deref(), Some("sqlite only"));
+        assert_eq!(sqlite.cwd.as_deref(), Some("/tmp/agy-db"));
+        assert!(
+            sqlite
+                .transcript_path
+                .as_ref()
+                .unwrap()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                == Some("db")
+        );
+        let titled = sessions
+            .iter()
+            .find(|session| session.session_id == titled_id)
+            .unwrap();
+        let title = titled.title.as_deref().unwrap();
+        assert!(title.starts_with("title from nested user message"));
+        assert!(title.chars().count() <= 80);
+        let named = sessions
+            .iter()
+            .find(|session| session.session_id == named_id)
+            .unwrap();
+        assert_eq!(named.title.as_deref(), Some("named session"));
+        assert_eq!(named.cwd.as_deref(), Some("/tmp/agy-named"));
+        let untitled = sessions
+            .iter()
+            .find(|session| session.session_id == untitled_db)
+            .unwrap();
+        assert!(untitled.title.is_none());
+        assert!(
+            untitled
+                .transcript_path
+                .as_ref()
+                .unwrap()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                == Some("db")
+        );
+        let files = files_touched(&homes, &format!("agy:{untitled_db}")).unwrap();
+        assert!(files.files.iter().any(|path| path == "src/agy-sqlite.rs"));
+        let hits = search_transcripts(&homes, "agy-sqlite", Some(Agent::Agy), true, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session.session_id, untitled_db);
+
+        let other = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(other.path());
+        fs::create_dir_all(
+            homes
+                .agy
+                .join("brain")
+                .join(jsonl_id)
+                .join(".system_generated")
+                .join("logs"),
+        )
+        .unwrap();
+        fs::write(
+            homes
+                .agy
+                .join("brain")
+                .join(jsonl_id)
+                .join(".system_generated")
+                .join("logs")
+                .join("transcript_full.jsonl"),
+            r#"{"type":"model_output","content":"assistant only, no user title"}
+"#,
+        )
+        .unwrap();
+        let sessions = list_sessions(
+            &homes,
+            &ListFilter {
+                agent: Some(Agent::Agy),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0].title.is_none());
     }
 }

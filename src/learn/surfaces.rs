@@ -253,6 +253,12 @@ pub fn collect(homes: &Homes, sessions: &[CompactSession]) -> Surfaces {
     );
     add_json_mcp(
         &mut mcp_sources,
+        &homes.gemini.join("config").join("mcp_config.json"),
+        "mcpServers",
+        "agy:mcp_config.json",
+    );
+    add_json_mcp(
+        &mut mcp_sources,
         &homes.copilot.join("mcp-config.json"),
         "mcpServers",
         "copilot:mcp-config.json",
@@ -625,6 +631,7 @@ fn user_skill_roots(homes: &Homes) -> Vec<(Agent, PathBuf)> {
         (Agent::Cursor, homes.cursor_config.join("skills")),
         (Agent::OpenCode, homes.opencode_config.join("skills")),
         (Agent::Gemini, homes.gemini.join("skills")),
+        (Agent::Agy, homes.agy.join("skills")),
         (Agent::Copilot, homes.copilot.join("skills")),
     ]
 }
@@ -730,7 +737,7 @@ fn project_skill_dirs(cwd: &str, git_root: &str) -> Vec<(PathBuf, PathBuf)> {
     loop {
         let owner = current.clone();
         for folder in [
-            ".grok", ".claude", ".cursor", ".agents", ".gemini", ".copilot",
+            ".grok", ".claude", ".cursor", ".agents", ".gemini", ".agy", ".copilot",
         ] {
             dirs.push((current.join(folder).join("skills"), owner.clone()));
         }

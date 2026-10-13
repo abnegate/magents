@@ -2,7 +2,7 @@
   <img src="docs/assets/hero.svg" alt="magents shared session bus across Claude, Codex, Grok, and Cursor" width="100%" />
 </p>
 
-Claude Code, Codex, Copilot, Cursor, Gemini, Grok, and OpenCode already keep
+Claude Code, Codex, Copilot, Cursor, Gemini, AGY, Grok, and OpenCode already keep
 transcripts on disk. **magents** is the shared API over those sessions - an MCP
 server plus a small CLI - so one agent can pick up where another left off
 without you recapping, ping a *specific live chat* when you are not sitting in
@@ -111,11 +111,18 @@ folder under [`plugins/`](plugins/).
 | Codex | [`plugins/codex`](plugins/codex) |
 | Cursor | [`plugins/cursor`](plugins/cursor) |
 | Gemini CLI | repo root ([`gemini-extension.json`](gemini-extension.json)) |
+| AGY CLI | [`plugins/agy`](plugins/agy) and repo root (`plugin.json`, `mcp_config.json`) |
 
 Gemini CLI installs the extension straight from this repository:
 
 ```bash
 gemini extensions install https://github.com/abnegate/magents
+```
+
+AGY CLI installs the plugin from this repository:
+
+```bash
+agy plugin install https://github.com/abnegate/magents
 ```
 
 Details and marketplace notes: [`plugins/README.md`](plugins/README.md).
@@ -132,10 +139,11 @@ skipping hosts whose required binaries are unavailable:
 - OpenCode (`$XDG_CONFIG_HOME/opencode/opencode.json`, default `~/.config/opencode`)
 - Gemini CLI (`gemini mcp add -s user magents magents mcp`)
 - GitHub Copilot CLI (`copilot mcp add magents -- magents mcp`)
+- AGY CLI (`agy mcp add magents magents mcp`)
 
 It also writes the `magents` and `learn` skills under supported hosts' skills
 directories (`~/.grok/skills/{magents,learn}`, `~/.claude/skills/{magents,learn}`,
-`~/.cursor/skills/{magents,learn}`, and the OpenCode / Gemini / Copilot
+`~/.cursor/skills/{magents,learn}`, and the OpenCode / Gemini / AGY / Copilot
 equivalents). `/learn` reads every local agent's sessions, not only Grok.
 
 For Grok and Codex only, point a host at the binary yourself:
@@ -194,7 +202,7 @@ magents handoff grok:latest --reason "continuing in grok"
 | `learn_state` | Read or update `/learn` state, decisions, and trash |
 
 Refs can be prefixed: `claude:disaster recovery`, `grok:latest`, `codex:<uuid>`,
-`cursor:latest`, `opencode:<id>`, `gemini:latest`, `copilot:<id>`.
+`cursor:latest`, `opencode:<id>`, `gemini:latest`, `agy:<id>`, `copilot:<id>`.
 
 ## CLI
 
@@ -255,6 +263,7 @@ and otherwise starts a supervised headless resume:
 | Cursor | Supervised `cursor-agent -p --output-format stream-json --resume <id> --workspace <cwd>` |
 | OpenCode | Supervised `opencode run --format json --dir <cwd> --session <id>` |
 | Gemini CLI | Supervised `gemini --resume <id> --output-format stream-json` |
+| AGY CLI | Supervised `agy --input-format stream-json --output-format stream-json --conversation <id>` |
 | GitHub Copilot CLI | Supervised `copilot --resume=<id> --output-format json` |
 
 Supervised routes pass the user turn through stdin and do not expose transcript
@@ -263,7 +272,7 @@ bypasses (`--dangerously-skip-permissions`, `--yolo`, `--full-auto`, etc.).
 
 Session discovery sources (unchanged): Claude `~/.claude/sessions`, Grok
 `~/.grok/active_sessions.json`, Codex sqlite + rollout JSONL, Cursor
-`agent-transcripts`, OpenCode DB, Gemini journals, Copilot `session-state`.
+`agent-transcripts`, OpenCode DB, Gemini journals, AGY `conversations` / `brain` transcripts, Copilot `session-state`.
 
 ## Tests
 

@@ -1,0 +1,5 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "magents",
+  "description": "Shared session bus for Claude, Codex, Copilot, Cursor, Gemini, AGY, Grok, and OpenCode."
+}

@@ -32,6 +32,7 @@ const IDENTITY_ENV: &[&str] = &[
     "CURSOR_AGENT",
     "CURSOR_PROJECT_DIR",
     "CURSOR_SESSION_ID",
+    "ANTIGRAVITY_CONVERSATION_ID",
     "GEMINI_SESSION_ID",
     "GROK_SESSION_ID",
     "OPENCODE_DIRECTORY",
@@ -48,6 +49,7 @@ const HOME_ENV: &[&str] = &[
     "CURSOR_CONFIG_DIR",
     "CURSOR_DATA_DIR",
     "CURSOR_HOME",
+    "ANTIGRAVITY_CLI_HOME",
     "GEMINI_CLI_HOME",
     "GROK_HOME",
     "MAGENTS_HOME",
@@ -740,6 +742,19 @@ fn launch_new(
                 Transport::OpenCodeRun,
             ))
         }
+        Agent::Agy => {
+            let mut command = agent_command(homes, agent, cwd);
+            command
+                .arg("--input-format")
+                .arg("stream-json")
+                .arg("--output-format")
+                .arg("stream-json");
+            Ok((
+                launch(command, agent, message, reporter)?,
+                None,
+                Transport::AgyStream,
+            ))
+        }
         Agent::Gemini => {
             let session_id = Uuid::new_v4().to_string();
             let mut command = agent_command(homes, agent, cwd);
@@ -834,6 +849,16 @@ fn launch_resume(
                 .arg(session_id);
             Transport::OpenCodeRun
         }
+        Agent::Agy => {
+            command
+                .arg("--input-format")
+                .arg("stream-json")
+                .arg("--output-format")
+                .arg("stream-json")
+                .arg("--conversation")
+                .arg(session_id);
+            Transport::AgyStream
+        }
         Agent::Gemini => {
             command
                 .arg("--resume")
@@ -859,6 +884,7 @@ fn launch_resume(
 
 fn agent_command(homes: &Homes, agent: Agent, cwd: &Path) -> Command {
     let (variable, fallback) = match agent {
+        Agent::Agy => ("MAGENTS_AGY_BIN", "agy"),
         Agent::Claude => ("MAGENTS_CLAUDE_BIN", "claude"),
         Agent::Codex => ("MAGENTS_CODEX_BIN", "codex"),
         Agent::Copilot => ("MAGENTS_COPILOT_BIN", "copilot"),
@@ -898,6 +924,11 @@ fn isolate_environment(command: &mut Command, homes: &Homes, agent: Agent) {
             if let Some(config) = homes.opencode_config.parent() {
                 command.env("XDG_CONFIG_HOME", config);
             }
+        }
+        Agent::Agy => {
+            command
+                .env("GEMINI_CLI_HOME", &homes.gemini)
+                .env("ANTIGRAVITY_CLI_HOME", &homes.agy);
         }
         Agent::Gemini => {
             command.env("GEMINI_CLI_HOME", &homes.gemini);
@@ -1000,7 +1031,7 @@ fn launch(
             agent.as_str()
         )));
     };
-    let message = message.as_bytes().to_vec();
+    let message = stdin_payload(agent, message);
     thread::spawn(move || {
         let _ = stdin.write_all(&message);
         let _ = stdin.flush();
@@ -1065,9 +1096,30 @@ fn parent_cancelled(parent: &Receiver<ParentSignal>) -> bool {
     }
 }
 
+fn stdin_payload(agent: Agent, message: &str) -> Vec<u8> {
+    match agent {
+        Agent::Agy => {
+            let mut payload = serde_json::json!({
+                "event": "user",
+                "message": { "content": message }
+            })
+            .to_string();
+            payload.push('\n');
+            payload.into_bytes()
+        }
+        _ => message.as_bytes().to_vec(),
+    }
+}
+
 fn parse_start(agent: Agent, line: &str) -> Option<String> {
     let value = serde_json::from_str::<Value>(line).ok()?;
     let id = match agent {
+        Agent::Agy => {
+            if value.get("event")?.as_str()? != "init" {
+                return None;
+            }
+            value.get("conversation_id")?.as_str()?
+        }
         Agent::Claude | Agent::Cursor => {
             if value.get("type")?.as_str()? != "system" || value.get("subtype")?.as_str()? != "init"
             {
@@ -1401,6 +1453,7 @@ fn handshake_timeout() -> Duration {
 
 fn resume_marker(agent: Agent) -> &'static str {
     match agent {
+        Agent::Agy => "agy-cli",
         Agent::Claude => "claude-cli",
         Agent::Codex => "codex-exec",
         Agent::Copilot => "copilot-cli",
@@ -1437,7 +1490,7 @@ mod tests {
     use super::{
         MAX_START_LINE, Output, PROTOCOL_VERSION, ParentSignal, Provider, Reply, SupervisorControl,
         isolate_provider, parse_start, prepare_request_with, receive_exchange, request_supervisor,
-        resume, resume_marker, resumed_session, settle_accepted, supervise_request,
+        resume, resume_marker, resumed_session, settle_accepted, stdin_payload, supervise_request,
         supervisor_session_alive, terminate_child, terminate_provider, validate_control,
         watch_start,
     };
@@ -1463,10 +1516,13 @@ mod tests {
         "CURSOR_CONFIG_DIR",
         "CURSOR_DATA_DIR",
         "CURSOR_SESSION_ID",
+        "ANTIGRAVITY_CLI_HOME",
+        "ANTIGRAVITY_CONVERSATION_ID",
         "GEMINI_CLI_HOME",
         "GEMINI_SESSION_ID",
         "GROK_HOME",
         "GROK_SESSION_ID",
+        "MAGENTS_AGY_BIN",
         "MAGENTS_CLAUDE_BIN",
         "MAGENTS_CODEX_BIN",
         "MAGENTS_COPILOT_BIN",
@@ -1502,13 +1558,13 @@ session=''
 next=''
 for argument in "$@"; do
     if [ "$next" = 'session' ]; then session="$argument"; next=''; fi
-    if [ "$argument" = '--session-id' ] || [ "$argument" = '--resume' ]; then next='session'; fi
+    if [ "$argument" = '--session-id' ] || [ "$argument" = '--resume' ] || [ "$argument" = '--conversation' ]; then next='session'; fi
     case "$argument" in
         --resume=*) session="${argument#--resume=}" ;;
     esac
 done
 printf '%s\n' "$@" > "$MAGENTS_TEST_ARGS"
-printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$CLAUDE_CONFIG_DIR" "$CODEX_HOME" "$CURSOR_CONFIG_DIR" "$CURSOR_DATA_DIR" "$GROK_HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$MAGENTS_HOME" "$GEMINI_CLI_HOME" "$COPILOT_HOME" > "$MAGENTS_TEST_ENV"
+printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$CLAUDE_CONFIG_DIR" "$CODEX_HOME" "$CURSOR_CONFIG_DIR" "$CURSOR_DATA_DIR" "$GROK_HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$MAGENTS_HOME" "$GEMINI_CLI_HOME" "$COPILOT_HOME" "$ANTIGRAVITY_CLI_HOME" > "$MAGENTS_TEST_ENV"
 cat > "$MAGENTS_TEST_STDIN"
 case "$MAGENTS_TEST_AGENT" in
     claude|cursor) printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$session" ;;
@@ -1517,6 +1573,10 @@ case "$MAGENTS_TEST_AGENT" in
     opencode) printf '%s\n' '{"type":"step_start","sessionID":"ses_fixture_444"}' ;;
     gemini) printf '{"type":"init","session_id":"%s"}\n' "$session" ;;
     copilot) printf '{"type":"session.start","data":{"sessionId":"%s"}}\n' "$session" ;;
+    agy)
+        if [ -z "$session" ]; then session='77777777-7777-4777-8777-777777777777'; fi
+        printf '{"event":"init","conversation_id":"%s"}\n' "$session"
+        ;;
 esac
 "#;
 
@@ -1588,6 +1648,7 @@ esac
             std::env::set_var("OPENCODE_SESSION_ID", "foreign-opencode");
             std::env::set_var("GEMINI_SESSION_ID", "foreign-gemini");
             std::env::set_var("COPILOT_SESSION_ID", "foreign-copilot");
+            std::env::set_var("ANTIGRAVITY_CONVERSATION_ID", "foreign-agy");
         }
         let secret = "fixture prompt SECRET-5b9d";
         for (agent, variable, expected, transport) in [
@@ -1633,6 +1694,12 @@ esac
                 "--output-format\njson",
                 Transport::CopilotJson,
             ),
+            (
+                Agent::Agy,
+                "MAGENTS_AGY_BIN",
+                "--input-format\nstream-json\n--output-format\nstream-json",
+                Transport::AgyStream,
+            ),
         ] {
             unsafe {
                 std::env::set_var(variable, &binary);
@@ -1656,10 +1723,18 @@ esac
             ] {
                 assert!(!command.contains(forbidden), "{agent}: {command}");
             }
-            assert_eq!(fs::read_to_string(&stdin).unwrap(), secret);
+            let stdin_body = fs::read_to_string(&stdin).unwrap();
+            if agent == Agent::Agy {
+                assert_eq!(
+                    stdin_body,
+                    String::from_utf8(stdin_payload(agent, secret)).unwrap()
+                );
+            } else {
+                assert_eq!(stdin_body, secret);
+            }
             let values = fs::read_to_string(&environment).unwrap();
             let values = values.trim().split('|').collect::<Vec<_>>();
-            assert_eq!(values.len(), 10);
+            assert_eq!(values.len(), 11);
             assert_eq!(values[7], homes.magents.to_string_lossy());
             let expected = match agent {
                 Agent::Claude => vec![(0, homes.claude.as_path())],
@@ -1675,6 +1750,7 @@ esac
                 ],
                 Agent::Gemini => vec![(8, homes.gemini.as_path())],
                 Agent::Copilot => vec![(9, homes.copilot.as_path())],
+                Agent::Agy => vec![(8, homes.gemini.as_path()), (10, homes.agy.as_path())],
             };
             for (index, value) in values.iter().enumerate() {
                 if index == 7 {
@@ -1688,7 +1764,7 @@ esac
             }
         }
         let records = records(&homes).unwrap();
-        assert_eq!(records.len(), 7);
+        assert_eq!(records.len(), 8);
         assert!(records.iter().all(|record| record.session().is_some()));
     }
 
@@ -1733,6 +1809,10 @@ esac
             )
             .as_deref(),
             Some("ses_o1")
+        );
+        assert_eq!(
+            parse_start(Agent::Agy, r#"{"event":"init","conversation_id":"ag1"}"#).as_deref(),
+            Some("ag1")
         );
         assert_eq!(
             parse_start(Agent::Gemini, r#"{"type":"init","session_id":"gm1"}"#).as_deref(),
@@ -1788,6 +1868,8 @@ esac
             .is_none()
         );
         assert!(parse_start(Agent::OpenCode, r#"{"sessionID":"bad id"}"#).is_none());
+        assert!(parse_start(Agent::Agy, r#"{"event":"user","conversation_id":"ag1"}"#).is_none());
+        assert!(parse_start(Agent::Agy, r#"{"type":"init","conversation_id":"ag1"}"#).is_none());
         assert!(parse_start(Agent::Gemini, r#"{"type":"message","session_id":"gm1"}"#).is_none());
         assert!(
             parse_start(
@@ -1878,6 +1960,12 @@ esac
                 "copilot-resume-1",
                 "--resume=copilot-resume-1",
             ),
+            (
+                Agent::Agy,
+                "MAGENTS_AGY_BIN",
+                "agy-resume-1",
+                "--conversation\nagy-resume-1",
+            ),
         ] {
             unsafe {
                 std::env::set_var(variable, &binary);
@@ -1890,7 +1978,15 @@ esac
             let command = fs::read_to_string(&args).unwrap();
             assert!(command.contains(expected), "{agent}: {command}");
             assert!(!command.contains(message));
-            assert_eq!(fs::read_to_string(&stdin).unwrap(), message);
+            let stdin_body = fs::read_to_string(&stdin).unwrap();
+            if agent == Agent::Agy {
+                assert_eq!(
+                    stdin_body,
+                    String::from_utf8(stdin_payload(agent, message)).unwrap()
+                );
+            } else {
+                assert_eq!(stdin_body, message);
+            }
         }
         assert!(records(&homes).unwrap().is_empty());
     }
@@ -2790,6 +2886,7 @@ sleep 5
 
     #[test]
     fn resume_markers_are_stable() {
+        assert_eq!(resume_marker(Agent::Agy), "agy-cli");
         assert_eq!(resume_marker(Agent::Claude), "claude-cli");
         assert_eq!(resume_marker(Agent::Codex), "codex-exec");
         assert_eq!(resume_marker(Agent::Copilot), "copilot-cli");

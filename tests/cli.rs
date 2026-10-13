@@ -22,6 +22,8 @@ const GROK_ID: &str = "01testgrok0000000000000000";
 const OPENCODE_SPAWN_ID: &str = "ses_spawned_opencode";
 const GEMINI_ID: &str = "55555555-5555-4555-8555-555555555555";
 const COPILOT_ID: &str = "66666666-6666-4666-8666-666666666666";
+const AGY_ID: &str = "88888888-8888-4888-8888-888888888888";
+const AGY_SPAWN_ID: &str = "77777777-7777-4777-8777-777777777777";
 
 const AGENT_STUB: &str = r#"
 if [ "$1" = 'create-chat' ]; then
@@ -31,13 +33,14 @@ fi
 printf '%s\n' "$@" > "$MAGENTS_TEST_ARGS"
 printf '%s\n' "$$" > "$MAGENTS_TEST_AGENT_PID"
 printf '%s\n' "$PPID" > "$MAGENTS_TEST_SUPERVISOR_PID"
-printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
     "${CLAUDE_CONFIG_DIR-}" "${CODEX_HOME-}" "${CURSOR_CONFIG_DIR-}" "${CURSOR_DATA_DIR-}" \
     "${GROK_HOME-}" "${XDG_DATA_HOME-}" "${XDG_CONFIG_HOME-}" "$MAGENTS_HOME" \
     "${CLAUDE_SESSION_ID-}" \
     "${CODEX_SESSION_ID-}" "${CURSOR_SESSION_ID-}" "${OPENCODE_SESSION_ID-}" \
     "${GEMINI_CLI_HOME-}" "${COPILOT_HOME-}" \
     "${GEMINI_SESSION_ID-}" "${COPILOT_SESSION_ID-}" \
+    "${ANTIGRAVITY_CLI_HOME-}" "${ANTIGRAVITY_CONVERSATION_ID-}" \
     > "$MAGENTS_TEST_ENV"
 cat > "$MAGENTS_TEST_STDIN"
 case "${MAGENTS_TEST_MODE-}" in
@@ -60,7 +63,7 @@ previous=''
 next=''
 for argument in "$@"; do
     if [ "$next" = 'session' ]; then session="$argument"; next=''; fi
-    if [ "$argument" = '--session-id' ] || [ "$argument" = '--resume' ] || [ "$argument" = '--session' ]; then next='session'; fi
+    if [ "$argument" = '--session-id' ] || [ "$argument" = '--resume' ] || [ "$argument" = '--session' ] || [ "$argument" = '--conversation' ]; then next='session'; fi
     if [ "$previous" = 'resume' ] && [ -z "$session" ]; then session="$argument"; fi
     case "$argument" in
         --resume=*) session="${argument#--resume=}" ;;
@@ -74,6 +77,10 @@ case "$MAGENTS_TEST_AGENT" in
     opencode) printf '%s\n' '{"type":"step_start","sessionID":"ses_spawned_opencode"}' ;;
     gemini) printf '{"type":"init","session_id":"%s"}\n' "$session" ;;
     copilot) printf '{"type":"session.start","data":{"sessionId":"%s"}}\n' "$session" ;;
+    agy)
+        if [ -z "$session" ]; then session='77777777-7777-4777-8777-777777777777'; fi
+        printf '{"event":"init","conversation_id":"%s"}\n' "$session"
+        ;;
 esac
 index=0
 while [ "$index" -lt 300 ]; do
@@ -112,6 +119,7 @@ impl Harness {
             .env("XDG_CONFIG_HOME", self.root.join("opencode-config"))
             .env("XDG_DATA_HOME", &self.root)
             .env("GEMINI_CLI_HOME", self.root.join("gemini"))
+            .env("ANTIGRAVITY_CLI_HOME", self.root.join("agy"))
             .env("COPILOT_HOME", self.root.join("copilot"))
             .args(args);
         for key in [
@@ -127,6 +135,7 @@ impl Harness {
             "GROK_SESSION_ID",
             "GEMINI_SESSION_ID",
             "COPILOT_SESSION_ID",
+            "ANTIGRAVITY_CONVERSATION_ID",
             "OPENCODE_DIRECTORY",
             "OPENCODE_SERVER",
             "OPENCODE_SESSION",
@@ -391,6 +400,22 @@ fn write_tree(root: &Path) {
 {"type":"assistant.message","data":{"content":"viewing src/copilot.rs","toolRequests":[{"name":"view","arguments":{"path":"src/copilot.rs"}}]}}
 "#,
     );
+    write(
+        &root.join("agy/history.jsonl"),
+        &format!(
+            r#"{{"conversationId":"{AGY_ID}","display":"AGY CLI check","timestamp":"2026-08-29T00:00:00Z","workspace":"/tmp/agy"}}
+"#
+        ),
+    );
+    write(
+        &root
+            .join("agy/brain")
+            .join(AGY_ID)
+            .join(".system_generated/logs/transcript_full.jsonl"),
+        r#"{"step_index":0,"type":"user_input","source":"user","content":"run the agy dedicated databases check"}
+{"step_index":1,"type":"model_output","source":"model","content":"inspecting src/agy.rs","toolName":"Read"}
+"#,
+    );
 }
 
 #[test]
@@ -411,6 +436,7 @@ fn cli_lists_reads_searches_and_mails_across_harnesses() {
     assert!(agents.contains(&"opencode".into()));
     assert!(agents.contains(&"gemini".into()));
     assert!(agents.contains(&"copilot".into()));
+    assert!(agents.contains(&"agy".into()));
 
     let claude = harness.json(&["get", "claude:disaster-recovery"]);
     assert_eq!(claude["session_id"], CLAUDE_ID);
@@ -454,6 +480,13 @@ fn cli_lists_reads_searches_and_mails_across_harnesses() {
             .as_str()
             .unwrap()
             .contains("copilot dedicated databases")
+    );
+    let agy = harness.json(&["read", "agy:AGY CLI", "-n", "10"]);
+    assert!(
+        agy["last_user_request"]
+            .as_str()
+            .unwrap()
+            .contains("agy dedicated databases")
     );
 
     let hits = harness.json(&["search", "109 point"]);
@@ -781,6 +814,7 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
         ("opencode", "MAGENTS_OPENCODE_BIN", "opencode-run"),
         ("gemini", "MAGENTS_GEMINI_BIN", "gemini-stream"),
         ("copilot", "MAGENTS_COPILOT_BIN", "copilot-json"),
+        ("agy", "MAGENTS_AGY_BIN", "agy-stream"),
     ];
 
     for (agent, variable, origin) in cases {
@@ -820,6 +854,7 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
             "codex" => assert_eq!(session_id, CODEX_SPAWN_ID),
             "cursor" => assert_eq!(session_id, CURSOR_SPAWN_ID),
             "opencode" => assert_eq!(session_id, OPENCODE_SPAWN_ID),
+            "agy" => assert_eq!(session_id, AGY_SPAWN_ID),
             _ => {}
         }
 
@@ -870,13 +905,27 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
             "opencode" => vec!["run", "--format", "json"],
             "gemini" => vec!["--output-format", "stream-json", "--session-id", session_id],
             "copilot" => vec!["--output-format", "json", "--session-id", session_id],
+            "agy" => vec![
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+            ],
             _ => unreachable!(),
         };
         assert_eq!(args, expected, "{agent} argv changed");
         assert!(!args.iter().any(|argument| argument.contains(&prompt)));
 
         let child_prompt = wait_for(&artifacts.join("stdin"), HOLD);
-        assert_eq!(child_prompt, prompt);
+        if agent == "agy" {
+            let expected = format!(
+                "{}\n",
+                serde_json::json!({"event":"user","message":{"content": prompt}})
+            );
+            assert_eq!(child_prompt, expected);
+        } else {
+            assert_eq!(child_prompt, prompt);
+        }
         assert!(!child_prompt.contains("<magents-reply-to"));
         let environment = wait_for(&artifacts.join("environment"), HOLD);
         let environment = environment.trim_end().split('|').collect::<Vec<_>>();
@@ -898,11 +947,15 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
             ],
             "gemini" => vec![(12, harness.root.join("gemini"))],
             "copilot" => vec![(13, harness.root.join("copilot"))],
+            "agy" => vec![
+                (12, harness.root.join("gemini")),
+                (16, harness.root.join("agy")),
+            ],
             _ => unreachable!(),
         };
-        assert_eq!(environment.len(), 16, "{agent}: {environment:?}");
-        for index in 0..14 {
-            if index == 7 || (8..=11).contains(&index) {
+        assert_eq!(environment.len(), 18, "{agent}: {environment:?}");
+        for index in 0..18 {
+            if index == 7 || matches!(index, 8..=11 | 14 | 15 | 17) {
                 continue;
             }
             let expected = expected_homes
@@ -913,7 +966,9 @@ fn cli_spawns_all_harnesses_and_routes_later_messages() {
             assert_eq!(environment[index], expected, "{agent}: {environment:?}");
         }
         assert!(environment[8..=11].iter().all(|value| value.is_empty()));
-        assert!(environment[14..].iter().all(|value| value.is_empty()));
+        assert!(environment[14].is_empty());
+        assert!(environment[15].is_empty());
+        assert!(environment[17].is_empty());
 
         let resolved = harness.json(&["get", &format!("{agent}:{session_id}")]);
         assert_eq!(resolved["session_id"], session_id);
