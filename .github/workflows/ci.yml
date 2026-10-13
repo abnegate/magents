@@ -401,7 +401,7 @@ jobs:
 
   publish-mcp-registry:
     name: MCP Registry
-    if: github.event_name == 'release' && !contains(github.event.release.tag_name, '-')
+    if: github.event_name == 'release' && !github.event.release.prerelease && !contains(github.event.release.tag_name, '-')
     needs: [prepare-release, release-manifest]
     runs-on: ubuntu-latest
     permissions:
@@ -412,6 +412,7 @@ jobs:
       MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
       SERVER_NAME: io.github.abnegate/magents
       VERSION: ${{ needs.prepare-release.outputs.version }}
+      IMAGE_TAG: ${{ github.event.release.tag_name }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -431,8 +432,8 @@ jobs:
       - name: Set server.json to the release version
         if: steps.exists.outputs.published == 'false'
         run: |
-          jq --arg v "$VERSION" \
-            '.version = $v | .packages |= map(.identifier |= sub(":[^:]+$"; ":" + $v))' \
+          jq --arg v "$VERSION" --arg tag "$IMAGE_TAG" \
+            '.version = $v | .packages |= map(.identifier |= sub(":[^:]+$"; ":" + $tag))' \
             server.json > server.json.tmp
           mv server.json.tmp server.json
           cat server.json
