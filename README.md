@@ -2,6 +2,10 @@
   <img src="docs/assets/hero.svg" alt="magents shared session bus across Claude, Codex, Grok, and Cursor" width="100%" />
 </p>
 
+<p align="center">
+  [![HOL Trust](https://img.shields.io/endpoint?url=https%3A%2F%2Fhol.org%2Fapi%2Fregistry%2Fbadges%2Fplugin%3Fslug%3Dabnegate%252Fmagents%26metric%3Dtrust%26style%3Dflat)](https://hol.org/registry/plugins/abnegate%2Fmagents)
+</p>
+
 Claude Code, Codex, Copilot, Cursor, Gemini, Grok, and OpenCode already keep
 transcripts on disk. **magents** is the shared API over those sessions - an MCP
 server plus a small CLI - so one agent can pick up where another left off
