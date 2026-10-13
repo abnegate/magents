@@ -201,6 +201,8 @@ mod tests {
             messaging_socket: None,
             origin: None,
             tmux: None,
+            profile: None,
+            config_dir: None,
         }
     }
 

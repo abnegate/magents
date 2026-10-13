@@ -36,6 +36,9 @@ where
     let mut delivered = Vec::new();
     match session.agent {
         Agent::Claude => {
+            let overlay =
+                homes.with_claude_home(session.config_dir.as_deref(), session.profile.as_deref());
+            let homes = &overlay;
             let mut succeeded = false;
             if let Some(socket) = &session.messaging_socket {
                 match send_claude_uds(homes, session, socket, message) {
@@ -387,6 +390,8 @@ mod tests {
             messaging_socket: None,
             origin: None,
             tmux: None,
+            profile: None,
+            config_dir: None,
         }
     }
 

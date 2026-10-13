@@ -1,12 +1,12 @@
 use crate::error::{Error, Result};
-use crate::homes::{Homes, named_process_alive, pid_alive};
+use crate::homes::{ClaudeProfile, Homes, named_process_alive, pid_alive};
 use crate::model::{Agent, Caller, Identity, Session};
 use chrono::{DateTime, TimeZone, Utc};
 use regex::Regex;
 use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -100,9 +100,15 @@ pub fn list_sessions(homes: &Homes, filter: &ListFilter) -> Result<Vec<Session>>
             .cmp(&left.live)
             .then_with(|| right.activity_ms().cmp(&left.activity_ms()))
             .then_with(|| left.session_id.cmp(&right.session_id))
+            .then_with(|| left.profile.cmp(&right.profile))
+            .then_with(|| left.config_dir.cmp(&right.config_dir))
     });
-    sessions
-        .dedup_by(|left, right| left.agent == right.agent && left.session_id == right.session_id);
+    sessions.dedup_by(|left, right| {
+        left.agent == right.agent
+            && left.session_id == right.session_id
+            && left.profile == right.profile
+            && left.config_dir == right.config_dir
+    });
     if filter.limit > 0 && sessions.len() > filter.limit {
         sessions.truncate(filter.limit);
     }
@@ -142,6 +148,19 @@ pub fn resolve(homes: &Homes, reference: &str) -> Result<Session> {
         ..ListFilter::default()
     };
     let sessions = list_sessions(homes, &filter)?;
+    let (profile, rest) = split_profile_ref(rest, &sessions);
+    let sessions: Vec<Session> = match profile {
+        Some(profile) => sessions
+            .into_iter()
+            .filter(|session| {
+                session
+                    .profile
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(profile))
+            })
+            .collect(),
+        None => sessions,
+    };
     if rest.eq_ignore_ascii_case("latest") || rest.eq_ignore_ascii_case("self") {
         return sessions
             .into_iter()
@@ -316,6 +335,24 @@ fn split_agent_ref(reference: &str) -> (Option<Agent>, &str) {
     (None, reference)
 }
 
+fn split_profile_ref<'a>(rest: &'a str, sessions: &[Session]) -> (Option<&'a str>, &'a str) {
+    let Some((head, tail)) = rest.split_once(':') else {
+        return (None, rest);
+    };
+    if tail.is_empty() {
+        return (None, rest);
+    }
+    if sessions.iter().any(|session| {
+        session
+            .profile
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case(head))
+    }) {
+        return (Some(head), tail);
+    }
+    (None, rest)
+}
+
 fn uuid_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -345,175 +382,225 @@ pub fn claude_transcript_index(claude_home: &Path) -> HashMap<String, PathBuf> {
 }
 
 fn discover_claude(homes: &Homes) -> Result<Vec<Session>> {
-    let index = claude_transcript_index(&homes.claude);
+    let mut sessions = Vec::new();
+    for profile in homes.claude_profiles() {
+        let primary = profile.config_dir.as_deref() == Some(homes.claude.as_path());
+        sessions.extend(discover_claude_profile(&profile, primary)?);
+    }
+    Ok(sessions)
+}
+
+fn discover_claude_profile(profile: &ClaudeProfile, primary: bool) -> Result<Vec<Session>> {
+    let index = profile
+        .config_dir
+        .as_deref()
+        .map(claude_transcript_index)
+        .unwrap_or_default();
     let mut by_id: HashMap<String, Session> = HashMap::new();
-
-    let live_dir = homes.claude.join("sessions");
-    if live_dir.is_dir() {
-        for entry in fs::read_dir(&live_dir).map_err(|source| Error::Io {
-            path: live_dir.clone(),
-            source,
-        })? {
-            let entry = entry.map_err(|source| Error::Io {
-                path: live_dir.clone(),
-                source,
-            })?;
-            let path = entry.path();
-            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
-            };
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
-            }
-            if !stem.chars().all(|ch| ch.is_ascii_digit()) {
-                continue;
-            }
-            let Ok(value) = read_json(&path) else {
-                continue;
-            };
-            let pid = value.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32;
-            let Some(session_id) = value.get("sessionId").and_then(Value::as_str) else {
-                continue;
-            };
-            if !pid_alive(pid) {
-                continue;
-            }
-            let messaging_socket = value
-                .get("messagingSocketPath")
-                .and_then(Value::as_str)
-                .filter(|path| !path.is_empty())
-                .map(PathBuf::from)
-                .or_else(|| {
-                    let fallback = PathBuf::from(format!("/tmp/cc-socks/{pid}.sock"));
-                    fallback.exists().then_some(fallback)
-                });
-            by_id.insert(
-                session_id.to_string(),
-                Session {
-                    agent: Agent::Claude,
-                    session_id: session_id.to_string(),
-                    desktop_id: None,
-                    name: value
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned),
-                    title: None,
-                    cwd: value
-                        .get("cwd")
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned),
-                    branch: None,
-                    live: true,
-                    archived: false,
-                    pid: Some(pid),
-                    model: None,
-                    last_activity_at: millis(value.get("startedAt").and_then(Value::as_i64)),
-                    transcript_path: index.get(session_id).cloned(),
-                    messaging_socket,
-                    origin: value
-                        .get("entrypoint")
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned),
-                    tmux: value
-                        .get("tmux")
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned),
-                },
-            );
-        }
+    if let Some(config_dir) = &profile.config_dir {
+        discover_claude_live(config_dir, profile, &index, &mut by_id, primary)?;
     }
-
-    if homes.claude_desktop.is_dir() {
-        for entry in WalkDir::new(&homes.claude_desktop)
-            .into_iter()
-            .flatten()
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| name.starts_with("local_") && name.ends_with(".json"))
-            })
-        {
-            let Ok(value) = read_json(entry.path()) else {
-                continue;
-            };
-            let Some(desktop_id) = value.get("sessionId").and_then(Value::as_str) else {
-                continue;
-            };
-            let cli_id = value
-                .get("cliSessionId")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned);
-            let archived = value
-                .get("isArchived")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let title = value
-                .get("title")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned);
-            let cwd = value
-                .get("cwd")
-                .or_else(|| value.get("originCwd"))
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned);
-            let branch = value
-                .get("branch")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned);
-            let model = value
-                .get("model")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned);
-            let last_activity_at = millis(
-                value
-                    .get("lastActivityAt")
-                    .or_else(|| value.get("lastFocusedAt"))
-                    .and_then(Value::as_i64),
-            );
-            if let Some(session_id) = &cli_id {
-                if let Some(existing) = by_id.get_mut(session_id) {
-                    existing.desktop_id = Some(desktop_id.to_string());
-                    if existing.title.is_none() {
-                        existing.title = title.clone();
-                    }
-                    if existing.cwd.is_none() {
-                        existing.cwd = cwd.clone();
-                    }
-                    existing.branch = branch.clone();
-                    existing.model = model.clone();
-                    existing.archived = archived;
-                    if existing.last_activity_at.is_none() {
-                        existing.last_activity_at = last_activity_at;
-                    }
-                    continue;
-                }
-                by_id.insert(
-                    session_id.clone(),
-                    Session {
-                        agent: Agent::Claude,
-                        session_id: session_id.clone(),
-                        desktop_id: Some(desktop_id.to_string()),
-                        name: None,
-                        title,
-                        cwd,
-                        branch,
-                        live: false,
-                        archived,
-                        pid: None,
-                        model,
-                        last_activity_at,
-                        transcript_path: index.get(session_id).cloned(),
-                        messaging_socket: None,
-                        origin: Some("claude-desktop".into()),
-                        tmux: None,
-                    },
-                );
-            }
-        }
+    if let Some(desktop) = &profile.desktop_sessions {
+        discover_claude_desktop(desktop, profile, &index, &mut by_id);
     }
-
     Ok(by_id.into_values().collect())
+}
+
+fn discover_claude_live(
+    config_dir: &Path,
+    profile: &ClaudeProfile,
+    index: &HashMap<String, PathBuf>,
+    by_id: &mut HashMap<String, Session>,
+    primary: bool,
+) -> Result<()> {
+    let live_dir = config_dir.join("sessions");
+    if !live_dir.is_dir() {
+        return Ok(());
+    }
+    let entries = match fs::read_dir(&live_dir) {
+        Ok(entries) => entries,
+        Err(source) if primary => {
+            return Err(Error::Io {
+                path: live_dir,
+                source,
+            });
+        }
+        Err(_) => return Ok(()),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(source) if primary => {
+                return Err(Error::Io {
+                    path: live_dir.clone(),
+                    source,
+                });
+            }
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        if !stem.chars().all(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(value) = read_json(&path) else {
+            continue;
+        };
+        let pid = value.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32;
+        let Some(session_id) = value.get("sessionId").and_then(Value::as_str) else {
+            continue;
+        };
+        if !pid_alive(pid) {
+            continue;
+        }
+        let messaging_socket = value
+            .get("messagingSocketPath")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                let fallback = PathBuf::from(format!("/tmp/cc-socks/{pid}.sock"));
+                fallback.exists().then_some(fallback)
+            });
+        by_id.insert(
+            session_id.to_string(),
+            Session {
+                agent: Agent::Claude,
+                session_id: session_id.to_string(),
+                desktop_id: None,
+                name: value
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                title: None,
+                cwd: value
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                branch: None,
+                live: true,
+                archived: false,
+                pid: Some(pid),
+                model: None,
+                last_activity_at: millis(value.get("startedAt").and_then(Value::as_i64)),
+                transcript_path: index.get(session_id).cloned(),
+                messaging_socket,
+                origin: value
+                    .get("entrypoint")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                tmux: value
+                    .get("tmux")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                profile: profile.name.clone(),
+                config_dir: Some(config_dir.to_path_buf()),
+            },
+        );
+    }
+    Ok(())
+}
+
+fn discover_claude_desktop(
+    desktop: &Path,
+    profile: &ClaudeProfile,
+    index: &HashMap<String, PathBuf>,
+    by_id: &mut HashMap<String, Session>,
+) {
+    if !desktop.is_dir() {
+        return;
+    }
+    for entry in WalkDir::new(desktop).into_iter().flatten().filter(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with("local_") && name.ends_with(".json"))
+    }) {
+        let Ok(value) = read_json(entry.path()) else {
+            continue;
+        };
+        let Some(desktop_id) = value.get("sessionId").and_then(Value::as_str) else {
+            continue;
+        };
+        let cli_id = value
+            .get("cliSessionId")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let archived = value
+            .get("isArchived")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let title = value
+            .get("title")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let cwd = value
+            .get("cwd")
+            .or_else(|| value.get("originCwd"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let branch = value
+            .get("branch")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let model = value
+            .get("model")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let last_activity_at = millis(
+            value
+                .get("lastActivityAt")
+                .or_else(|| value.get("lastFocusedAt"))
+                .and_then(Value::as_i64),
+        );
+        let Some(session_id) = cli_id else {
+            continue;
+        };
+        if let Some(existing) = by_id.get_mut(&session_id) {
+            existing.desktop_id = Some(desktop_id.to_string());
+            if existing.title.is_none() {
+                existing.title = title;
+            }
+            if existing.cwd.is_none() {
+                existing.cwd = cwd;
+            }
+            existing.branch = branch;
+            existing.model = model;
+            existing.archived = archived;
+            if existing.last_activity_at.is_none() {
+                existing.last_activity_at = last_activity_at;
+            }
+            continue;
+        }
+        by_id.insert(
+            session_id.clone(),
+            Session {
+                agent: Agent::Claude,
+                session_id: session_id.clone(),
+                desktop_id: Some(desktop_id.to_string()),
+                name: None,
+                title,
+                cwd,
+                branch,
+                live: false,
+                archived,
+                pid: None,
+                model,
+                last_activity_at,
+                transcript_path: index.get(&session_id).cloned(),
+                messaging_socket: None,
+                origin: Some("claude-desktop".into()),
+                tmux: None,
+                profile: profile.name.clone(),
+                config_dir: profile.config_dir.clone(),
+            },
+        );
+    }
 }
 
 #[derive(Deserialize)]
@@ -601,6 +688,8 @@ fn discover_grok(homes: &Homes) -> Result<Vec<Session>> {
                 "grok".into()
             }),
             tmux: None,
+            profile: None,
+            config_dir: None,
         });
     }
     Ok(sessions)
@@ -659,6 +748,8 @@ fn discover_codex(homes: &Homes) -> Result<Vec<Session>> {
             messaging_socket: None,
             origin: Some(codex_origin(source.as_deref())),
             tmux: None,
+            profile: None,
+            config_dir: None,
         });
     }
     Ok(sessions)
@@ -775,6 +866,8 @@ fn discover_cursor(homes: &Homes) -> Result<Vec<Session>> {
                 messaging_socket: None,
                 origin: Some("cursor".into()),
                 tmux: None,
+                profile: None,
+                config_dir: None,
             });
         }
     }
@@ -1019,6 +1112,8 @@ fn read_opencode_sessions(
             messaging_socket: None,
             origin: Some("opencode".into()),
             tmux: None,
+            profile: None,
+            config_dir: None,
         });
     }
     Ok(sessions)
@@ -1074,6 +1169,8 @@ fn discover_opencode_json(homes: &Homes) -> Result<Vec<Session>> {
             messaging_socket: None,
             origin: Some("opencode".into()),
             tmux: None,
+            profile: None,
+            config_dir: None,
         });
     }
     Ok(sessions)
@@ -1128,6 +1225,8 @@ fn discover_gemini(homes: &Homes) -> Result<Vec<Session>> {
             messaging_socket: None,
             origin: Some("gemini".into()),
             tmux: None,
+            profile: None,
+            config_dir: None,
         };
         by_id
             .entry(parsed.id)
@@ -1377,20 +1476,56 @@ fn discover_copilot(homes: &Homes) -> Result<Vec<Session>> {
             messaging_socket: None,
             origin: Some("copilot".into()),
             tmux: None,
+            profile: None,
+            config_dir: None,
         });
     }
     Ok(sessions)
 }
 
 fn discover_agy(homes: &Homes) -> Result<Vec<Session>> {
-    let root = &homes.agy;
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
-    let live_app = named_process_alive("agy");
-    let history = agy_history(root);
     let mut by_id: HashMap<String, Session> = HashMap::new();
+    let cli_live = named_process_alive("agy");
+    let desktop_live = agy_desktop_process_alive();
+    discover_agy_files(&mut by_id, &homes.agy, "agy", cli_live)?;
+    discover_agy_files(&mut by_id, &homes.agy_desktop, "desktop", desktop_live)?;
+    overlay_agy_summaries(&mut by_id, homes, &homes.agy, cli_live, desktop_live);
+    overlay_agy_summaries(
+        &mut by_id,
+        homes,
+        &homes.agy_desktop,
+        cli_live,
+        desktop_live,
+    );
+    Ok(by_id.into_values().collect())
+}
 
+fn agy_desktop_process_alive() -> bool {
+    named_process_alive("Antigravity") || named_process_alive("antigravity")
+}
+
+fn agy_session_live(
+    process_alive: bool,
+    presence: bool,
+    last_activity: Option<DateTime<Utc>>,
+) -> bool {
+    process_alive && (presence || recently_active(last_activity))
+}
+
+fn agy_presence(root: &Path, id: &str) -> bool {
+    root.join("presence").join(format!("{id}.lock")).is_file()
+}
+
+fn discover_agy_files(
+    by_id: &mut HashMap<String, Session>,
+    root: &Path,
+    origin: &str,
+    live_app: bool,
+) -> Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    let history = agy_history(root);
     let conversations = root.join("conversations");
     if conversations.is_dir() {
         let entries = fs::read_dir(&conversations).map_err(|source| Error::Io {
@@ -1403,7 +1538,8 @@ fn discover_agy(homes: &Homes) -> Result<Vec<Session>> {
                 source,
             })?;
             let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("db") {
+            let ext = path.extension().and_then(|ext| ext.to_str());
+            if !matches!(ext, Some("db") | Some("pb")) {
                 continue;
             }
             let Some(id) = path
@@ -1416,7 +1552,7 @@ fn discover_agy(homes: &Homes) -> Result<Vec<Session>> {
             if !crate::model::valid_session_id(Agent::Agy, &id) {
                 continue;
             }
-            insert_agy_session(&mut by_id, root, &id, Some(path), &history, live_app);
+            insert_agy_session(by_id, root, &id, Some(path), &history, origin, live_app);
         }
     }
 
@@ -1443,12 +1579,237 @@ fn discover_agy(homes: &Homes) -> Result<Vec<Session>> {
             }
             let jsonl = agy_transcript_jsonl(root, id);
             if jsonl.is_file() {
-                insert_agy_session(&mut by_id, root, id, Some(jsonl), &history, live_app);
+                insert_agy_session(by_id, root, id, Some(jsonl), &history, origin, live_app);
             }
         }
     }
+    Ok(())
+}
 
-    Ok(by_id.into_values().collect())
+fn overlay_agy_summaries(
+    by_id: &mut HashMap<String, Session>,
+    homes: &Homes,
+    summaries_root: &Path,
+    cli_live: bool,
+    desktop_live: bool,
+) {
+    for row in load_agy_summaries(summaries_root).into_values() {
+        let origin = row.origin.clone().unwrap_or_else(|| {
+            if summaries_root == homes.agy_desktop.as_path() {
+                "desktop".into()
+            } else {
+                "agy".into()
+            }
+        });
+        let desktop = origin == "desktop";
+        if let Some(existing) = by_id.get_mut(&row.id) {
+            if let Some(title) = row.title.clone() {
+                existing.title = Some(title);
+            }
+            if let Some(cwd) = row.cwd.clone() {
+                existing.cwd = Some(cwd);
+            }
+            if row.last_activity_at.is_some() {
+                existing.last_activity_at = row.last_activity_at;
+            }
+            existing.origin = Some(origin.clone());
+            existing.desktop_id = desktop.then(|| row.id.clone());
+            existing.archived |= row.archived;
+            let presence_root = if desktop {
+                homes.agy_desktop.as_path()
+            } else {
+                homes.agy.as_path()
+            };
+            let process = if desktop { desktop_live } else { cli_live };
+            existing.live = agy_session_live(
+                process,
+                agy_presence(presence_root, &row.id),
+                existing.last_activity_at,
+            );
+            continue;
+        }
+        let surface = if desktop {
+            homes.agy_desktop.as_path()
+        } else {
+            homes.agy.as_path()
+        };
+        let other = if desktop {
+            homes.agy.as_path()
+        } else {
+            homes.agy_desktop.as_path()
+        };
+        let transcript_path = agy_transcript_path(surface, &row.id)
+            .or_else(|| agy_transcript_path(other, &row.id))
+            .or_else(|| {
+                row.has_fts
+                    .then(|| summaries_root.join("conversation_summaries.db"))
+            });
+        let Some(transcript_path) = transcript_path else {
+            continue;
+        };
+        if !transcript_path.is_file() {
+            continue;
+        }
+        let last_activity_at = row.last_activity_at.or_else(|| {
+            transcript_path
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .map(DateTime::<Utc>::from)
+        });
+        by_id.insert(
+            row.id.clone(),
+            Session {
+                agent: Agent::Agy,
+                session_id: row.id.clone(),
+                desktop_id: desktop.then(|| row.id.clone()),
+                name: None,
+                title: row.title,
+                cwd: row.cwd,
+                branch: None,
+                live: agy_session_live(
+                    if desktop { desktop_live } else { cli_live },
+                    agy_presence(surface, &row.id),
+                    last_activity_at,
+                ),
+                archived: row.archived,
+                pid: None,
+                model: None,
+                last_activity_at,
+                transcript_path: Some(transcript_path),
+                messaging_socket: None,
+                origin: Some(origin),
+                tmux: None,
+                profile: None,
+                config_dir: None,
+            },
+        );
+    }
+}
+
+fn agy_transcript_path(root: &Path, id: &str) -> Option<PathBuf> {
+    let jsonl = agy_transcript_jsonl(root, id);
+    if jsonl.is_file() {
+        return Some(jsonl);
+    }
+    let db = root.join("conversations").join(format!("{id}.db"));
+    if db.is_file() {
+        return Some(db);
+    }
+    let pb = root.join("conversations").join(format!("{id}.pb"));
+    if pb.is_file() {
+        return Some(pb);
+    }
+    None
+}
+
+struct AgySummaryRow {
+    id: String,
+    title: Option<String>,
+    cwd: Option<String>,
+    last_activity_at: Option<DateTime<Utc>>,
+    origin: Option<String>,
+    archived: bool,
+    has_fts: bool,
+}
+
+fn load_agy_summaries(root: &Path) -> HashMap<String, AgySummaryRow> {
+    let db = root.join("conversation_summaries.db");
+    let Ok(connection) =
+        Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return HashMap::new();
+    };
+    let mut fts_ids = HashSet::new();
+    if let Ok(mut statement) = connection
+        .prepare("SELECT DISTINCT conversation_id FROM conversations_fts WHERE chunk_index >= 0")
+        && let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(0))
+    {
+        fts_ids.extend(rows.flatten());
+    }
+    let Ok(mut statement) = connection.prepare(
+        "SELECT conversation_id, title, preview, last_modified_time, workspace_uris, app_data_dir, killed FROM conversation_summaries",
+    ) else {
+        return HashMap::new();
+    };
+    let Ok(rows) = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<i64>>(6)?,
+        ))
+    }) else {
+        return HashMap::new();
+    };
+    let mut map = HashMap::new();
+    for row in rows.flatten() {
+        let (id, title, preview, modified, uris, app_data_dir, killed) = row;
+        if id.is_empty() || !crate::model::valid_session_id(Agent::Agy, &id) {
+            continue;
+        }
+        let title = title
+            .filter(|value| !value.is_empty())
+            .or_else(|| preview.filter(|value| !value.is_empty()));
+        map.insert(
+            id.clone(),
+            AgySummaryRow {
+                has_fts: fts_ids.contains(&id),
+                origin: app_data_dir
+                    .as_deref()
+                    .and_then(agy_origin_from_app_data)
+                    .map(str::to_string),
+                cwd: uris.as_deref().and_then(agy_cwd_from_uris),
+                last_activity_at: modified.as_deref().and_then(parse_agy_datetime),
+                archived: killed.unwrap_or(0) != 0,
+                title,
+                id,
+            },
+        );
+    }
+    map
+}
+
+fn agy_origin_from_app_data(value: &str) -> Option<&'static str> {
+    let value = value
+        .trim()
+        .trim_end_matches('/')
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(value);
+    match value {
+        "antigravity" | "antigravity-ide" => Some("desktop"),
+        "antigravity-cli" => Some("agy"),
+        _ => None,
+    }
+}
+
+fn agy_cwd_from_uris(raw: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(raw).ok()?;
+    for item in value.as_array()? {
+        if let Some(path) = item
+            .as_str()
+            .and_then(file_uri_path)
+            .filter(|path| !path.is_empty())
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn parse_agy_datetime(value: &str) -> Option<DateTime<Utc>> {
+    let value = value.trim();
+    if value.is_empty() || value.starts_with("0001-01-01") {
+        return None;
+    }
+    DateTime::parse_from_rfc3339(value)
+        .or_else(|_| DateTime::parse_from_rfc3339(&value.replace(' ', "T")))
+        .ok()
+        .map(|time| time.with_timezone(&Utc))
 }
 
 fn agy_transcript_jsonl(root: &Path, id: &str) -> PathBuf {
@@ -1519,6 +1880,7 @@ fn insert_agy_session(
     id: &str,
     fallback: Option<PathBuf>,
     history: &HashMap<String, AgyHistory>,
+    origin: &str,
     live_app: bool,
 ) {
     let jsonl = agy_transcript_jsonl(root, id);
@@ -1540,34 +1902,61 @@ fn insert_agy_session(
     let title = meta
         .and_then(|row| row.title.clone())
         .or_else(|| agy_title_from_transcript(&transcript_path));
-    let session = Session {
+    let desktop = origin == "desktop";
+    let mut session = Session {
         agent: Agent::Agy,
         session_id: id.to_string(),
-        desktop_id: None,
+        desktop_id: desktop.then(|| id.to_string()),
         name: None,
         title,
         cwd: meta.and_then(|row| row.cwd.clone()),
         branch: None,
-        live: live_app && recently_active(last_activity_at),
+        live: agy_session_live(live_app, agy_presence(root, id), last_activity_at),
         archived: false,
         pid: None,
         model: None,
         last_activity_at,
         transcript_path: Some(transcript_path.clone()),
         messaging_socket: None,
-        origin: Some("agy".into()),
+        origin: Some(origin.to_string()),
         tmux: None,
+        profile: None,
+        config_dir: None,
     };
     by_id
         .entry(id.to_string())
         .and_modify(|existing| {
-            let prefer_jsonl =
-                transcript_path.extension().and_then(|ext| ext.to_str()) == Some("jsonl");
-            if prefer_jsonl || session.activity_ms() >= existing.activity_ms() {
+            let new_rank = agy_transcript_rank(&transcript_path);
+            let old_rank = existing
+                .transcript_path
+                .as_deref()
+                .map(agy_transcript_rank)
+                .unwrap_or(0);
+            if new_rank > old_rank
+                || (new_rank == old_rank && session.activity_ms() >= existing.activity_ms())
+            {
+                if session.title.is_none() {
+                    session.title = existing.title.clone();
+                }
+                if session.cwd.is_none() {
+                    session.cwd = existing.cwd.clone();
+                }
                 *existing = session.clone();
             }
         })
         .or_insert(session);
+}
+
+fn agy_transcript_rank(path: &Path) -> u8 {
+    if path.file_name().and_then(|name| name.to_str()) == Some("conversation_summaries.db") {
+        return 0;
+    }
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("jsonl") => 3,
+        Some("db") => 2,
+        Some("pb") => 1,
+        _ => 0,
+    }
 }
 
 fn agy_title_from_transcript(path: &Path) -> Option<String> {
@@ -1591,8 +1980,9 @@ fn agy_user_title(value: &Value) -> Option<String> {
         .get("type")
         .or_else(|| value.get("source"))
         .and_then(Value::as_str)
-        .unwrap_or("");
-    if !matches!(kind, "user_input" | "user" | "user_message") {
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(kind.as_str(), "user_input" | "user" | "user_message") {
         return None;
     }
     let text = value
@@ -1600,8 +1990,25 @@ fn agy_user_title(value: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .or_else(|| value.pointer("/message/content").and_then(Value::as_str))
         .or_else(|| value.get("text").and_then(Value::as_str))?;
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = unwrap_agy_request(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     (!text.is_empty()).then(|| text.chars().take(80).collect())
+}
+
+fn unwrap_agy_request(text: &str) -> &str {
+    const OPEN: &str = "<USER_REQUEST>";
+    const CLOSE: &str = "</USER_REQUEST>";
+    let trimmed = text.trim();
+    let Some(start) = trimmed.find(OPEN) else {
+        return trimmed;
+    };
+    let inner = &trimmed[start + OPEN.len()..];
+    match inner.find(CLOSE) {
+        Some(end) => inner[..end].trim(),
+        None => inner.trim(),
+    }
 }
 
 struct CopilotStoreRow {
@@ -1838,14 +2245,22 @@ fn millis(value: Option<i64>) -> Option<DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ListFilter, cwd_matches, list_sessions, resolve, split_agent_ref, yaml_scalar};
+    use super::{
+        ListFilter, agy_cwd_from_uris, agy_origin_from_app_data, agy_presence, agy_session_live,
+        agy_transcript_path, agy_transcript_rank, cwd_matches, insert_agy_session, list_sessions,
+        parse_agy_datetime, resolve, split_agent_ref, yaml_scalar,
+    };
+    use crate::error::Error;
     use crate::homes::Homes;
     use crate::model::Agent;
     use crate::spawn::Transport;
     use crate::test_env;
-    use crate::transcript::{files_touched, search_transcripts};
+    use crate::transcript::{files_touched, read_transcript, search_transcripts};
+    use chrono::Utc;
     use serde_json::json;
+    use std::collections::HashMap;
     use std::fs;
+    use std::path::Path;
 
     #[test]
     fn parses_agent_prefixed_refs() {
@@ -3199,5 +3614,676 @@ not-json
         .unwrap();
         assert_eq!(sessions.len(), 1);
         assert!(sessions[0].title.is_none());
+    }
+
+    fn write_agy_summaries(
+        root: &Path,
+        rows: &[(&str, &str, &str, &str, &str, &str, i64)],
+        fts: &[(&str, i64, &str, &str, &str)],
+    ) {
+        fs::create_dir_all(root).unwrap();
+        let connection =
+            rusqlite::Connection::open(root.join("conversation_summaries.db")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE conversation_summaries (
+                    conversation_id text PRIMARY KEY,
+                    title text NOT NULL DEFAULT '',
+                    preview text NOT NULL DEFAULT '',
+                    last_modified_time datetime NOT NULL,
+                    workspace_uris text NOT NULL,
+                    app_data_dir text NOT NULL DEFAULT '',
+                    killed integer NOT NULL DEFAULT 0
+                );
+                CREATE VIRTUAL TABLE conversations_fts USING fts5(
+                    conversation_id UNINDEXED,
+                    chunk_index UNINDEXED,
+                    title,
+                    user_body,
+                    agent_body
+                );",
+            )
+            .unwrap();
+        for (id, title, preview, modified, uris, app, killed) in rows {
+            connection
+                .execute(
+                    "INSERT INTO conversation_summaries (
+                        conversation_id, title, preview, last_modified_time,
+                        workspace_uris, app_data_dir, killed
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    rusqlite::params![id, title, preview, modified, uris, app, killed],
+                )
+                .unwrap();
+        }
+        for (id, chunk, title, user, agent) in fts {
+            connection
+                .execute(
+                    "INSERT INTO conversations_fts (
+                        conversation_id, chunk_index, title, user_body, agent_body
+                    ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![id, chunk, title, user, agent],
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn discovers_agy_desktop_and_live_cli_formats() {
+        let directory = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(directory.path());
+        let desktop_id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+        let fts_only = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+        let archived_id = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+        let live_jsonl = "12121212-1212-4121-8121-121212121212";
+        let orphan_id = "16161616-1616-4161-8161-161616161616";
+        let cli_fts = "17171717-1717-4171-8171-171717171717";
+        fs::create_dir_all(homes.agy_desktop.join("conversations")).unwrap();
+        fs::write(
+            homes
+                .agy_desktop
+                .join("conversations")
+                .join(format!("{desktop_id}.pb")),
+            b"\x00encrypted",
+        )
+        .unwrap();
+        fs::write(
+            homes
+                .agy_desktop
+                .join("conversations")
+                .join(format!("{archived_id}.pb")),
+            b"\x00archived",
+        )
+        .unwrap();
+        fs::write(
+            homes
+                .agy_desktop
+                .join("conversations")
+                .join("not-a-session.txt"),
+            "x",
+        )
+        .unwrap();
+        write_agy_summaries(
+            &homes.agy_desktop,
+            &[
+                (
+                    desktop_id,
+                    "",
+                    "Fix Gradle Build Issues",
+                    "2026-01-19 02:30:28.705364+00:00",
+                    r#"["file:///tmp/agy-desktop"]"#,
+                    "antigravity",
+                    0,
+                ),
+                (
+                    fts_only,
+                    "FTS only title",
+                    "preview ignored",
+                    "2026-01-19T02:31:00Z",
+                    r#"["file:///tmp/agy-fts"]"#,
+                    "antigravity",
+                    0,
+                ),
+                (
+                    archived_id,
+                    "killed desktop",
+                    "",
+                    "0001-01-01 00:00:00+00:00",
+                    "not-json",
+                    "/data/antigravity-ide/",
+                    1,
+                ),
+                (
+                    orphan_id,
+                    "orphan desktop",
+                    "",
+                    "2026-01-19T00:00:00Z",
+                    "[]",
+                    "antigravity",
+                    0,
+                ),
+            ],
+            &[
+                (desktop_id, -1, "Fix Gradle Build Issues", "", ""),
+                (
+                    desktop_id,
+                    0,
+                    "",
+                    "Fix issues in src/agy-desktop.rs",
+                    "checking the gradle build",
+                ),
+                (
+                    fts_only,
+                    0,
+                    "",
+                    "fts only user body in src/agy-fts.rs",
+                    "fts only assistant",
+                ),
+            ],
+        );
+        write_agy_summaries(
+            &homes.agy,
+            &[
+                (
+                    desktop_id,
+                    "",
+                    "Fix Gradle Build Issues",
+                    "2026-01-19 02:30:17.399881+00:00",
+                    r#"["file:///tmp/agy-desktop"]"#,
+                    "antigravity",
+                    0,
+                ),
+                (
+                    live_jsonl,
+                    "Request For Ping Pong Reply",
+                    "Request For Ping Pong Reply",
+                    "2026-10-13 13:00:10.465585+00:00",
+                    r#"["file:///private/tmp"]"#,
+                    "antigravity-cli",
+                    0,
+                ),
+                (
+                    cli_fts,
+                    "CLI FTS title",
+                    "",
+                    "2026-01-19T00:00:00Z",
+                    r#"["file:///tmp/agy-cli-fts"]"#,
+                    "",
+                    0,
+                ),
+                ("", "empty id", "", "2026-01-19T00:00:00Z", "[]", "", 0),
+                (
+                    "-bad",
+                    "invalid id",
+                    "",
+                    "2026-01-19T00:00:00Z",
+                    "[]",
+                    "",
+                    0,
+                ),
+            ],
+            &[(
+                cli_fts,
+                0,
+                "",
+                "cli fts user in src/agy-cli-fts.rs",
+                "cli fts assistant",
+            )],
+        );
+        fs::create_dir_all(
+            homes
+                .agy
+                .join("brain")
+                .join(live_jsonl)
+                .join(".system_generated")
+                .join("logs"),
+        )
+        .unwrap();
+        fs::write(
+            homes
+                .agy
+                .join("brain")
+                .join(live_jsonl)
+                .join(".system_generated")
+                .join("logs")
+                .join("transcript_full.jsonl"),
+            r#"{"type":"USER_INPUT","content":"<USER_REQUEST>\nReply with exactly the word pong\n</USER_REQUEST>"}
+{"type":"PLANNER_RESPONSE","content":"pong"}
+"#,
+        )
+        .unwrap();
+
+        let sessions = list_sessions(
+            &homes,
+            &ListFilter {
+                agent: Some(Agent::Agy),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(sessions.len(), 5);
+        assert!(
+            sessions
+                .iter()
+                .all(|session| session.session_id != orphan_id)
+        );
+        let cli_fts_session = sessions
+            .iter()
+            .find(|session| session.session_id == cli_fts)
+            .unwrap();
+        assert_eq!(cli_fts_session.origin.as_deref(), Some("agy"));
+        assert!(cli_fts_session.desktop_id.is_none());
+        assert_eq!(cli_fts_session.cwd.as_deref(), Some("/tmp/agy-cli-fts"));
+        let desktop = sessions
+            .iter()
+            .find(|session| session.session_id == desktop_id)
+            .unwrap();
+        assert_eq!(desktop.origin.as_deref(), Some("desktop"));
+        assert_eq!(desktop.desktop_id.as_deref(), Some(desktop_id));
+        assert_eq!(desktop.title.as_deref(), Some("Fix Gradle Build Issues"));
+        assert_eq!(desktop.cwd.as_deref(), Some("/tmp/agy-desktop"));
+        assert!(!desktop.archived);
+        assert!(!desktop.live);
+        assert!(
+            desktop
+                .transcript_path
+                .as_ref()
+                .unwrap()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                == Some("pb")
+        );
+        let fts = sessions
+            .iter()
+            .find(|session| session.session_id == fts_only)
+            .unwrap();
+        assert_eq!(fts.title.as_deref(), Some("FTS only title"));
+        assert_eq!(fts.cwd.as_deref(), Some("/tmp/agy-fts"));
+        assert_eq!(
+            fts.transcript_path
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("conversation_summaries.db")
+        );
+        let archived = sessions
+            .iter()
+            .find(|session| session.session_id == archived_id)
+            .unwrap();
+        assert!(archived.archived);
+        assert_eq!(archived.origin.as_deref(), Some("desktop"));
+        assert!(archived.cwd.is_none());
+        let cli = sessions
+            .iter()
+            .find(|session| session.session_id == live_jsonl)
+            .unwrap();
+        assert_eq!(cli.origin.as_deref(), Some("agy"));
+        assert!(cli.desktop_id.is_none());
+        assert_eq!(cli.title.as_deref(), Some("Request For Ping Pong Reply"));
+        assert_eq!(cli.cwd.as_deref(), Some("/private/tmp"));
+
+        let transcript = read_transcript(&homes, &format!("agy:{desktop_id}"), 10).unwrap();
+        assert!(
+            transcript
+                .last_user_request
+                .as_deref()
+                .unwrap()
+                .contains("src/agy-desktop.rs")
+        );
+        assert!(
+            transcript
+                .turns
+                .iter()
+                .any(|turn| turn.role == "assistant" && turn.text.contains("gradle"))
+        );
+        let files = files_touched(&homes, &format!("agy:{desktop_id}")).unwrap();
+        assert!(files.files.iter().any(|path| path == "src/agy-desktop.rs"));
+        let fts_files = files_touched(&homes, &format!("agy:{fts_only}")).unwrap();
+        assert!(fts_files.files.iter().any(|path| path == "src/agy-fts.rs"));
+        let hits = search_transcripts(&homes, "gradle", Some(Agent::Agy), true, 10).unwrap();
+        assert!(hits.iter().any(|hit| hit.session.session_id == desktop_id));
+        let fts_hits = search_transcripts(&homes, "agy-fts", Some(Agent::Agy), true, 10).unwrap();
+        assert!(
+            fts_hits
+                .iter()
+                .any(|hit| hit.session.session_id == fts_only)
+        );
+        let resolved = resolve(&homes, desktop_id).unwrap();
+        assert_eq!(resolved.session_id, desktop_id);
+
+        let ping = read_transcript(&homes, &format!("agy:{live_jsonl}"), 10).unwrap();
+        assert!(
+            ping.last_user_request
+                .as_deref()
+                .unwrap()
+                .contains("exactly the word pong")
+        );
+        assert!(
+            !ping
+                .last_user_request
+                .as_deref()
+                .unwrap()
+                .contains("USER_REQUEST")
+        );
+
+        assert_eq!(agy_origin_from_app_data("antigravity"), Some("desktop"));
+        assert_eq!(
+            agy_origin_from_app_data("/data/antigravity-ide/"),
+            Some("desktop")
+        );
+        assert_eq!(agy_origin_from_app_data("antigravity-cli"), Some("agy"));
+        assert_eq!(agy_origin_from_app_data("other"), None);
+        assert!(parse_agy_datetime("2026-01-19 02:30:28.705364+00:00").is_some());
+        assert!(parse_agy_datetime("0001-01-01 00:00:00+00:00").is_none());
+        assert!(parse_agy_datetime("").is_none());
+        assert!(!agy_session_live(false, true, Some(Utc::now())));
+        assert!(agy_session_live(true, true, None));
+        assert!(agy_session_live(true, false, Some(Utc::now())));
+        assert!(!agy_session_live(true, false, None));
+        assert!(!agy_presence(directory.path(), desktop_id));
+        fs::create_dir_all(homes.agy_desktop.join("presence")).unwrap();
+        fs::write(
+            homes
+                .agy_desktop
+                .join("presence")
+                .join(format!("{desktop_id}.lock")),
+            "lock",
+        )
+        .unwrap();
+        assert!(agy_presence(&homes.agy_desktop, desktop_id));
+        assert_eq!(
+            agy_transcript_path(&homes.agy_desktop, desktop_id)
+                .unwrap()
+                .extension()
+                .and_then(|ext| ext.to_str()),
+            Some("pb")
+        );
+        assert!(agy_transcript_path(&homes.agy, "missing-id").is_none());
+        assert_eq!(
+            agy_transcript_rank(Path::new("conversation_summaries.db")),
+            0
+        );
+        assert_eq!(agy_transcript_rank(Path::new("a.jsonl")), 3);
+        assert_eq!(agy_transcript_rank(Path::new("a.db")), 2);
+        assert_eq!(agy_transcript_rank(Path::new("a.pb")), 1);
+        assert_eq!(agy_transcript_rank(Path::new("a.txt")), 0);
+        assert!(agy_cwd_from_uris("[]").is_none());
+        assert!(agy_cwd_from_uris("{}").is_none());
+        assert!(agy_cwd_from_uris(r#"["file://"]"#).is_none());
+        assert!(parse_agy_datetime("not-a-date").is_none());
+        let mut by_id = HashMap::new();
+        insert_agy_session(
+            &mut by_id,
+            &homes.agy,
+            "no-file",
+            None,
+            &HashMap::new(),
+            "agy",
+            false,
+        );
+        assert!(by_id.is_empty());
+        let sqlite_id = "18181818-1818-4181-8181-181818181818";
+        fs::create_dir_all(homes.agy.join("conversations")).unwrap();
+        fs::write(
+            homes
+                .agy
+                .join("conversations")
+                .join(format!("{sqlite_id}.db")),
+            b"not-sqlite",
+        )
+        .unwrap();
+        assert_eq!(
+            agy_transcript_path(&homes.agy, sqlite_id)
+                .unwrap()
+                .extension()
+                .and_then(|ext| ext.to_str()),
+            Some("db")
+        );
+        let mut history = HashMap::new();
+        history.insert(
+            sqlite_id.to_string(),
+            super::AgyHistory {
+                title: Some("kept title".into()),
+                cwd: Some("/tmp/kept".into()),
+                last_activity_at: None,
+            },
+        );
+        insert_agy_session(
+            &mut by_id,
+            &homes.agy,
+            sqlite_id,
+            Some(
+                homes
+                    .agy
+                    .join("conversations")
+                    .join(format!("{sqlite_id}.db")),
+            ),
+            &history,
+            "agy",
+            false,
+        );
+        fs::create_dir_all(
+            homes
+                .agy
+                .join("brain")
+                .join(sqlite_id)
+                .join(".system_generated")
+                .join("logs"),
+        )
+        .unwrap();
+        fs::write(
+            homes
+                .agy
+                .join("brain")
+                .join(sqlite_id)
+                .join(".system_generated")
+                .join("logs")
+                .join("transcript_full.jsonl"),
+            "{\"type\":\"model_output\",\"content\":\"no user title\"}\n",
+        )
+        .unwrap();
+        insert_agy_session(
+            &mut by_id,
+            &homes.agy,
+            sqlite_id,
+            None,
+            &HashMap::new(),
+            "agy",
+            false,
+        );
+        let merged = by_id.get(sqlite_id).unwrap();
+        assert_eq!(merged.title.as_deref(), Some("kept title"));
+        assert_eq!(merged.cwd.as_deref(), Some("/tmp/kept"));
+        assert!(
+            merged
+                .transcript_path
+                .as_ref()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with("transcript_full.jsonl")
+        );
+    }
+
+    #[test]
+    fn discovers_claude_sessions_across_named_profiles() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut homes = Homes::isolated(directory.path());
+        let pid = std::process::id();
+        let default_id = "11111111-1111-4111-8111-111111111111";
+        let work_id = "22222222-2222-4222-8222-222222222222";
+        let default_home = directory.path().join(".claude");
+        let work = directory.path().join(".claude-work");
+        homes.claude = default_home.clone();
+        fs::create_dir_all(homes.claude.join("sessions")).unwrap();
+        fs::write(
+            homes.claude.join("sessions").join(format!("{pid}.json")),
+            json!({
+                "pid": pid,
+                "sessionId": default_id,
+                "cwd": "/tmp/default",
+                "name": "default-chat"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::create_dir_all(work.join("sessions")).unwrap();
+        fs::create_dir_all(work.join("projects").join("tmp-work")).unwrap();
+        fs::write(
+            work.join("sessions").join("000002.json"),
+            json!({
+                "pid": pid,
+                "sessionId": work_id,
+                "cwd": "/tmp/work",
+                "name": "work-chat"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            work.join("sessions").join("000003.json"),
+            json!({
+                "pid": pid,
+                "sessionId": default_id,
+                "cwd": "/tmp/work-dup"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            work.join("projects")
+                .join("tmp-work")
+                .join(format!("{work_id}.jsonl")),
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"work profile prompt\"}]}}\n",
+        )
+        .unwrap();
+        let app = directory.path().join("Library").join("Application Support");
+        let default_desktop = app.join("Claude").join("claude-code-sessions");
+        let work_desktop = app.join("Claude-WORK").join("claude-code-sessions");
+        fs::create_dir_all(&default_desktop).unwrap();
+        fs::create_dir_all(&work_desktop).unwrap();
+        fs::write(
+            work_desktop.join("local_work.json"),
+            json!({
+                "sessionId": "desktop-work",
+                "cliSessionId": work_id,
+                "title": "Work desktop",
+                "cwd": "/tmp/work",
+                "lastActivityAt": chrono::Utc::now().timestamp_millis()
+            })
+            .to_string(),
+        )
+        .unwrap();
+        homes.claude_desktop = default_desktop;
+
+        let sessions = list_sessions(
+            &homes,
+            &ListFilter {
+                agent: Some(Agent::Claude),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        )
+        .unwrap();
+        let work_session = sessions
+            .iter()
+            .find(|session| session.session_id == work_id)
+            .unwrap();
+        assert_eq!(work_session.profile.as_deref(), Some("work"));
+        assert_eq!(work_session.config_dir.as_deref(), Some(work.as_path()));
+        assert_eq!(work_session.desktop_id.as_deref(), Some("desktop-work"));
+        assert_eq!(
+            work_session
+                .transcript_path
+                .as_ref()
+                .map(|path| path.file_stem().unwrap()),
+            Some(std::ffi::OsStr::new(work_id))
+        );
+        assert!(work_session.haystack().contains("work"));
+        let default_named = sessions
+            .iter()
+            .filter(|session| session.session_id == default_id)
+            .collect::<Vec<_>>();
+        assert_eq!(default_named.len(), 2, "{default_named:?}");
+        assert!(
+            default_named
+                .iter()
+                .any(|session| session.profile.is_none())
+        );
+        assert!(
+            default_named
+                .iter()
+                .any(|session| session.profile.as_deref() == Some("work"))
+        );
+
+        let resolved = resolve(&homes, "claude:work:work-chat").unwrap();
+        assert_eq!(resolved.session_id, work_id);
+        assert_eq!(resolved.profile.as_deref(), Some("work"));
+        let latest = resolve(&homes, "claude:work:latest").unwrap();
+        assert_eq!(latest.session_id, work_id);
+        let ambiguous = resolve(&homes, &format!("claude:{default_id}")).unwrap_err();
+        assert!(matches!(ambiguous, Error::Ambiguous { .. }));
+        let scoped = resolve(&homes, &format!("claude:work:{default_id}")).unwrap();
+        assert_eq!(scoped.profile.as_deref(), Some("work"));
+        assert!(matches!(
+            resolve(&homes, "claude:work:"),
+            Err(Error::NotFound(_))
+        ));
+        assert!(matches!(
+            resolve(&homes, "claude:other:work-chat"),
+            Err(Error::NotFound(_))
+        ));
+
+        fs::write(
+            work_desktop.join("local_noid.json"),
+            json!({"sessionId": "desktop-only-no-cli"}).to_string(),
+        )
+        .unwrap();
+        let blocked = directory.path().join(".claude-blocked");
+        fs::create_dir_all(blocked.join("sessions")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let sessions = blocked.join("sessions");
+            let mut permissions = fs::metadata(&sessions).unwrap().permissions();
+            permissions.set_mode(0o000);
+            fs::set_permissions(&sessions, permissions).unwrap();
+            let listed = list_sessions(
+                &homes,
+                &ListFilter {
+                    agent: Some(Agent::Claude),
+                    include_archived: true,
+                    limit: 0,
+                    ..ListFilter::default()
+                },
+            )
+            .unwrap();
+            assert!(listed.iter().any(|session| session.session_id == work_id));
+            let mut permissions = fs::metadata(&sessions).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&sessions, permissions).unwrap();
+        }
+
+        let other = tempfile::tempdir().unwrap();
+        let other_home = other.path();
+        let other_work = other_home.join(".claude-work");
+        fs::create_dir_all(other_work.join("sessions")).unwrap();
+        fs::write(
+            other_work.join("sessions").join("000004.json"),
+            json!({
+                "pid": pid,
+                "sessionId": work_id,
+                "cwd": "/tmp/other-work"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let other_app = other_home.join("Library").join("Application Support");
+        let other_desktop = other_app.join("Claude").join("claude-code-sessions");
+        fs::create_dir_all(&other_desktop).unwrap();
+        homes.claude_desktop = other_desktop;
+        let listed = list_sessions(
+            &homes,
+            &ListFilter {
+                agent: Some(Agent::Claude),
+                include_archived: true,
+                limit: 0,
+                ..ListFilter::default()
+            },
+        )
+        .unwrap();
+        let work_named: Vec<_> = listed
+            .iter()
+            .filter(|session| {
+                session.session_id == work_id && session.profile.as_deref() == Some("work")
+            })
+            .collect();
+        assert_eq!(work_named.len(), 2, "{work_named:?}");
+        assert!(matches!(
+            resolve(&homes, &format!("claude:work:{work_id}")),
+            Err(Error::Ambiguous { .. })
+        ));
     }
 }

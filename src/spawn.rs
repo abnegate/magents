@@ -90,6 +90,8 @@ impl Record {
             messaging_socket: None,
             origin: Some(self.transport.as_str().to_string()),
             tmux: None,
+            profile: None,
+            config_dir: None,
         })
     }
 }

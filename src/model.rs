@@ -145,6 +145,8 @@ mod caller_tests {
             messaging_socket: None,
             origin: Some("tui".into()),
             tmux: Some("s:0.0".into()),
+            profile: None,
+            config_dir: None,
         }
     }
 
@@ -161,6 +163,8 @@ mod caller_tests {
         assert_eq!(untitled.activity_ms(), 0);
         untitled.title = Some("titled".into());
         assert_eq!(untitled.label(), "titled");
+        untitled.profile = Some("work".into());
+        assert!(untitled.haystack().contains("work"));
     }
 
     #[test]
@@ -270,6 +274,11 @@ pub struct Session {
     /// Claude CLI tmux pane, e.g. `session:@window.%pane`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tmux: Option<String>,
+    /// Claude Code profile (`work` for `~/.claude-work`). Default profile is omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(skip)]
+    pub config_dir: Option<PathBuf>,
 }
 
 impl Session {
@@ -290,6 +299,7 @@ impl Session {
             self.branch.clone(),
             self.origin.clone(),
             self.tmux.clone(),
+            self.profile.clone(),
             self.pid.map(|pid| pid.to_string()),
         ]
         .into_iter()

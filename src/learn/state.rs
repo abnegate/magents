@@ -403,8 +403,12 @@ fn trashable(homes: &Homes, path: &Path) -> bool {
 }
 
 fn agent_roots(homes: &Homes) -> Vec<PathBuf> {
-    vec![
-        homes.claude.clone(),
+    let mut roots: Vec<PathBuf> = homes
+        .claude_profiles()
+        .into_iter()
+        .filter_map(|profile| profile.config_dir)
+        .collect();
+    roots.extend([
         homes.grok.clone(),
         homes.codex.clone(),
         homes.cursor_config.clone(),
@@ -414,7 +418,8 @@ fn agent_roots(homes: &Homes) -> Vec<PathBuf> {
         homes.agy.clone(),
         homes.copilot.clone(),
         homes.magents.clone(),
-    ]
+    ]);
+    roots
 }
 
 fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Error {

@@ -964,6 +964,7 @@ mod tests {
         "PATH",
         "GEMINI_CLI_HOME",
         "ANTIGRAVITY_CLI_HOME",
+        "ANTIGRAVITY_HOME",
         "COPILOT_HOME",
         "GROK_HOME",
         "CODEX_HOME",
@@ -983,6 +984,7 @@ mod tests {
             std::env::remove_var("CODEX_HOME");
             std::env::remove_var("GEMINI_CLI_HOME");
             std::env::remove_var("ANTIGRAVITY_CLI_HOME");
+            std::env::remove_var("ANTIGRAVITY_HOME");
             std::env::remove_var("COPILOT_HOME");
             std::env::remove_var("XDG_CONFIG_HOME");
         }

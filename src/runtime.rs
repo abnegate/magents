@@ -50,6 +50,7 @@ const HOME_ENV: &[&str] = &[
     "CURSOR_DATA_DIR",
     "CURSOR_HOME",
     "ANTIGRAVITY_CLI_HOME",
+    "ANTIGRAVITY_HOME",
     "GEMINI_CLI_HOME",
     "GROK_HOME",
     "MAGENTS_HOME",
@@ -160,6 +161,15 @@ pub(crate) fn resume(homes: &Homes, session: &Session, message: &str) -> Result<
     if !cwd.is_dir() {
         return Err(Error::msg("session working directory is unavailable"));
     }
+    let overlay;
+    let homes = match session.agent {
+        Agent::Claude => {
+            overlay =
+                homes.with_claude_home(session.config_dir.as_deref(), session.profile.as_deref());
+            &overlay
+        }
+        _ => homes,
+    };
     let report = request_supervisor(
         homes,
         session.agent,
@@ -928,7 +938,8 @@ fn isolate_environment(command: &mut Command, homes: &Homes, agent: Agent) {
         Agent::Agy => {
             command
                 .env("GEMINI_CLI_HOME", &homes.gemini)
-                .env("ANTIGRAVITY_CLI_HOME", &homes.agy);
+                .env("ANTIGRAVITY_CLI_HOME", &homes.agy)
+                .env("ANTIGRAVITY_HOME", &homes.agy_desktop);
         }
         Agent::Gemini => {
             command.env("GEMINI_CLI_HOME", &homes.gemini);
@@ -1482,6 +1493,8 @@ fn resumed_session(agent: Agent, session_id: &str, cwd: &Path, transport: Transp
         messaging_socket: None,
         origin: Some(transport.as_str().to_string()),
         tmux: None,
+        profile: None,
+        config_dir: None,
     }
 }
 
@@ -1517,6 +1530,7 @@ mod tests {
         "CURSOR_DATA_DIR",
         "CURSOR_SESSION_ID",
         "ANTIGRAVITY_CLI_HOME",
+        "ANTIGRAVITY_HOME",
         "ANTIGRAVITY_CONVERSATION_ID",
         "GEMINI_CLI_HOME",
         "GEMINI_SESSION_ID",
@@ -1564,7 +1578,7 @@ for argument in "$@"; do
     esac
 done
 printf '%s\n' "$@" > "$MAGENTS_TEST_ARGS"
-printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$CLAUDE_CONFIG_DIR" "$CODEX_HOME" "$CURSOR_CONFIG_DIR" "$CURSOR_DATA_DIR" "$GROK_HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$MAGENTS_HOME" "$GEMINI_CLI_HOME" "$COPILOT_HOME" "$ANTIGRAVITY_CLI_HOME" > "$MAGENTS_TEST_ENV"
+printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$CLAUDE_CONFIG_DIR" "$CODEX_HOME" "$CURSOR_CONFIG_DIR" "$CURSOR_DATA_DIR" "$GROK_HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$MAGENTS_HOME" "$GEMINI_CLI_HOME" "$COPILOT_HOME" "$ANTIGRAVITY_CLI_HOME" "$ANTIGRAVITY_HOME" > "$MAGENTS_TEST_ENV"
 cat > "$MAGENTS_TEST_STDIN"
 case "$MAGENTS_TEST_AGENT" in
     claude|cursor) printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$session" ;;
@@ -1734,7 +1748,7 @@ esac
             }
             let values = fs::read_to_string(&environment).unwrap();
             let values = values.trim().split('|').collect::<Vec<_>>();
-            assert_eq!(values.len(), 11);
+            assert_eq!(values.len(), 12);
             assert_eq!(values[7], homes.magents.to_string_lossy());
             let expected = match agent {
                 Agent::Claude => vec![(0, homes.claude.as_path())],
@@ -1750,7 +1764,11 @@ esac
                 ],
                 Agent::Gemini => vec![(8, homes.gemini.as_path())],
                 Agent::Copilot => vec![(9, homes.copilot.as_path())],
-                Agent::Agy => vec![(8, homes.gemini.as_path()), (10, homes.agy.as_path())],
+                Agent::Agy => vec![
+                    (8, homes.gemini.as_path()),
+                    (10, homes.agy.as_path()),
+                    (11, homes.agy_desktop.as_path()),
+                ],
             };
             for (index, value) in values.iter().enumerate() {
                 if index == 7 {
@@ -1989,6 +2007,39 @@ esac
             }
         }
         assert!(records(&homes).unwrap().is_empty());
+    }
+
+    #[test]
+    fn resume_sets_claude_config_dir_from_session_profile() {
+        let _guard = test_env::lock(ENV);
+        let directory = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(directory.path());
+        let cwd = fs::canonicalize(directory.path()).unwrap();
+        let work = directory.path().join(".claude-work");
+        fs::create_dir_all(&work).unwrap();
+        let captured = directory.path().join("claude-config");
+        let binary = directory.path().join("supervisor");
+        test_env::write_executable(
+            &binary,
+            &format!(
+                "printf '%s\\n' \"$CLAUDE_CONFIG_DIR\" > '{}'\nexit 1\n",
+                captured.display()
+            ),
+        );
+        unsafe {
+            std::env::set_var("MAGENTS_SUPERVISOR_BIN", &binary);
+        }
+        let mut session = resumed_session(
+            Agent::Claude,
+            "claude-resume-profile",
+            &cwd,
+            Transport::ClaudePrint,
+        );
+        session.profile = Some("work".into());
+        session.config_dir = Some(work.clone());
+        let _ = resume(&homes, &session, "continue from work");
+        let body = fs::read_to_string(&captured).unwrap();
+        assert_eq!(body.trim(), work.to_string_lossy());
     }
 
     #[test]

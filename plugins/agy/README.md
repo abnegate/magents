@@ -1,6 +1,7 @@
-# magents (AGY CLI plugin)
+# magents (AGY plugin)
 
-Shared session bus for AGY CLI: skill + MCP (`magents mcp`).
+Shared session bus for AGY CLI and the Antigravity desktop app: skill + MCP
+(`magents mcp`). Desktop sessions show up as `agy` with origin `desktop`.
 
 ## Prerequisite
 

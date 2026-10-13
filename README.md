@@ -111,7 +111,7 @@ folder under [`plugins/`](plugins/).
 | Codex | [`plugins/codex`](plugins/codex) |
 | Cursor | [`plugins/cursor`](plugins/cursor) |
 | Gemini CLI | repo root ([`gemini-extension.json`](gemini-extension.json)) |
-| AGY CLI | [`plugins/agy`](plugins/agy) and repo root (`plugin.json`, `mcp_config.json`) |
+| AGY CLI / Antigravity | [`plugins/agy`](plugins/agy) and repo root (`plugin.json`, `mcp_config.json`) |
 
 Gemini CLI installs the extension straight from this repository:
 
@@ -263,16 +263,21 @@ and otherwise starts a supervised headless resume:
 | Cursor | Supervised `cursor-agent -p --output-format stream-json --resume <id> --workspace <cwd>` |
 | OpenCode | Supervised `opencode run --format json --dir <cwd> --session <id>` |
 | Gemini CLI | Supervised `gemini --resume <id> --output-format stream-json` |
-| AGY CLI | Supervised `agy --input-format stream-json --output-format stream-json --conversation <id>` |
+| AGY CLI / Antigravity | Supervised `agy --input-format stream-json --output-format stream-json --conversation <id>` |
 | GitHub Copilot CLI | Supervised `copilot --resume=<id> --output-format json` |
 
 Supervised routes pass the user turn through stdin and do not expose transcript
 text, tokens, or raw host output in the response. Spawn never adds approval
 bypasses (`--dangerously-skip-permissions`, `--yolo`, `--full-auto`, etc.).
 
-Session discovery sources (unchanged): Claude `~/.claude/sessions`, Grok
-`~/.grok/active_sessions.json`, Codex sqlite + rollout JSONL, Cursor
-`agent-transcripts`, OpenCode DB, Gemini journals, AGY `conversations` / `brain` transcripts, Copilot `session-state`.
+Session discovery sources: Claude `~/.claude` and `~/.claude-*` (plus Desktop
+`Claude` / `Claude-*` session dirs), Grok `~/.grok/active_sessions.json`, Codex
+sqlite + rollout JSONL, Cursor `agent-transcripts`, OpenCode DB, Gemini
+journals, AGY CLI `conversations` / `brain` plus Antigravity desktop
+`conversation_summaries`, Copilot `session-state`.
+Claude sessions include a `profile` field when they come from a named home
+(`work` for `~/.claude-work`). Resume and live inject use that home's
+`CLAUDE_CONFIG_DIR`.
 
 ## Tests
 

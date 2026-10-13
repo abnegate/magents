@@ -499,6 +499,8 @@ mod tests {
             messaging_socket: None,
             origin: Some("tui".into()),
             tmux: None,
+            profile: None,
+            config_dir: None,
         }
     }
 
