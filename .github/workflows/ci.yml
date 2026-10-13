@@ -399,6 +399,56 @@ jobs:
             "${{ env.IMAGE }}@${{ needs.release.outputs.digest }}" \
             "${{ env.IMAGE }}@${{ needs.release-arm64.outputs.digest }}"
 
+  publish-mcp-registry:
+    name: MCP Registry
+    if: github.event_name == 'release' && !contains(github.event.release.tag_name, '-')
+    needs: [prepare-release, release-manifest]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      MCP_PUBLISHER_VERSION: v1.8.1
+      MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+      SERVER_NAME: io.github.abnegate/magents
+      VERSION: ${{ needs.prepare-release.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check whether this version is already in the MCP Registry
+        id: exists
+        run: |
+          status="$(curl -sS -o /dev/null -w '%{http_code}' \
+            "https://registry.modelcontextprotocol.io/v0/servers/${SERVER_NAME/\//%2F}/versions/${VERSION}")"
+          if [ "$status" = "200" ]; then
+            echo "::notice::${SERVER_NAME} ${VERSION} is already in the MCP Registry; skipping"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Set server.json to the release version
+        if: steps.exists.outputs.published == 'false'
+        run: |
+          jq --arg v "$VERSION" \
+            '.version = $v | .packages |= map(.identifier |= sub(":[^:]+$"; ":" + $v))' \
+            server.json > server.json.tmp
+          mv server.json.tmp server.json
+          cat server.json
+      - name: Install mcp-publisher
+        if: steps.exists.outputs.published == 'false'
+        run: |
+          curl -fsSL -o mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
+          tar -xzf mcp-publisher.tar.gz mcp-publisher
+      - name: Publish
+        if: steps.exists.outputs.published == 'false'
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
+
   github-release:
     name: GitHub Release
     if: github.event_name == 'release'
