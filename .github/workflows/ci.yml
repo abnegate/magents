@@ -121,6 +121,7 @@ jobs:
         id: version
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_VERSION_STAGING: ${{ runner.temp }}/release-version
         run: |
           version="${RELEASE_TAG#v}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
@@ -128,15 +129,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-version
-          path: |
-            Cargo.toml
-            Cargo.lock
-            gemini-extension.json
-            server.json
-            plugins/claude/.claude-plugin/plugin.json
-            plugins/codex/.codex-plugin/plugin.json
-            plugins/cursor/.cursor-plugin/plugin.json
-            .cursor-plugin/marketplace.json
+          path: ${{ runner.temp }}/release-version
 
   # GITHUB_TOKEN cannot push a new commit to a branch that requires status
   # checks. GH_TOKEN is the owner PAT (same secret Dependabot auto-merge uses);
