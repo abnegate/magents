@@ -257,7 +257,7 @@ and otherwise starts a supervised headless resume:
 | Codex Desktop / VS Code | Length-prefixed JSON-RPC on `~/.codex/ipc/ipc.sock`, then supervised `codex exec ... resume` |
 | Codex CLI | Supervised `codex exec --json -C <cwd> resume <id> -` |
 | Cursor | Supervised `cursor-agent -p --output-format stream-json --resume <id> --workspace <cwd>` |
-| OpenCode | Supervised `opencode run --format json --dir <cwd> --session <id>` |
+| OpenCode | Supervised `opencode run --format json --session <id>`, started in the session `cwd` (with `PWD` set) |
 | Gemini CLI | Supervised `gemini --resume <id> --output-format stream-json` |
 | GitHub Copilot CLI | Supervised `copilot --resume=<id> --output-format json` |
 
@@ -267,7 +267,8 @@ bypasses (`--dangerously-skip-permissions`, `--yolo`, `--full-auto`, etc.).
 
 Session discovery sources (unchanged): Claude `~/.claude/sessions`, Grok
 `~/.grok/active_sessions.json`, Codex sqlite + rollout JSONL, Cursor
-`agent-transcripts`, OpenCode DB, Gemini journals, Copilot `session-state`.
+`agent-transcripts`, OpenCode SQLite (`opencode.db` and channel databases,
+v1 `session` and v2 `session_v2` / `session_message` tables), Gemini journals, Copilot `session-state`.
 
 ## Tests
 
