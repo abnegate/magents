@@ -222,6 +222,49 @@ fn set_release_version_stages_discovered_files() {
 }
 
 #[test]
+fn server_json_meets_mcp_registry_limits() {
+    let text = fs::read_to_string(repo_root().join("server.json")).unwrap();
+    let server: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let description = server["description"].as_str().expect("description");
+    assert!(
+        (1..=100).contains(&description.chars().count()),
+        "server.json description is {} chars; MCP Registry max is 100:\n{description}",
+        description.chars().count()
+    );
+    if let Some(title) = server["title"].as_str() {
+        assert!(
+            (1..=100).contains(&title.chars().count()),
+            "server.json title is {} chars; MCP Registry max is 100",
+            title.chars().count()
+        );
+    }
+}
+
+#[test]
+fn prepare_mcp_server_json_rejects_a_long_description() {
+    let root = repo_root();
+    let fixture = TempDir::new().unwrap();
+    copy_into(fixture.path(), &root, "server.json");
+    let server = fixture.path().join("server.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&server).unwrap()).unwrap();
+    value["description"] = serde_json::Value::String("x".repeat(101));
+    fs::write(&server, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+    let output = Command::new(root.join(".github/scripts/prepare-mcp-server-json.sh"))
+        .args(["9.9.9", "9.9.9"])
+        .env("MAGENTS_ROOT", fixture.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("description is 101 chars"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn set_release_version_rejects_an_invalid_tag() {
     let root = repo_root();
     let fixture = TempDir::new().unwrap();

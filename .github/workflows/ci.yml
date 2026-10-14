@@ -430,12 +430,7 @@ jobs:
           fi
       - name: Set server.json to the release version
         if: steps.exists.outputs.published == 'false'
-        run: |
-          jq --arg v "$VERSION" --arg tag "$IMAGE_TAG" \
-            '.version = $v | .packages |= map(.identifier |= sub(":[^:]+$"; ":" + $tag))' \
-            server.json > server.json.tmp
-          mv server.json.tmp server.json
-          cat server.json
+        run: .github/scripts/prepare-mcp-server-json.sh "$VERSION" "$IMAGE_TAG"
       - name: Install mcp-publisher
         if: steps.exists.outputs.published == 'false'
         run: |
