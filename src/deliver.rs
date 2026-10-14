@@ -36,6 +36,9 @@ where
     let mut delivered = Vec::new();
     match session.agent {
         Agent::Claude => {
+            let overlay =
+                homes.with_claude_home(session.config_dir.as_deref(), session.profile.as_deref());
+            let homes = &overlay;
             let mut succeeded = false;
             if let Some(socket) = &session.messaging_socket {
                 match send_claude_uds(homes, session, socket, message) {
@@ -126,6 +129,14 @@ where
             session,
             message,
             "copilot-cli",
+            &mut delivered,
+            &mut resume,
+        ),
+        Agent::Agy => record_resume(
+            homes,
+            session,
+            message,
+            "agy-cli",
             &mut delivered,
             &mut resume,
         ),
@@ -379,6 +390,8 @@ mod tests {
             messaging_socket: None,
             origin: None,
             tmux: None,
+            profile: None,
+            config_dir: None,
         }
     }
 
@@ -427,6 +440,7 @@ mod tests {
         for (agent, id, marker) in [
             (Agent::Claude, "claude-id", "claude-cli"),
             (Agent::Codex, "codex-id", "codex-exec"),
+            (Agent::Agy, "agy-id", "agy-cli"),
             (Agent::Copilot, "copilot-id", "copilot-cli"),
             (Agent::Cursor, "cursor-id", "cursor-cli"),
             (Agent::Gemini, "gemini-id", "gemini-cli"),

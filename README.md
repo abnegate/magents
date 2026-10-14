@@ -6,7 +6,7 @@
   <a href="https://hol.org/registry/plugins/abnegate%2Fmagents"><img alt="HOL Trust" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fhol.org%2Fapi%2Fregistry%2Fbadges%2Fplugin%3Fslug%3Dabnegate%252Fmagents%26metric%3Dtrust%26style%3Dflat"></a>
 </p>
 
-Claude Code, Codex, Copilot, Cursor, Gemini, Grok, and OpenCode already keep
+Claude Code, Codex, Copilot, Cursor, Gemini, AGY, Grok, and OpenCode already keep
 transcripts on disk. **magents** is the shared API over those sessions - an MCP
 server plus a small CLI - so one agent can pick up where another left off
 without you recapping, ping a *specific live chat* when you are not sitting in
@@ -115,11 +115,18 @@ folder under [`plugins/`](plugins/).
 | Codex | [`plugins/codex`](plugins/codex) |
 | Cursor | [`plugins/cursor`](plugins/cursor) |
 | Gemini CLI | repo root ([`gemini-extension.json`](gemini-extension.json)) |
+| AGY CLI / Antigravity | [`plugins/agy`](plugins/agy) |
 
 Gemini CLI installs the extension straight from this repository:
 
 ```bash
 gemini extensions install https://github.com/abnegate/magents
+```
+
+AGY CLI installs the plugin from [`plugins/agy`](plugins/agy) (manifest, MCP, and skills):
+
+```bash
+agy plugin install https://github.com/abnegate/magents/plugins/agy
 ```
 
 Details and marketplace notes: [`plugins/README.md`](plugins/README.md).
@@ -136,10 +143,11 @@ skipping hosts whose required binaries are unavailable:
 - OpenCode (`$XDG_CONFIG_HOME/opencode/opencode.json`, default `~/.config/opencode`)
 - Gemini CLI (`gemini mcp add -s user magents magents mcp`)
 - GitHub Copilot CLI (`copilot mcp add magents -- magents mcp`)
+- AGY CLI (`agy mcp add magents magents mcp`)
 
 It also writes the `magents` and `learn` skills under supported hosts' skills
 directories (`~/.grok/skills/{magents,learn}`, `~/.claude/skills/{magents,learn}`,
-`~/.cursor/skills/{magents,learn}`, and the OpenCode / Gemini / Copilot
+`~/.cursor/skills/{magents,learn}`, and the OpenCode / Gemini / AGY / Copilot
 equivalents). `/learn` reads every local agent's sessions, not only Grok.
 
 For Grok and Codex only, point a host at the binary yourself:
@@ -198,7 +206,7 @@ magents handoff grok:latest --reason "continuing in grok"
 | `learn_state` | Read or update `/learn` state, decisions, and trash |
 
 Refs can be prefixed: `claude:disaster recovery`, `grok:latest`, `codex:<uuid>`,
-`cursor:latest`, `opencode:<id>`, `gemini:latest`, `copilot:<id>`.
+`cursor:latest`, `opencode:<id>`, `gemini:latest`, `agy:<id>`, `copilot:<id>`.
 
 ## CLI
 
@@ -259,16 +267,22 @@ and otherwise starts a supervised headless resume:
 | Cursor | Supervised `cursor-agent -p --output-format stream-json --resume <id> --workspace <cwd>` |
 | OpenCode | Supervised `opencode run --format json --session <id>`, started in the session `cwd` (with `PWD` set) |
 | Gemini CLI | Supervised `gemini --resume <id> --output-format stream-json` |
+| AGY CLI / Antigravity | Supervised `agy --input-format stream-json --output-format stream-json --conversation <id>` |
 | GitHub Copilot CLI | Supervised `copilot --resume=<id> --output-format json` |
 
 Supervised routes pass the user turn through stdin and do not expose transcript
 text, tokens, or raw host output in the response. Spawn never adds approval
 bypasses (`--dangerously-skip-permissions`, `--yolo`, `--full-auto`, etc.).
 
-Session discovery sources (unchanged): Claude `~/.claude/sessions`, Grok
-`~/.grok/active_sessions.json`, Codex sqlite + rollout JSONL, Cursor
-`agent-transcripts`, OpenCode SQLite (`opencode.db` and channel databases,
-v1 `session` and v2 `session_v2` / `session_message` tables), Gemini journals, Copilot `session-state`.
+Session discovery sources: Claude `~/.claude` and `~/.claude-*` (plus Desktop
+`Claude` / `Claude-*` session dirs), Grok `~/.grok/active_sessions.json`, Codex
+sqlite + rollout JSONL, Cursor `agent-transcripts`, OpenCode SQLite
+(`opencode.db` and channel databases, v1 `session` and v2 `session_v2` /
+`session_message` tables), Gemini journals, AGY CLI `conversations` / `brain`
+plus Antigravity desktop `conversation_summaries`, Copilot `session-state`.
+Claude sessions include a `profile` field when they come from a named home
+(`work` for `~/.claude-work`). Resume and live inject use that home's
+`CLAUDE_CONFIG_DIR`.
 
 ## Tests
 

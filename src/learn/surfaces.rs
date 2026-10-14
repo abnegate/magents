@@ -31,13 +31,15 @@ pub fn collect(homes: &Homes, sessions: &[CompactSession]) -> Surfaces {
     if agents_dir.is_dir() {
         add_skills(&mut skills, &agents_dir, "user", None, None);
     }
-    add_commands(
-        &mut skills,
-        &homes.claude.join("commands"),
-        "command",
-        Some(Agent::Claude),
-        None,
-    );
+    for (_, config) in claude_config_dirs(homes) {
+        add_commands(
+            &mut skills,
+            &config.join("commands"),
+            "command",
+            Some(Agent::Claude),
+            None,
+        );
+    }
     add_skills(
         &mut skills,
         &homes.grok.join("bundled").join("skills"),
@@ -163,8 +165,11 @@ pub fn collect(homes: &Homes, sessions: &[CompactSession]) -> Surfaces {
             }
         }
     }
-    let claude_plugins = homes.claude.join("plugins");
-    if claude_plugins.is_dir() {
+    for (_, config) in claude_config_dirs(homes) {
+        let claude_plugins = config.join("plugins");
+        if !claude_plugins.is_dir() {
+            continue;
+        }
         for skill in WalkDir::new(&claude_plugins)
             .max_depth(6)
             .into_iter()
@@ -210,12 +215,18 @@ pub fn collect(homes: &Homes, sessions: &[CompactSession]) -> Surfaces {
         "mcpServers",
         "grok:settings.json",
     );
-    add_json_mcp(
-        &mut mcp_sources,
-        &homes.claude.join("settings.json"),
-        "mcpServers",
-        "claude:settings.json",
-    );
+    for (name, config) in claude_config_dirs(homes) {
+        let source = match name.as_deref() {
+            Some(name) => format!("claude:{name}:settings.json"),
+            None => "claude:settings.json".into(),
+        };
+        add_json_mcp(
+            &mut mcp_sources,
+            &config.join("settings.json"),
+            "mcpServers",
+            &source,
+        );
+    }
     if let Some(parent) = homes.claude.parent() {
         add_json_mcp(
             &mut mcp_sources,
@@ -250,6 +261,12 @@ pub fn collect(homes: &Homes, sessions: &[CompactSession]) -> Surfaces {
         &homes.gemini.join("settings.json"),
         "mcpServers",
         "gemini:settings.json",
+    );
+    add_json_mcp(
+        &mut mcp_sources,
+        &homes.gemini.join("config").join("mcp_config.json"),
+        "mcpServers",
+        "agy:mcp_config.json",
     );
     add_json_mcp(
         &mut mcp_sources,
@@ -617,16 +634,30 @@ fn hit(
     *entry.via.entry(via.to_string()).or_default() += n;
 }
 
+fn claude_config_dirs(homes: &Homes) -> Vec<(Option<String>, PathBuf)> {
+    homes
+        .claude_profiles()
+        .into_iter()
+        .filter_map(|profile| Some((profile.name, profile.config_dir?)))
+        .collect()
+}
+
 fn user_skill_roots(homes: &Homes) -> Vec<(Agent, PathBuf)> {
-    vec![
-        (Agent::Claude, homes.claude.join("skills")),
+    let mut roots: Vec<(Agent, PathBuf)> = claude_config_dirs(homes)
+        .into_iter()
+        .rev()
+        .map(|(_, config)| (Agent::Claude, config.join("skills")))
+        .collect();
+    roots.extend([
         (Agent::Grok, homes.grok.join("skills")),
         (Agent::Codex, homes.codex.join("skills")),
         (Agent::Cursor, homes.cursor_config.join("skills")),
         (Agent::OpenCode, homes.opencode_config.join("skills")),
         (Agent::Gemini, homes.gemini.join("skills")),
+        (Agent::Agy, homes.agy.join("skills")),
         (Agent::Copilot, homes.copilot.join("skills")),
-    ]
+    ]);
+    roots
 }
 
 fn add_skills(
@@ -730,7 +761,7 @@ fn project_skill_dirs(cwd: &str, git_root: &str) -> Vec<(PathBuf, PathBuf)> {
     loop {
         let owner = current.clone();
         for folder in [
-            ".grok", ".claude", ".cursor", ".agents", ".gemini", ".copilot",
+            ".grok", ".claude", ".cursor", ".agents", ".gemini", ".agy", ".copilot",
         ] {
             dirs.push((current.join(folder).join("skills"), owner.clone()));
         }
@@ -887,7 +918,10 @@ fn is_token_char(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{toml_string_array, toml_subtables};
+    use super::{add_json_mcp, read_plugin_registry, toml_string_array, toml_subtables};
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn delimited_token_requires_boundaries() {
@@ -901,11 +935,104 @@ mod tests {
     }
 
     #[test]
+    fn collect_includes_named_claude_profile_mcp() {
+        use crate::homes::Homes;
+        use std::fs;
+        let directory = tempfile::tempdir().unwrap();
+        let homes = Homes::isolated(directory.path());
+        let work = directory.path().join(".claude-work");
+        fs::create_dir_all(work.join("sessions")).unwrap();
+        fs::write(
+            work.join("settings.json"),
+            "{\"mcpServers\":{\"work-mcp\":{\"command\":\"n\"}}}\n",
+        )
+        .unwrap();
+        fs::create_dir_all(work.join("skills/work-skill")).unwrap();
+        fs::write(
+            work.join("skills/work-skill/SKILL.md"),
+            "---\nname: work-skill\ndescription: from work profile\n---\n",
+        )
+        .unwrap();
+        fs::create_dir_all(work.join("commands")).unwrap();
+        fs::write(
+            work.join("commands/ship.md"),
+            "---\nname: ship\ndescription: ship it\n---\n",
+        )
+        .unwrap();
+        fs::write(work.join("skills/not-a-skill"), "skip\n").unwrap();
+        let plugins = work.join("plugins/demo/not-skills");
+        fs::create_dir_all(&plugins).unwrap();
+        fs::write(plugins.join("SKILL.md"), "---\nname: skipped\n---\n").unwrap();
+        let bad = directory.path().join(".claude-bad");
+        fs::create_dir_all(bad.join("sessions")).unwrap();
+        fs::write(bad.join("settings.json"), "not-json\n").unwrap();
+        let empty = directory.path().join(".claude-emptyjson");
+        fs::create_dir_all(empty.join("sessions")).unwrap();
+        fs::write(empty.join("settings.json"), "{\"other\":1}\n").unwrap();
+        fs::create_dir_all(homes.grok.join("installed-plugins")).unwrap();
+        fs::write(
+            homes.grok.join("installed-plugins").join("registry.json"),
+            "not-json\n",
+        )
+        .unwrap();
+        let surfaces = super::collect(&homes, &[]);
+        let mcp = surfaces.value["mcp_servers"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            mcp.iter().any(|row| {
+                row["name"] == "work-mcp"
+                    && row["sources"].as_array().is_some_and(|sources| {
+                        sources
+                            .iter()
+                            .any(|source| source == "claude:work:settings.json")
+                    })
+            }),
+            "{mcp:?}"
+        );
+        assert!(
+            surfaces.skill_names.contains("work-skill"),
+            "{:?}",
+            surfaces.skill_names
+        );
+        assert!(
+            surfaces.skill_names.contains("ship"),
+            "{:?}",
+            surfaces.skill_names
+        );
+    }
+
+    #[test]
     fn toml_helpers_read_names() {
         let text = "[plugins]\nenabled = [\"one\"]\n[mcp_servers.magents]\ncommand = \"x\"\n";
         assert_eq!(toml_string_array(text, "plugins", "enabled"), vec!["one"]);
         assert_eq!(toml_subtables(text, "mcp_servers"), vec!["magents"]);
         assert!(toml_string_array("nope", "plugins", "enabled").is_empty());
+        assert!(toml_subtables("nope", "mcp_servers").is_empty());
+        assert!(toml_subtables("[other]\n", "mcp_servers").is_empty());
+        let mut mcp = BTreeMap::new();
+        add_json_mcp(&mut mcp, Path::new("/nope.json"), "mcpServers", "x");
+        assert!(mcp.is_empty());
+        let directory = tempfile::tempdir().unwrap();
+        let missing_key = directory.path().join("empty.json");
+        fs::write(&missing_key, "{\"mcpServers\":null}\n").unwrap();
+        add_json_mcp(&mut mcp, &missing_key, "mcpServers", "x");
+        assert!(mcp.is_empty());
+        let registry = directory.path().join("plugins");
+        fs::create_dir_all(&registry).unwrap();
+        assert!(read_plugin_registry(&registry).is_empty());
+        fs::write(registry.join("registry.json"), "{\"repos\":{\"a\":{}}}\n").unwrap();
+        assert!(read_plugin_registry(&registry).is_empty());
+        fs::write(
+            registry.join("registry.json"),
+            "{\"repos\":{\"a\":{\"path\":\"/p\",\"plugins\":{\"demo\":{}}}}}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_plugin_registry(&registry).get(&PathBuf::from("/p")),
+            Some(&"demo".to_string())
+        );
     }
 
     #[test]

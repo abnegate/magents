@@ -398,22 +398,28 @@ fn trashable(homes: &Homes, path: &Path) -> bool {
     }) || grand.file_name().and_then(|n| n.to_str()) == Some(".agents")
         || matches!(
             grand.file_name().and_then(|n| n.to_str()),
-            Some(".grok" | ".claude" | ".cursor" | ".gemini" | ".copilot" | ".opencode")
+            Some(".grok" | ".claude" | ".cursor" | ".gemini" | ".agy" | ".copilot" | ".opencode")
         )
 }
 
 fn agent_roots(homes: &Homes) -> Vec<PathBuf> {
-    vec![
-        homes.claude.clone(),
+    let mut roots: Vec<PathBuf> = homes
+        .claude_profiles()
+        .into_iter()
+        .filter_map(|profile| profile.config_dir)
+        .collect();
+    roots.extend([
         homes.grok.clone(),
         homes.codex.clone(),
         homes.cursor_config.clone(),
         homes.cursor.clone(),
         homes.opencode_config.clone(),
         homes.gemini.clone(),
+        homes.agy.clone(),
         homes.copilot.clone(),
         homes.magents.clone(),
-    ]
+    ]);
+    roots
 }
 
 fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Error {

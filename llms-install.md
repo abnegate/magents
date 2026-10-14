@@ -21,7 +21,7 @@ magents is a single Rust binary. The MCP server is the `mcp` subcommand over std
 ```
 
 No API keys or environment variables are needed. magents reads the session
-files that Claude Code, Codex, Copilot, Cursor, Gemini, Grok, and OpenCode
+files that Claude Code, Codex, Copilot, Cursor, Gemini, AGY, Grok, and OpenCode
 already write under the user's home directory.
 
 4. Verify by calling the `whoami` or `list_sessions` tool.

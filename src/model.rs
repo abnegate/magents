@@ -5,6 +5,7 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Agent {
+    Agy,
     Claude,
     Codex,
     Copilot,
@@ -17,6 +18,7 @@ pub enum Agent {
 impl Agent {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Agy => "agy",
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Copilot => "copilot",
@@ -29,6 +31,7 @@ impl Agent {
 
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "agy" | "agy-cli" | "antigravity" | "antigravity-cli" => Some(Self::Agy),
             "claude" | "claude-code" | "ccd" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
             "copilot" | "github-copilot" | "gh-copilot" => Some(Self::Copilot),
@@ -57,6 +60,10 @@ mod tests {
 
     #[test]
     fn parses_all_harness_aliases() {
+        assert_eq!(Agent::parse("agy"), Some(Agent::Agy));
+        assert_eq!(Agent::parse("agy-cli"), Some(Agent::Agy));
+        assert_eq!(Agent::parse("antigravity"), Some(Agent::Agy));
+        assert_eq!(Agent::parse("antigravity-cli"), Some(Agent::Agy));
         assert_eq!(Agent::parse("claude-code"), Some(Agent::Claude));
         assert_eq!(Agent::parse("codex"), Some(Agent::Codex));
         assert_eq!(Agent::parse("github-copilot"), Some(Agent::Copilot));
@@ -73,6 +80,7 @@ mod tests {
         assert_eq!(Agent::parse("nope"), None);
         assert_eq!(Agent::Claude.to_string(), "claude");
         assert_eq!(Agent::Codex.as_str(), "codex");
+        assert_eq!(Agent::Agy.as_str(), "agy");
     }
 
     #[test]
@@ -103,6 +111,7 @@ mod caller_tests {
         "CURSOR_AGENT",
         "COMPOSER_SESSION_ID",
         "GEMINI_SESSION_ID",
+        "ANTIGRAVITY_CONVERSATION_ID",
         "OPENCODE_SESSION_ID",
         "OPENCODE_DIRECTORY",
         "OPENCODE_SERVER",
@@ -136,6 +145,8 @@ mod caller_tests {
             messaging_socket: None,
             origin: Some("tui".into()),
             tmux: Some("s:0.0".into()),
+            profile: None,
+            config_dir: None,
         }
     }
 
@@ -152,6 +163,8 @@ mod caller_tests {
         assert_eq!(untitled.activity_ms(), 0);
         untitled.title = Some("titled".into());
         assert_eq!(untitled.label(), "titled");
+        untitled.profile = Some("work".into());
+        assert!(untitled.haystack().contains("work"));
     }
 
     #[test]
@@ -214,6 +227,12 @@ mod caller_tests {
         let caller = Caller::from_env();
         assert_eq!(caller.agent, Some(Agent::Copilot));
         assert_eq!(caller.session_id.as_deref(), Some("cp1"));
+        unsafe { std::env::remove_var("COPILOT_SESSION_ID") };
+
+        unsafe { std::env::set_var("ANTIGRAVITY_CONVERSATION_ID", "ag1") };
+        let caller = Caller::from_env();
+        assert_eq!(caller.agent, Some(Agent::Agy));
+        assert_eq!(caller.session_id.as_deref(), Some("ag1"));
     }
 }
 
@@ -255,6 +274,11 @@ pub struct Session {
     /// Claude CLI tmux pane, e.g. `session:@window.%pane`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tmux: Option<String>,
+    /// Claude Code profile (`work` for `~/.claude-work`). Default profile is omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(skip)]
+    pub config_dir: Option<PathBuf>,
 }
 
 impl Session {
@@ -275,6 +299,7 @@ impl Session {
             self.branch.clone(),
             self.origin.clone(),
             self.tmux.clone(),
+            self.profile.clone(),
             self.pid.map(|pid| pid.to_string()),
         ]
         .into_iter()
@@ -517,6 +542,14 @@ impl Caller {
         {
             return Self {
                 agent: Some(Agent::Copilot),
+                session_id: Some(session_id),
+            };
+        }
+        if let Ok(session_id) = std::env::var("ANTIGRAVITY_CONVERSATION_ID")
+            && !session_id.is_empty()
+        {
+            return Self {
+                agent: Some(Agent::Agy),
                 session_id: Some(session_id),
             };
         }

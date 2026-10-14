@@ -3,6 +3,7 @@ use crate::homes::Homes;
 use crate::model::{Agent, MemoryCreated, MemoryHit, MemoryRead};
 use crate::transcript::scan_file;
 use chrono::Utc;
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
@@ -58,9 +59,9 @@ pub fn create_memory(
         Agent::Claude => create_claude(homes, content, &file, project, cwd),
         Agent::Codex => create_codex(homes, content, &file),
         Agent::Grok => create_grok(homes, content, &file, project),
-        Agent::Cursor | Agent::OpenCode | Agent::Gemini | Agent::Copilot => Err(Error::msg(
-            format!("{agent} has no first-party memory store"),
-        )),
+        Agent::Agy | Agent::Cursor | Agent::OpenCode | Agent::Gemini | Agent::Copilot => Err(
+            Error::msg(format!("{agent} has no first-party memory store")),
+        ),
     }
 }
 
@@ -139,7 +140,7 @@ fn resolve_read(
             };
             (path, project)
         }
-        Agent::Cursor | Agent::OpenCode | Agent::Gemini | Agent::Copilot => {
+        Agent::Agy | Agent::Cursor | Agent::OpenCode | Agent::Gemini | Agent::Copilot => {
             return Err(Error::msg(format!(
                 "{agent} has no first-party memory store"
             )));
@@ -178,7 +179,7 @@ fn resolve_explicit_path(
         .to_string();
     let project = match agent {
         Agent::Claude => canonical
-            .strip_prefix(homes.claude.join("projects"))
+            .strip_prefix(root)
             .ok()
             .and_then(|rest| rest.components().next())
             .and_then(|component| component.as_os_str().to_str())
@@ -203,10 +204,10 @@ fn resolve_explicit_path(
 
 fn memory_roots(homes: &Homes, agent: Agent) -> Result<Vec<PathBuf>> {
     let roots = match agent {
-        Agent::Claude => vec![homes.claude.join("projects")],
+        Agent::Claude => claude_project_roots(homes),
         Agent::Codex => vec![homes.codex.join("memories")],
         Agent::Grok => vec![homes.grok.join("memory")],
-        Agent::Cursor | Agent::OpenCode | Agent::Gemini | Agent::Copilot => {
+        Agent::Agy | Agent::Cursor | Agent::OpenCode | Agent::Gemini | Agent::Copilot => {
             return Err(Error::msg(format!(
                 "{agent} has no first-party memory store"
             )));
@@ -449,31 +450,48 @@ fn include(filter: Option<Agent>, agent: Agent) -> bool {
     filter.is_none() || filter == Some(agent)
 }
 
-fn collect_claude(homes: &Homes, needle: &str, hits: &mut Vec<MemoryHit>) {
-    let projects = homes.claude.join("projects");
-    let Ok(entries) = fs::read_dir(&projects) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let project_dir = entry.path();
-        if !project_dir.is_dir() {
+fn claude_project_roots(homes: &Homes) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut seen = HashSet::new();
+    for profile in homes.claude_profiles() {
+        let Some(config) = profile.config_dir else {
             continue;
+        };
+        let projects = config.join("projects");
+        let key = projects.canonicalize().unwrap_or_else(|_| projects.clone());
+        if seen.insert(key) {
+            roots.push(projects);
         }
-        let Some(slug) = project_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(ToOwned::to_owned)
-        else {
+    }
+    roots
+}
+
+fn collect_claude(homes: &Homes, needle: &str, hits: &mut Vec<MemoryHit>) {
+    for projects in claude_project_roots(homes) {
+        let Ok(entries) = fs::read_dir(&projects) else {
             continue;
         };
-        let memory = project_dir.join("memory");
-        let Ok(files) = fs::read_dir(&memory) else {
-            continue;
-        };
-        for file in files.flatten() {
-            let path = file.path();
-            if let Some(hit) = hit(Agent::Claude, path, Some(slug.clone()), needle) {
-                hits.push(hit);
+        for entry in entries.flatten() {
+            let project_dir = entry.path();
+            if !project_dir.is_dir() {
+                continue;
+            }
+            let Some(slug) = project_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(ToOwned::to_owned)
+            else {
+                continue;
+            };
+            let memory = project_dir.join("memory");
+            let Ok(files) = fs::read_dir(&memory) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let path = file.path();
+                if let Some(hit) = hit(Agent::Claude, path, Some(slug.clone()), needle) {
+                    hits.push(hit);
+                }
             }
         }
     }
@@ -568,7 +586,7 @@ fn hit(agent: Agent, path: PathBuf, project: Option<String>, needle: &str) -> Op
 
 #[cfg(test)]
 mod tests {
-    use super::{create_memory, search_memories};
+    use super::{create_memory, read_memory, search_memories};
     use crate::homes::Homes;
     use crate::model::Agent;
     use crate::transcript::{extract_snippet, scan_file};
@@ -644,6 +662,11 @@ mod tests {
         );
         assert!(
             search_memories(&homes, "needle", Some(Agent::Copilot), 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            search_memories(&homes, "needle", Some(Agent::Agy), 10)
                 .unwrap()
                 .is_empty()
         );
@@ -774,6 +797,11 @@ mod tests {
         );
         assert!(
             search_memories(&homes, "shared agent needle", Some(Agent::Copilot), 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            search_memories(&homes, "shared agent needle", Some(Agent::Agy), 10)
                 .unwrap()
                 .is_empty()
         );
@@ -1158,6 +1186,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let homes = Homes::isolated(dir.path());
         for agent in [
+            Agent::Agy,
             Agent::Cursor,
             Agent::OpenCode,
             Agent::Gemini,
@@ -1550,6 +1579,9 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("no first-party memory store"));
+        let err =
+            read_memory(&homes, Agent::Agy, Some("note.md"), None, None, None, 10).unwrap_err();
+        assert!(err.to_string().contains("no first-party memory store"));
 
         let err = read_memory(&homes, Agent::Claude, None, None, None, None, 10).unwrap_err();
         assert!(err.to_string().contains("file or path is required"));
@@ -1734,5 +1766,57 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("cwd is not a valid"), "{err}");
+    }
+
+    #[test]
+    fn search_and_read_claude_memory_in_named_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut homes = Homes::isolated(dir.path());
+        homes.claude = dir.path().join(".claude");
+        fs::create_dir_all(homes.claude.join("projects")).unwrap();
+        let work = dir.path().join(".claude-work");
+        let note = work
+            .join("projects")
+            .join("tmp-work")
+            .join("memory")
+            .join("profile-note.md");
+        fs::create_dir_all(note.parent().unwrap()).unwrap();
+        fs::write(&note, "named profile memory needle\n").unwrap();
+        let hits = search_memories(
+            &homes,
+            "named profile memory needle",
+            Some(Agent::Claude),
+            10,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file, "profile-note.md");
+        assert!(hits[0].path.starts_with(&work));
+        let read = read_memory(
+            &homes,
+            Agent::Claude,
+            None,
+            None,
+            None,
+            Some(note.to_str().unwrap()),
+            80,
+        )
+        .unwrap();
+        assert!(read.content.contains("named profile memory needle"));
+        assert_eq!(read.project.as_deref(), Some("tmp-work"));
+
+        let app = dir.path().join("Library").join("Application Support");
+        let solo = app.join("Claude-SOLO").join("claude-code-sessions");
+        fs::create_dir_all(&solo).unwrap();
+        homes.claude_desktop = app.join("Claude").join("claude-code-sessions");
+        fs::create_dir_all(&homes.claude_desktop).unwrap();
+        let hits = search_memories(
+            &homes,
+            "named profile memory needle",
+            Some(Agent::Claude),
+            10,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
     }
 }

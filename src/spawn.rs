@@ -29,6 +29,7 @@ pub struct Report {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Transport {
+    AgyStream,
     ClaudePrint,
     CodexExec,
     CopilotJson,
@@ -41,6 +42,7 @@ pub enum Transport {
 impl Transport {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::AgyStream => "agy-stream",
             Self::ClaudePrint => "claude-print",
             Self::CodexExec => "codex-exec",
             Self::CopilotJson => "copilot-json",
@@ -88,6 +90,8 @@ impl Record {
             messaging_socket: None,
             origin: Some(self.transport.as_str().to_string()),
             tmux: None,
+            profile: None,
+            config_dir: None,
         })
     }
 }
@@ -811,6 +815,7 @@ mod tests {
     #[test]
     fn record_materializes_every_transport() {
         for (agent, transport) in [
+            (Agent::Agy, Transport::AgyStream),
             (Agent::Claude, Transport::ClaudePrint),
             (Agent::Codex, Transport::CodexExec),
             (Agent::Copilot, Transport::CopilotJson),

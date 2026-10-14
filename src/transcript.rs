@@ -5,7 +5,7 @@ use crate::model::{Agent, Digest, FilesTouched, SearchHit, Session, Transcript, 
 use serde_json::Value;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub fn read_transcript(homes: &Homes, reference: &str, limit: usize) -> Result<Transcript> {
     let session = resolve(homes, reference)?;
@@ -52,11 +52,23 @@ fn collect_files(
     session_id: &str,
     files: &mut std::collections::BTreeSet<String>,
 ) {
-    if agent == Agent::OpenCode && path.extension().and_then(|ext| ext.to_str()) == Some("db") {
-        if let Ok(turns) = read_opencode_sqlite(path, session_id) {
+    if path.extension().and_then(|ext| ext.to_str()) == Some("db") {
+        let turns = match agent {
+            Agent::OpenCode => read_opencode_sqlite(path, session_id).ok(),
+            Agent::Agy if agy_summaries_db(path) => Some(read_agy_fts(path, session_id)),
+            Agent::Agy => read_agy_sqlite(path).ok(),
+            _ => None,
+        };
+        if let Some(turns) = turns {
             for turn in turns {
                 collect_paths_from_text(&turn.text, files);
             }
+        }
+        return;
+    }
+    if agent == Agent::Agy && path.extension().and_then(|ext| ext.to_str()) == Some("pb") {
+        for turn in read_agy_fts(&agy_summaries_path_for_transcript(path), session_id) {
+            collect_paths_from_text(&turn.text, files);
         }
         return;
     }
@@ -132,6 +144,7 @@ pub fn read_session(session: &Session, limit: usize) -> Result<Transcript> {
         Agent::Cursor => read_cursor(path)?,
         Agent::OpenCode => read_opencode(session, path)?,
         Agent::Gemini => read_gemini(path)?,
+        Agent::Agy => read_agy_with_id(path, &session.session_id)?,
         Agent::Copilot => read_copilot(path)?,
     };
     Ok(compact(session.clone(), turns, limit))
@@ -165,10 +178,23 @@ pub fn search_transcripts(
         let Some(path) = session.transcript_path.as_deref() else {
             continue;
         };
-        let hit = if session.agent == Agent::OpenCode
-            && path.extension().and_then(|ext| ext.to_str()) == Some("db")
+        let hit = if path.extension().and_then(|ext| ext.to_str()) == Some("db") {
+            match session.agent {
+                Agent::OpenCode => scan_opencode_db(path, &session.session_id, &needle),
+                Agent::Agy if agy_summaries_db(path) => {
+                    scan_agy_fts(path, &session.session_id, &needle)
+                }
+                Agent::Agy => scan_agy_db(path, &needle),
+                _ => scan_file(path, &needle),
+            }
+        } else if session.agent == Agent::Agy
+            && path.extension().and_then(|ext| ext.to_str()) == Some("pb")
         {
-            scan_opencode_db(path, &session.session_id, &needle)
+            scan_agy_fts(
+                &agy_summaries_path_for_transcript(path),
+                &session.session_id,
+                &needle,
+            )
         } else {
             scan_file(path, &needle)
         };
@@ -573,6 +599,357 @@ pub(crate) fn human_prompts(text: &str) -> Vec<String> {
 
 fn collapse_ws(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+fn read_agy(path: &Path) -> Result<Vec<Turn>> {
+    read_agy_with_id(
+        path,
+        path.file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or(""),
+    )
+}
+
+fn read_agy_with_id(path: &Path, session_id: &str) -> Result<Vec<Turn>> {
+    if agy_summaries_db(path) {
+        return Ok(read_agy_fts(path, session_id));
+    }
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("db") => read_agy_sqlite(path),
+        Some("pb") => Ok(read_agy_fts(
+            &agy_summaries_path_for_transcript(path),
+            session_id,
+        )),
+        _ => {
+            let mut turns = Vec::new();
+            for value in jsonl(path)? {
+                if let Some(turn) = agy_turn(&value) {
+                    turns.push(turn);
+                }
+            }
+            Ok(turns)
+        }
+    }
+}
+
+fn agy_summaries_db(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some("conversation_summaries.db")
+}
+
+fn agy_summaries_path_for_transcript(path: &Path) -> PathBuf {
+    path.parent()
+        .and_then(Path::parent)
+        .map(|root| root.join("conversation_summaries.db"))
+        .unwrap_or_else(|| PathBuf::from("conversation_summaries.db"))
+}
+
+fn read_agy_sqlite(path: &Path) -> Result<Vec<Turn>> {
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let Ok(mut statement) =
+        connection.prepare("SELECT step_type, step_payload FROM steps ORDER BY idx")
+    else {
+        return Ok(Vec::new());
+    };
+    let rows = statement.query_map([], |row| {
+        Ok((agy_step_type(row)?, row.get::<_, Vec<u8>>(1)?))
+    })?;
+    let mut turns = Vec::new();
+    for row in rows.flatten() {
+        let (step_type, payload) = row;
+        if let Some(turn) = agy_sqlite_turn(&step_type, &payload) {
+            turns.push(turn);
+        }
+    }
+    Ok(turns)
+}
+
+fn agy_step_type(row: &rusqlite::Row<'_>) -> rusqlite::Result<String> {
+    match row.get_ref(0)? {
+        rusqlite::types::ValueRef::Integer(value) => Ok(agy_step_type_name(value)
+            .map(ToOwned::to_owned)
+            .unwrap_or_default()),
+        rusqlite::types::ValueRef::Text(bytes) => {
+            Ok(agy_normalize_step_type(&String::from_utf8_lossy(bytes)))
+        }
+        rusqlite::types::ValueRef::Blob(bytes) => {
+            Ok(agy_normalize_step_type(&String::from_utf8_lossy(bytes)))
+        }
+        _ => Ok(String::new()),
+    }
+}
+
+fn agy_normalize_step_type(raw: &str) -> String {
+    if let Ok(value) = raw.trim().parse::<i64>() {
+        return agy_step_type_name(value)
+            .map(ToOwned::to_owned)
+            .unwrap_or_default();
+    }
+    raw.to_string()
+}
+
+fn agy_step_type_name(value: i64) -> Option<&'static str> {
+    match value {
+        14 => Some("user_input"),
+        15 => Some("planner_response"),
+        _ => None,
+    }
+}
+
+fn read_agy_fts(path: &Path, session_id: &str) -> Vec<Turn> {
+    let Ok(connection) =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return Vec::new();
+    };
+    let Ok(mut statement) = connection.prepare(
+        "SELECT chunk_index, user_body, agent_body FROM conversations_fts WHERE conversation_id = ?1 ORDER BY chunk_index",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = statement.query_map(rusqlite::params![session_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+        ))
+    }) else {
+        return Vec::new();
+    };
+    let mut turns = Vec::new();
+    for row in rows.flatten() {
+        let (chunk_index, user_body, agent_body) = row;
+        if chunk_index < 0 {
+            continue;
+        }
+        let user = collapse_ws(&user_body);
+        if !user.is_empty() {
+            turns.push(Turn {
+                role: "user".into(),
+                text: user,
+                tools: Vec::new(),
+            });
+        }
+        let agent = collapse_ws(&agent_body);
+        if !agent.is_empty() {
+            turns.push(Turn {
+                role: "assistant".into(),
+                text: agent,
+                tools: Vec::new(),
+            });
+        }
+    }
+    turns
+}
+
+fn scan_agy_db(path: &Path, needle: &str) -> Option<(usize, String)> {
+    scan_agy_turns(read_agy_sqlite(path).ok()?, needle)
+}
+
+fn scan_agy_fts(path: &Path, session_id: &str, needle: &str) -> Option<(usize, String)> {
+    scan_agy_turns(read_agy_fts(path, session_id), needle)
+}
+
+fn scan_agy_turns(turns: Vec<Turn>, needle: &str) -> Option<(usize, String)> {
+    let mut matches = 0usize;
+    let mut snippet = None;
+    for turn in turns {
+        let lowered = turn.text.to_ascii_lowercase();
+        if !lowered.contains(needle) {
+            continue;
+        }
+        matches += 1;
+        if snippet.is_none() {
+            snippet = Some(extract_snippet(&turn.text, needle));
+        }
+    }
+    snippet.map(|snippet| (matches, snippet))
+}
+
+fn agy_role(kind: &str) -> Option<&'static str> {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "user_input" | "user" | "user_message" => Some("user"),
+        "model_output" | "assistant" | "model" | "agent" | "model_response"
+        | "planner_response" | "agent_response" => Some("assistant"),
+        _ => None,
+    }
+}
+
+fn agy_turn(value: &Value) -> Option<Turn> {
+    let kind = value
+        .get("type")
+        .or_else(|| value.get("source"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let role = agy_role(kind)?;
+    let text = agy_text(value);
+    let tools = agy_tools(value);
+    if text.is_empty() && tools.is_empty() {
+        return None;
+    }
+    Some(Turn {
+        role: role.to_string(),
+        text,
+        tools,
+    })
+}
+
+fn agy_sqlite_turn(step_type: &str, payload: &[u8]) -> Option<Turn> {
+    if let Ok(text) = std::str::from_utf8(payload) {
+        if let Ok(value) = serde_json::from_str::<Value>(text) {
+            if let Some(turn) = agy_turn(&value) {
+                return Some(turn);
+            }
+            let role = agy_role(step_type)?;
+            let extracted = agy_text(&value);
+            if extracted.is_empty() && agy_tools(&value).is_empty() {
+                return None;
+            }
+            return Some(Turn {
+                role: role.to_string(),
+                text: extracted,
+                tools: agy_tools(&value),
+            });
+        }
+        let role = agy_role(step_type)?;
+        let collapsed = collapse_ws(text);
+        if collapsed.is_empty() {
+            return None;
+        }
+        return Some(Turn {
+            role: role.to_string(),
+            text: collapsed,
+            tools: Vec::new(),
+        });
+    }
+    let role = agy_role(step_type)?;
+    let text = protobuf_strings(payload)
+        .into_iter()
+        .map(|text| collapse_ws(&text))
+        .find(|text| !text.is_empty())?;
+    Some(Turn {
+        role: role.to_string(),
+        text,
+        tools: Vec::new(),
+    })
+}
+
+fn agy_text(value: &Value) -> String {
+    if let Some(text) = value.get("content").and_then(Value::as_str) {
+        return collapse_ws(unwrap_agy_request(text));
+    }
+    if let Some(text) = value.pointer("/message/content").and_then(Value::as_str) {
+        return collapse_ws(unwrap_agy_request(text));
+    }
+    if let Some(text) = value.get("text").and_then(Value::as_str) {
+        return collapse_ws(unwrap_agy_request(text));
+    }
+    String::new()
+}
+
+fn unwrap_agy_request(text: &str) -> &str {
+    const OPEN: &str = "<USER_REQUEST>";
+    const CLOSE: &str = "</USER_REQUEST>";
+    let trimmed = text.trim();
+    let Some(start) = trimmed.find(OPEN) else {
+        return trimmed;
+    };
+    let inner = &trimmed[start + OPEN.len()..];
+    match inner.find(CLOSE) {
+        Some(end) => inner[..end].trim(),
+        None => inner.trim(),
+    }
+}
+
+fn agy_tools(value: &Value) -> Vec<String> {
+    let mut tools = Vec::new();
+    if let Some(name) = value
+        .get("tool")
+        .or_else(|| value.get("toolName"))
+        .or_else(|| value.pointer("/tool_call/name"))
+        .and_then(Value::as_str)
+    {
+        tools.push(name.to_string());
+    }
+    if let Some(items) = value.get("toolCalls").and_then(Value::as_array) {
+        for item in items {
+            if let Some(name) = item.get("name").and_then(Value::as_str) {
+                tools.push(name.to_string());
+            }
+        }
+    }
+    tools
+}
+
+fn protobuf_strings(payload: &[u8]) -> Vec<String> {
+    let mut strings = Vec::new();
+    let mut offset = 0;
+    while offset < payload.len() {
+        let Some((tag, next)) = read_varint(payload, offset) else {
+            break;
+        };
+        offset = next;
+        match (tag & 7) as u8 {
+            0 => {
+                let Some((_, next)) = read_varint(payload, offset) else {
+                    break;
+                };
+                offset = next;
+            }
+            1 => {
+                if offset.saturating_add(8) > payload.len() {
+                    break;
+                }
+                offset += 8;
+            }
+            5 => {
+                if offset.saturating_add(4) > payload.len() {
+                    break;
+                }
+                offset += 4;
+            }
+            2 => {
+                let Some((len, next)) = read_varint(payload, offset) else {
+                    break;
+                };
+                offset = next;
+                let end = offset.saturating_add(len as usize);
+                if end > payload.len() || end < offset {
+                    break;
+                }
+                if let Ok(text) = std::str::from_utf8(&payload[offset..end])
+                    && !text.is_empty()
+                    && text
+                        .chars()
+                        .all(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
+                {
+                    strings.push(text.to_string());
+                }
+                offset = end;
+            }
+            _ => break,
+        }
+    }
+    strings
+}
+
+fn read_varint(payload: &[u8], mut offset: usize) -> Option<(u64, usize)> {
+    let mut result = 0u64;
+    let mut shift = 0;
+    while offset < payload.len() {
+        let byte = payload[offset];
+        offset += 1;
+        result |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Some((result, offset));
+        }
+        shift += 7;
+        if shift >= 64 {
+            return None;
+        }
+    }
+    None
 }
 
 fn read_gemini(path: &Path) -> Result<Vec<Turn>> {
@@ -995,6 +1372,8 @@ mod tests {
         assert!(gemini.files.iter().any(|path| path == "src/gemini.rs"));
         let copilot = files_touched(&world.homes, "copilot:latest").unwrap();
         assert!(copilot.files.iter().any(|path| path == "src/copilot.rs"));
+        let agy = files_touched(&world.homes, "agy:latest").unwrap();
+        assert!(agy.files.iter().any(|path| path == "src/agy.rs"));
         assert!(looks_like_path("src/lib.rs"));
         assert!(looks_like_path("/tmp/x.rs"));
         assert!(!looks_like_path("https://example.com/x.rs"));
@@ -1077,6 +1456,344 @@ mod tests {
     }
 
     #[test]
+    fn reads_agy_jsonl_and_sqlite_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("transcript_full.jsonl");
+        std::fs::write(
+            &jsonl,
+            r#"{"step_index":0,"type":"user_input","source":"user","content":"agy jsonl user"}
+{"type":"model_output","content":"agy jsonl assistant","toolName":"Read"}
+{"type":"info","content":"skip"}
+{"source":"user","text":"from source"}
+{"type":"assistant","message":{"content":"nested message"}}
+{"type":"user_input"}
+{"type":"model_output","toolCalls":[{"name":"Grep"},{"id":"skip"}]}
+{"type":"model_output","tool_call":{"name":"Write"}}
+{"type":"user","text":"plain text field"}
+{"type":"USER_INPUT","content":"<USER_REQUEST>\nReply with exactly the word pong\n</USER_REQUEST> trailing"}
+{"type":"PLANNER_RESPONSE","content":"pong"}
+{"type":"agent_response","content":"also assistant"}
+{"type":"USER_INPUT","content":"<USER_REQUEST>\nunclosed request"}
+"#,
+        )
+        .unwrap();
+        let turns = super::read_agy(&jsonl).unwrap();
+        assert!(
+            turns
+                .iter()
+                .any(|turn| turn.role == "user" && turn.text.contains("agy jsonl user"))
+        );
+        assert!(turns.iter().any(|turn| turn.tools.contains(&"Read".into())));
+        assert!(turns.iter().any(|turn| turn.text.contains("from source")));
+        assert!(
+            turns
+                .iter()
+                .any(|turn| turn.text.contains("nested message"))
+        );
+        assert!(turns.iter().any(|turn| turn.tools.contains(&"Grep".into())));
+        assert!(
+            turns
+                .iter()
+                .any(|turn| turn.tools.contains(&"Write".into()))
+        );
+        assert!(
+            turns
+                .iter()
+                .any(|turn| turn.text.contains("plain text field"))
+        );
+        assert!(turns.iter().any(|turn| {
+            turn.role == "user"
+                && turn.text.contains("Reply with exactly the word pong")
+                && !turn.text.contains("USER_REQUEST")
+                && !turn.text.contains("trailing")
+        }));
+        assert!(
+            turns
+                .iter()
+                .any(|turn| turn.role == "assistant" && turn.text == "pong")
+        );
+        assert!(
+            turns
+                .iter()
+                .any(|turn| turn.role == "assistant" && turn.text.contains("also assistant"))
+        );
+        assert!(
+            turns
+                .iter()
+                .any(|turn| turn.role == "user" && turn.text.contains("unclosed request"))
+        );
+        assert!(super::read_agy(&dir.path().join("missing.jsonl")).is_err());
+
+        let db = dir.path().join("conversation.db");
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch("CREATE TABLE steps (idx INTEGER, step_type TEXT, step_payload BLOB);")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO steps VALUES (0, 'user_input', ?1)",
+                [br#"{"type":"user_input","content":"sqlite json user"}"#.as_slice()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO steps VALUES (1, 'user_input', ?1)",
+                [br#"{"content":"sqlite untyped json"}"#.as_slice()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO steps VALUES (2, 'model_output', ?1)",
+                [b"plain sqlite assistant".as_slice()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO steps VALUES (3, 'user_input', ?1)",
+                [br#"{"type":"user_input"}"#.as_slice()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO steps VALUES (4, 'user_input', ?1)",
+                [b"   ".as_slice()],
+            )
+            .unwrap();
+        let mut protobuf = encode_varint((3u64 << 3) | 1);
+        protobuf.extend([0xff; 8]);
+        protobuf.extend(encode_varint((1u64 << 3) | 2));
+        protobuf.extend(encode_varint("protobuf user text".len() as u64));
+        protobuf.extend(b"protobuf user text");
+        let mut varint_field = encode_varint(2u64 << 3);
+        varint_field.extend(encode_varint(300));
+        protobuf.extend(varint_field);
+        let mut fixed32 = encode_varint((4u64 << 3) | 5);
+        fixed32.extend([0u8; 4]);
+        protobuf.extend(fixed32);
+        connection
+            .execute(
+                "INSERT INTO steps VALUES (5, 'user_input', ?1)",
+                [protobuf.as_slice()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO steps VALUES (6, 'other', ?1)",
+                [b"ignored".as_slice()],
+            )
+            .unwrap();
+        let sqlite = super::read_agy(&db).unwrap();
+        assert!(
+            sqlite
+                .iter()
+                .any(|turn| turn.role == "user" && turn.text.contains("sqlite json user"))
+        );
+        assert!(
+            sqlite
+                .iter()
+                .any(|turn| turn.text.contains("sqlite untyped json"))
+        );
+        assert!(
+            sqlite.iter().any(
+                |turn| turn.role == "assistant" && turn.text.contains("plain sqlite assistant")
+            )
+        );
+        assert!(
+            sqlite
+                .iter()
+                .any(|turn| turn.text.contains("protobuf user text"))
+        );
+        assert_eq!(super::protobuf_strings(b"").len(), 0);
+        assert!(super::protobuf_strings(&[0x80, 0x80]).is_empty());
+        assert!(super::protobuf_strings(&[0xff; 11]).is_empty());
+        assert!(super::protobuf_strings(&[0x08, 0x80]).is_empty());
+        assert!(super::protobuf_strings(&[0x08, 0x07]).is_empty());
+        assert!(super::protobuf_strings(&[0x09, 0x00]).is_empty());
+        assert!(super::protobuf_strings(&[0x09, 0, 0, 0, 0, 0, 0, 0, 0]).is_empty());
+        assert!(super::protobuf_strings(&[0x0d, 0x00]).is_empty());
+        assert!(super::protobuf_strings(&[0x0d, 0, 0, 0, 0]).is_empty());
+        assert!(super::protobuf_strings(&[0x03]).is_empty());
+        assert!(super::protobuf_strings(&[0x12, 0x80]).is_empty());
+        assert!(super::protobuf_strings(&[0x12, 0x05, b'h']).is_empty());
+        let mut hello = encode_varint((1u64 << 3) | 2);
+        hello.extend(encode_varint(5));
+        hello.extend(b"hello");
+        assert_eq!(super::protobuf_strings(&hello), vec!["hello".to_string()]);
+        let mut controls = encode_varint((1u64 << 3) | 2);
+        controls.extend(encode_varint(1));
+        controls.push(0x01);
+        assert!(super::protobuf_strings(&controls).is_empty());
+        let empty = dir.path().join("empty.db");
+        rusqlite::Connection::open(&empty).unwrap();
+        assert!(super::read_agy(&empty).unwrap().is_empty());
+        let hit = super::scan_agy_db(&db, "sqlite json").unwrap();
+        assert!(hit.0 >= 1);
+        assert!(hit.1.to_ascii_lowercase().contains("sqlite json"));
+        assert!(super::scan_agy_db(&db, "no-such-agy-phrase").is_none());
+
+        let integer = dir.path().join("integer.db");
+        let connection = rusqlite::Connection::open(&integer).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE steps (idx INTEGER, step_type INTEGER, step_payload BLOB);",
+            )
+            .unwrap();
+        let mut protobuf = encode_varint((1u64 << 3) | 2);
+        protobuf.extend(encode_varint("integer protobuf user".len() as u64));
+        protobuf.extend(b"integer protobuf user");
+        connection
+            .execute(
+                "INSERT INTO steps VALUES (0, 14, ?1)",
+                [protobuf.as_slice()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO steps VALUES (1, 15, ?1)",
+                [b"integer assistant".as_slice()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO steps VALUES (2, 99, ?1)",
+                [b"ignored".as_slice()],
+            )
+            .unwrap();
+        let integer_turns = super::read_agy(&integer).unwrap();
+        assert!(
+            integer_turns
+                .iter()
+                .any(|turn| { turn.role == "user" && turn.text.contains("integer protobuf user") })
+        );
+        assert!(
+            integer_turns.iter().any(|turn| {
+                turn.role == "assistant" && turn.text.contains("integer assistant")
+            })
+        );
+        assert!(
+            !integer_turns
+                .iter()
+                .any(|turn| turn.text.contains("ignored"))
+        );
+
+        let typed = dir.path().join("typed-text.db");
+        let connection = rusqlite::Connection::open(&typed).unwrap();
+        connection
+            .execute_batch("CREATE TABLE steps (idx INTEGER, step_type TEXT, step_payload BLOB);")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO steps VALUES (0, '14', ?1)",
+                [b"numeric text user".as_slice()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO steps VALUES (1, X'75736572', ?1)",
+                [b"blob role skipped".as_slice()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO steps VALUES (2, NULL, ?1)",
+                [b"null step".as_slice()],
+            )
+            .unwrap();
+        let typed_turns = super::read_agy(&typed).unwrap();
+        assert!(
+            typed_turns
+                .iter()
+                .any(|turn| turn.role == "user" && turn.text.contains("numeric text user"))
+        );
+    }
+
+    #[test]
+    fn reads_agy_desktop_fts_from_encrypted_pb() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+        std::fs::create_dir_all(root.join("conversations")).unwrap();
+        let pb = root.join("conversations").join(format!("{id}.pb"));
+        std::fs::write(&pb, b"\x00encrypted-agy-desktop").unwrap();
+        let db = root.join("conversation_summaries.db");
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch(
+                "CREATE VIRTUAL TABLE conversations_fts USING fts5(
+                    conversation_id UNINDEXED,
+                    chunk_index UNINDEXED,
+                    title,
+                    user_body,
+                    agent_body
+                );",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversations_fts (conversation_id, chunk_index, title, user_body, agent_body) VALUES (?1, -1, 'Fix Gradle Build Issues', '', '')",
+                [id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversations_fts (conversation_id, chunk_index, title, user_body, agent_body) VALUES (?1, 0, '', 'Fix issues in src/agy-desktop.rs', 'checking the gradle build')",
+                [id],
+            )
+            .unwrap();
+        let turns = super::read_agy(&pb).unwrap();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].role, "user");
+        assert!(turns[0].text.contains("src/agy-desktop.rs"));
+        assert_eq!(turns[1].role, "assistant");
+        assert!(turns[1].text.contains("gradle"));
+        let from_db = super::read_agy_with_id(&db, id).unwrap();
+        assert_eq!(from_db.len(), 2);
+        let hit = super::scan_agy_fts(&db, id, "gradle").unwrap();
+        assert!(hit.0 >= 1);
+        assert!(super::scan_agy_fts(&db, id, "no-such-agy-desktop").is_none());
+        assert!(
+            super::read_agy(&root.join("conversations/missing.pb"))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(super::agy_summaries_db(&db));
+        assert!(!super::agy_summaries_db(&pb));
+        assert_eq!(
+            super::agy_summaries_path_for_transcript(std::path::Path::new("foo.pb")),
+            std::path::PathBuf::from("conversation_summaries.db")
+        );
+        assert!(
+            super::read_agy_fts(
+                std::path::Path::new("/no/such/conversation_summaries.db"),
+                id
+            )
+            .is_empty()
+        );
+        let empty = dir.path().join("empty-summaries.db");
+        rusqlite::Connection::open(&empty).unwrap();
+        assert!(super::read_agy_fts(&empty, id).is_empty());
+        assert_eq!(super::agy_step_type_name(99), None);
+        assert_eq!(super::agy_normalize_step_type("15"), "planner_response");
+        assert_eq!(super::agy_normalize_step_type("other"), "other");
+    }
+
+    fn encode_varint(mut value: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+        out
+    }
+
+    #[test]
     fn content_parts_variants() {
         let (text, tools) = content_parts(Some(&json!("just a string")));
         assert_eq!(text, "just a string");
@@ -1141,6 +1858,8 @@ mod tests {
                 messaging_socket: None,
                 origin: None,
                 tmux: None,
+                profile: None,
+                config_dir: None,
             },
             10,
         )
@@ -1165,6 +1884,8 @@ mod tests {
                 messaging_socket: None,
                 origin: None,
                 tmux: None,
+                profile: None,
+                config_dir: None,
             },
             vec![
                 Turn {

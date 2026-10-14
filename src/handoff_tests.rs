@@ -25,6 +25,7 @@ const OPENCODE_ID: &str = "ses_testopencode0001";
 const OPENCODE_CHILD: &str = "ses_testchild0000001";
 const GEMINI_ID: &str = "55555555-5555-4555-8555-555555555555";
 const COPILOT_ID: &str = "66666666-6666-4666-8666-666666666666";
+const AGY_ID: &str = "88888888-8888-4888-8888-888888888888";
 
 pub(crate) struct World {
     _dir: TempDir,
@@ -42,6 +43,7 @@ impl World {
         write_opencode_sqlite(&homes);
         write_gemini(&homes);
         write_copilot(&homes);
+        write_agy(&homes);
         Self { _dir: dir, homes }
     }
 }
@@ -619,6 +621,43 @@ fn write_gemini(homes: &Homes) {
     );
 }
 
+fn write_agy(homes: &Homes) {
+    write(
+        &homes.agy.join("history.jsonl"),
+        &format!(
+            r#"{{"conversationId":"{AGY_ID}","display":"AGY CLI check","timestamp":"{}","workspace":"/tmp/agy"}}
+"#,
+            Utc::now().to_rfc3339()
+        ),
+    );
+    write(
+        &homes
+            .agy
+            .join("brain")
+            .join(AGY_ID)
+            .join(".system_generated")
+            .join("logs")
+            .join("transcript_full.jsonl"),
+        r#"{"step_index":0,"type":"user_input","source":"user","content":"run the agy dedicated databases check"}
+{"step_index":1,"type":"model_output","source":"model","content":"inspecting src/agy.rs","toolName":"Read"}
+"#,
+    );
+    let db = homes.agy.join("conversations").join(format!("{AGY_ID}.db"));
+    if let Some(parent) = db.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    let connection = Connection::open(&db).unwrap();
+    connection
+        .execute_batch("CREATE TABLE steps (idx INTEGER, step_type TEXT, step_payload BLOB);")
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO steps VALUES (0, 'user_input', ?1)",
+            [b"run the agy dedicated databases check".as_slice()],
+        )
+        .unwrap();
+}
+
 fn write_copilot(homes: &Homes) {
     let dir = homes.copilot.join("session-state").join(COPILOT_ID);
     write(
@@ -663,6 +702,7 @@ fn lists_every_harness_and_skips_subagents() {
     assert!(ids.contains(&(Agent::OpenCode, OPENCODE_ID)));
     assert!(ids.contains(&(Agent::Gemini, GEMINI_ID)));
     assert!(ids.contains(&(Agent::Copilot, COPILOT_ID)));
+    assert!(ids.contains(&(Agent::Agy, AGY_ID)));
     assert!(!ids.iter().any(|(_, id)| *id == CURSOR_SUB_ID));
     assert!(!ids.iter().any(|(_, id)| *id == OPENCODE_CHILD));
 }
@@ -783,6 +823,19 @@ fn reads_compact_handoff_for_each_agent() {
             .iter()
             .any(|turn| turn.tools.contains(&"view".into()))
     );
+
+    let agy = read_transcript(&world.homes, "agy:AGY CLI", 20).unwrap();
+    assert!(
+        agy.last_user_request
+            .as_deref()
+            .unwrap()
+            .contains("agy dedicated databases")
+    );
+    assert!(
+        agy.turns
+            .iter()
+            .any(|turn| turn.tools.contains(&"Read".into()))
+    );
 }
 
 #[test]
@@ -822,6 +875,9 @@ fn searches_across_harnesses() {
     )
     .unwrap();
     assert_eq!(copilot.len(), 1);
+    let agy =
+        search_transcripts(&world.homes, "agy dedicated", Some(Agent::Agy), false, 10).unwrap();
+    assert_eq!(agy.len(), 1);
     let limited = search_transcripts(&world.homes, "109 point", None, false, 1).unwrap();
     assert_eq!(limited.len(), 1);
 }

@@ -22,6 +22,7 @@ pub struct InstallSpec {
     pub opencode: bool,
     pub gemini: bool,
     pub copilot: bool,
+    pub agy: bool,
     pub skip_missing: bool,
 }
 
@@ -73,6 +74,7 @@ pub fn install(
         opencode,
         gemini,
         copilot,
+        agy: false,
         skip_missing: false,
     })
 }
@@ -158,6 +160,15 @@ pub fn install_spec_with(
         "copilot",
         || install_copilot(&homes, &exe),
         Some(host_skills(homes.copilot.clone())),
+        &mut on_event,
+    )?;
+    try_host(
+        spec.agy,
+        spec.skip_missing,
+        &mut notes,
+        "agy",
+        || install_agy(&homes, &exe),
+        Some(host_skills(homes.agy.clone())),
         &mut on_event,
     )?;
     Ok(notes)
@@ -287,6 +298,23 @@ fn install_gemini(homes: &Homes, exe: &Path) -> Result<HostStatus> {
     })
 }
 
+fn install_agy(homes: &Homes, exe: &Path) -> Result<HostStatus> {
+    let add = [
+        "mcp",
+        "add",
+        "magents",
+        exe.to_str().unwrap_or("magents"),
+        "mcp",
+    ];
+    add_or_replace_known(cli_has_magents(homes, "agy"), "agy", &add, || {
+        upsert_json_mcp(
+            &homes.gemini.join("config").join("mcp_config.json"),
+            "mcpServers",
+            stdio_server(exe, None),
+        )
+    })
+}
+
 fn install_copilot(homes: &Homes, exe: &Path) -> Result<HostStatus> {
     let add = [
         "mcp",
@@ -323,6 +351,12 @@ fn cli_has_magents(homes: &Homes, program: &str) -> bool {
         "copilot" => {
             json_top_level_mcp(&homes.copilot.join("mcp-config.json"), "magents")
                 || mcp_get_exists(program)
+        }
+        "agy" => {
+            json_top_level_mcp(
+                &homes.gemini.join("config").join("mcp_config.json"),
+                "magents",
+            ) || mcp_get_exists(program)
         }
         _ => mcp_get_exists(program),
     }
@@ -929,6 +963,8 @@ mod tests {
         "HOME",
         "PATH",
         "GEMINI_CLI_HOME",
+        "ANTIGRAVITY_CLI_HOME",
+        "ANTIGRAVITY_HOME",
         "COPILOT_HOME",
         "GROK_HOME",
         "CODEX_HOME",
@@ -947,6 +983,8 @@ mod tests {
             std::env::remove_var("GROK_HOME");
             std::env::remove_var("CODEX_HOME");
             std::env::remove_var("GEMINI_CLI_HOME");
+            std::env::remove_var("ANTIGRAVITY_CLI_HOME");
+            std::env::remove_var("ANTIGRAVITY_HOME");
             std::env::remove_var("COPILOT_HOME");
             std::env::remove_var("XDG_CONFIG_HOME");
         }
@@ -1517,6 +1555,7 @@ printf '%s\n' "$@" > "$HOME/.gemini-argv"
                 opencode: true,
                 gemini: true,
                 copilot: true,
+                agy: true,
                 skip_missing: true,
             })
             .unwrap();
@@ -1524,10 +1563,16 @@ printf '%s\n' "$@" > "$HOME/.gemini-argv"
             assert_eq!(host(&notes, "gemini").status, HostStatus::Skipped);
             assert_eq!(host(&notes, "gemini").detail, "not installed");
             assert_eq!(host(&notes, "copilot").status, HostStatus::Skipped);
+            assert_eq!(host(&notes, "agy").status, HostStatus::Skipped);
             assert!(!host(&notes, "gemini").to_string().contains("os error"));
             assert!(home.join(".grok/skills/magents/SKILL.md").is_file());
             assert!(!home.join(".gemini/skills/magents/SKILL.md").is_file());
             assert!(!home.join(".copilot/skills/magents/SKILL.md").is_file());
+            assert!(
+                !home
+                    .join(".gemini/antigravity-cli/skills/magents/SKILL.md")
+                    .is_file()
+            );
         });
     }
 
@@ -1558,6 +1603,134 @@ printf '%s\n' "$@" > "$HOME/.gemini-argv"
                 ]
             );
             assert!(home.join(".cursor/skills/magents/SKILL.md").is_file());
+        });
+    }
+
+    #[test]
+    fn install_agy_with_stub_and_home_overrides() {
+        with_home(|home, bin| {
+            test_env::write_executable(
+                &bin.join("agy"),
+                r#"
+if [ "$1" = mcp ] && [ "$2" = get ]; then
+  exit 1
+fi
+printf '%s\n' "$@" > "$HOME/.agy-argv"
+echo added agy magents
+"#,
+            );
+            let notes = install_spec(InstallSpec {
+                agy: true,
+                ..InstallSpec::default()
+            })
+            .unwrap();
+            assert_eq!(host(&notes, "agy").status, HostStatus::Added);
+            let argv = fs::read_to_string(home.join(".agy-argv")).unwrap();
+            let argv: Vec<&str> = argv.lines().collect();
+            assert!(!argv.contains(&"--"), "{argv:?}");
+            assert_eq!(&argv[..3], ["mcp", "add", "magents"]);
+            assert_eq!(argv[4], "mcp");
+            assert!(
+                home.join(".gemini/antigravity-cli/skills/magents/SKILL.md")
+                    .is_file()
+            );
+            assert!(
+                home.join(".gemini/antigravity-cli/skills/learn/SKILL.md")
+                    .is_file()
+            );
+        });
+        with_home(|home, bin| {
+            test_env::write_executable(&bin.join("agy"), "echo added agy magents");
+            unsafe {
+                std::env::set_var("GEMINI_CLI_HOME", home.join("custom-gemini"));
+                std::env::set_var("ANTIGRAVITY_CLI_HOME", home.join("custom-agy"));
+            }
+            let notes = install_spec(InstallSpec {
+                agy: true,
+                ..InstallSpec::default()
+            })
+            .unwrap();
+            assert_eq!(host(&notes, "agy").status, HostStatus::Added);
+            assert!(home.join("custom-agy/skills/magents/SKILL.md").is_file());
+            assert!(home.join("custom-agy/skills/learn/SKILL.md").is_file());
+            assert!(
+                !home
+                    .join(".gemini/antigravity-cli/skills/magents/SKILL.md")
+                    .is_file()
+            );
+        });
+    }
+
+    #[test]
+    fn install_agy_replaces_when_mcp_config_lists_server() {
+        with_home(|home, bin| {
+            test_env::write_executable(
+                &bin.join("agy"),
+                r#"
+if [ "$1" = mcp ] && [ "$2" = get ]; then
+  echo 'magents:'
+  exit 0
+fi
+echo added agy magents
+"#,
+            );
+            write_json(
+                &home.join(".gemini").join("config").join("mcp_config.json"),
+                &json!({"mcpServers": {"magents": {"command": "x"}}}),
+            )
+            .unwrap();
+            let notes = install_spec(InstallSpec {
+                agy: true,
+                ..InstallSpec::default()
+            })
+            .unwrap();
+            assert_eq!(host(&notes, "agy").status, HostStatus::Replaced);
+        });
+    }
+
+    #[test]
+    fn install_agy_upserts_mcp_config_when_already_registered() {
+        with_home(|home, bin| {
+            test_env::write_executable(
+                &bin.join("agy"),
+                r#"
+echo already exists >&2
+exit 1
+"#,
+            );
+            let notes = install_spec(InstallSpec {
+                agy: true,
+                ..InstallSpec::default()
+            })
+            .unwrap();
+            assert_eq!(host(&notes, "agy").status, HostStatus::Replaced);
+            let config =
+                fs::read_to_string(home.join(".gemini").join("config").join("mcp_config.json"))
+                    .unwrap();
+            assert!(config.contains("magents"));
+            assert!(config.contains("mcp"));
+        });
+    }
+
+    #[test]
+    fn install_agy_detects_existing_server_via_mcp_get() {
+        with_home(|_home, bin| {
+            test_env::write_executable(
+                &bin.join("agy"),
+                r#"
+if [ "$1" = mcp ] && [ "$2" = get ]; then
+  echo magents
+  exit 0
+fi
+echo added agy magents
+"#,
+            );
+            let notes = install_spec(InstallSpec {
+                agy: true,
+                ..InstallSpec::default()
+            })
+            .unwrap();
+            assert_eq!(host(&notes, "agy").status, HostStatus::Replaced);
         });
     }
 
