@@ -435,6 +435,32 @@ mod tests {
     }
 
     #[test]
+    fn historical_claude_resume_uses_named_profile_home() {
+        let (_dir, homes) = isolated();
+        let work = homes.claude.parent().unwrap().join(".claude-work");
+        let mut historical = session(Agent::Claude, "hist-id");
+        historical.live = false;
+        historical.pid = None;
+        historical.profile = Some("work".into());
+        historical.config_dir = Some(work.clone());
+        let delivered = deliver_with(
+            &homes,
+            &historical,
+            "continue android testing",
+            |actual_homes, actual, message| {
+                assert_eq!(actual_homes.claude, work);
+                assert_eq!(actual.session_id, "hist-id");
+                assert_eq!(actual.profile.as_deref(), Some("work"));
+                assert_eq!(actual.config_dir.as_deref(), Some(work.as_path()));
+                assert_eq!(message, "continue android testing");
+                Ok("claude-cli".into())
+            },
+        )
+        .unwrap();
+        assert_eq!(delivered, vec!["claude-cli".to_string()]);
+    }
+
+    #[test]
     fn supervised_routes_preserve_targets_and_markers() {
         let (_dir, homes) = isolated();
         for (agent, id, marker) in [
