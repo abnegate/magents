@@ -7,7 +7,8 @@ use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use walkdir::WalkDir;
@@ -64,12 +65,17 @@ pub fn list_sessions(homes: &Homes, filter: &ListFilter) -> Result<Vec<Session>>
         sessions.extend(discover_agy(homes)?);
     }
     merge_spawned(homes, &mut sessions, filter.agent)?;
-    let needle = filter
+    let tokens = filter
         .query
         .as_deref()
-        .map(|query| query.split_whitespace().collect::<Vec<_>>().join(" "))
-        .filter(|query| !query.is_empty())
-        .map(|query| query.to_ascii_lowercase());
+        .map(|query| {
+            query
+                .split_whitespace()
+                .map(str::to_ascii_lowercase)
+                .filter(|token| !token.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .filter(|tokens| !tokens.is_empty());
     sessions.retain(|session| {
         if filter.live_only && !session.live {
             return false;
@@ -77,10 +83,11 @@ pub fn list_sessions(homes: &Homes, filter: &ListFilter) -> Result<Vec<Session>>
         if !filter.include_archived && session.archived {
             return false;
         }
-        if let Some(needle) = &needle
-            && !session.haystack().contains(needle)
-        {
-            return false;
+        if let Some(tokens) = &tokens {
+            let haystack = session.haystack();
+            if !tokens.iter().all(|token| haystack.contains(token)) {
+                return false;
+            }
         }
         if let Some(cwd) = &filter.cwd
             && !cwd_matches(session.cwd.as_deref(), cwd)
@@ -311,11 +318,22 @@ pub(crate) fn cwd_matches(session_cwd: Option<&str>, wanted: &str) -> bool {
     let Some(session_cwd) = session_cwd else {
         return false;
     };
-    let wanted = normalize_cwd(wanted);
+    let wanted_raw = wanted.trim();
+    if wanted_raw.is_empty() {
+        return false;
+    }
+    let wanted = normalize_cwd(wanted_raw);
     let session = normalize_cwd(session_cwd);
-    session == wanted
+    if session == wanted
         || session.starts_with(&format!("{wanted}/"))
         || wanted.starts_with(&format!("{session}/"))
+    {
+        return true;
+    }
+    let fragment = wanted_raw.trim_matches('/').to_ascii_lowercase();
+    !wanted_raw.starts_with('/')
+        && fragment.len() >= 3
+        && session.to_ascii_lowercase().contains(&fragment)
 }
 
 fn normalize_cwd(value: &str) -> String {
@@ -399,6 +417,7 @@ fn discover_claude_profile(profile: &ClaudeProfile, primary: bool) -> Result<Vec
     let mut by_id: HashMap<String, Session> = HashMap::new();
     if let Some(config_dir) = &profile.config_dir {
         discover_claude_live(config_dir, profile, &index, &mut by_id, primary)?;
+        discover_claude_projects(config_dir, profile, &index, &mut by_id);
     }
     if let Some(desktop) = &profile.desktop_sessions {
         discover_claude_desktop(desktop, profile, &index, &mut by_id);
@@ -600,6 +619,129 @@ fn discover_claude_desktop(
                 config_dir: profile.config_dir.clone(),
             },
         );
+    }
+}
+
+fn discover_claude_projects(
+    config_dir: &Path,
+    profile: &ClaudeProfile,
+    index: &HashMap<String, PathBuf>,
+    by_id: &mut HashMap<String, Session>,
+) {
+    for (session_id, path) in index {
+        if let Some(existing) = by_id.get_mut(session_id) {
+            if existing.transcript_path.is_none() {
+                existing.transcript_path = Some(path.clone());
+            }
+            continue;
+        }
+        let meta = claude_jsonl_meta(path);
+        let last_activity_at = path
+            .metadata()
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .map(DateTime::<Utc>::from);
+        by_id.insert(
+            session_id.clone(),
+            Session {
+                agent: Agent::Claude,
+                session_id: session_id.clone(),
+                desktop_id: None,
+                name: None,
+                title: meta.title,
+                cwd: meta.cwd.or_else(|| claude_cwd_from_project_path(path)),
+                branch: meta.branch,
+                live: false,
+                archived: false,
+                pid: None,
+                model: None,
+                last_activity_at,
+                transcript_path: Some(path.clone()),
+                messaging_socket: None,
+                origin: meta.origin.or_else(|| Some("claude".into())),
+                tmux: None,
+                profile: profile.name.clone(),
+                config_dir: Some(config_dir.to_path_buf()),
+            },
+        );
+    }
+}
+
+#[derive(Default)]
+struct ClaudeJsonlMeta {
+    cwd: Option<String>,
+    branch: Option<String>,
+    title: Option<String>,
+    origin: Option<String>,
+}
+
+fn claude_cwd_from_project_path(path: &Path) -> Option<String> {
+    let encoded = path.parent()?.file_name()?.to_str()?;
+    if encoded.is_empty() {
+        return None;
+    }
+    Some(encoded.replace('-', "/"))
+}
+
+fn claude_jsonl_meta(path: &Path) -> ClaudeJsonlMeta {
+    let Ok(file) = File::open(path) else {
+        return ClaudeJsonlMeta::default();
+    };
+    let mut meta = ClaudeJsonlMeta::default();
+    for line in BufReader::new(file).lines().take(40).flatten() {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if meta.cwd.is_none() {
+            meta.cwd = string_field(&value, "cwd");
+        }
+        if meta.branch.is_none() {
+            meta.branch = string_field(&value, "gitBranch");
+        }
+        if meta.origin.is_none() {
+            meta.origin = string_field(&value, "entrypoint");
+        }
+        if meta.title.is_none() {
+            meta.title = claude_user_preview(&value);
+        }
+        if meta.cwd.is_some() && meta.title.is_some() {
+            break;
+        }
+    }
+    meta
+}
+
+fn string_field(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn claude_user_preview(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) != Some("user") {
+        return None;
+    }
+    if value.get("isMeta").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let message = value.get("message").unwrap_or(value);
+    let content = message.get("content").unwrap_or(message);
+    let text = match content {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => String::new(),
+    };
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.chars().take(80).collect())
     }
 }
 
@@ -2584,6 +2726,15 @@ mod tests {
         ));
         assert!(!cwd_matches(None, root.to_str().unwrap()));
         assert!(!cwd_matches(Some("/no/such/cwd"), "/also/missing"));
+        assert!(cwd_matches(
+            Some("/Users/jakebarnby/AndroidStudioProjects/SSHoo"),
+            "AndroidStudioProjects"
+        ));
+        assert!(!cwd_matches(
+            Some("/Users/jakebarnby/Local/magents"),
+            "AndroidStudioProjects"
+        ));
+        assert!(!cwd_matches(Some("/Users/jakebarnby/Local/magents"), "ab"));
     }
 
     #[test]
@@ -4285,5 +4436,113 @@ not-json
             resolve(&homes, &format!("claude:work:{work_id}")),
             Err(Error::Ambiguous { .. })
         ));
+    }
+
+    #[test]
+    fn discovers_and_searches_claude_project_jsonl_without_a_live_sidecar() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut homes = Homes::isolated(directory.path());
+        let default_home = directory.path().join(".claude");
+        let work = directory.path().join(".claude-work");
+        homes.claude = default_home;
+        let project_id = "33333333-3333-4333-8333-333333333333";
+        let project = work
+            .join("projects")
+            .join("-Users-jakebarnby-AndroidStudioProjects-SSHoo");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join(format!("{project_id}.jsonl")),
+            concat!(
+                r#"{"type":"user","cwd":"/Users/jakebarnby/AndroidStudioProjects/SSHoo","gitBranch":"instrumentation","entrypoint":"cli","message":{"role":"user","content":[{"type":"text","text":"look at android"}]}}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"start with espresso testing"}]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        homes.claude_desktop = directory
+            .path()
+            .join("Library")
+            .join("Application Support")
+            .join("Claude")
+            .join("claude-code-sessions");
+
+        let sessions = list_sessions(
+            &homes,
+            &ListFilter {
+                agent: Some(Agent::Claude),
+                include_archived: true,
+                limit: 0,
+                cwd: Some("/Users/jakebarnby/AndroidStudioProjects".into()),
+                ..ListFilter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(sessions.len(), 1, "{sessions:?}");
+        assert_eq!(sessions[0].session_id, project_id);
+        assert_eq!(sessions[0].profile.as_deref(), Some("work"));
+        assert_eq!(
+            sessions[0].cwd.as_deref(),
+            Some("/Users/jakebarnby/AndroidStudioProjects/SSHoo")
+        );
+        assert_eq!(sessions[0].branch.as_deref(), Some("instrumentation"));
+        assert_eq!(sessions[0].title.as_deref(), Some("look at android"));
+        assert!(!sessions[0].live);
+        assert_eq!(sessions[0].config_dir.as_deref(), Some(work.as_path()));
+
+        let resolved = resolve(&homes, &format!("claude:work:{project_id}")).unwrap();
+        assert_eq!(resolved.session_id, project_id);
+        assert_eq!(resolved.profile.as_deref(), Some("work"));
+        let transcript = read_transcript(&homes, &format!("claude:work:{project_id}"), 10).unwrap();
+        assert!(
+            transcript
+                .turns
+                .iter()
+                .any(|turn| turn.text.contains("look at android"))
+        );
+        assert!(
+            transcript
+                .turns
+                .iter()
+                .any(|turn| turn.text.contains("espresso testing"))
+        );
+        let digest =
+            crate::transcript::session_digest(&homes, &format!("claude:work:{project_id}"), 4)
+                .unwrap();
+        assert_eq!(digest.session.session_id, project_id);
+        assert!(digest.last_user_request.as_deref().is_some());
+        let files = files_touched(&homes, &format!("claude:work:{project_id}")).unwrap();
+        assert_eq!(files.session.session_id, project_id);
+
+        let encoded_only_id = "44444444-4444-4444-8444-444444444444";
+        let encoded_project = work.join("projects").join("-Users-jakebarnby-Local-sdkgen");
+        fs::create_dir_all(&encoded_project).unwrap();
+        fs::write(
+            encoded_project.join(format!("{encoded_only_id}.jsonl")),
+            "{\"type\":\"user\",\"message\":{\"content\":\"empty cwd\"}}\n",
+        )
+        .unwrap();
+        let encoded = list_sessions(
+            &homes,
+            &ListFilter {
+                agent: Some(Agent::Claude),
+                include_archived: true,
+                limit: 0,
+                cwd: Some("/Users/jakebarnby/Local/sdkgen".into()),
+                ..ListFilter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(encoded.len(), 1, "{encoded:?}");
+        assert_eq!(
+            encoded[0].cwd.as_deref(),
+            Some("/Users/jakebarnby/Local/sdkgen")
+        );
+
+        let hits =
+            search_transcripts(&homes, "android testing", Some(Agent::Claude), true, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session.session_id, project_id);
+        assert!(hits[0].snippet.to_ascii_lowercase().contains("android"));
     }
 }

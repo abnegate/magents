@@ -162,17 +162,27 @@ pub fn search_transcripts(
         return Err(Error::msg("query is required"));
     }
     let needle = query.to_ascii_lowercase();
-    let sessions = list_sessions(
+    let tokens: Vec<&str> = needle.split_whitespace().collect();
+    let mut sessions = list_sessions(
         homes,
         &ListFilter {
             agent,
             query: None,
             live_only: false,
             include_archived,
-            limit: 120,
+            limit: 0,
             ..ListFilter::default()
         },
     )?;
+    sessions.sort_by_key(|session| {
+        let haystack = session.haystack();
+        std::cmp::Reverse(
+            tokens
+                .iter()
+                .filter(|token| haystack.contains(*token))
+                .count(),
+        )
+    });
     let mut hits = Vec::new();
     for session in sessions {
         let Some(path) = session.transcript_path.as_deref() else {
@@ -180,12 +190,12 @@ pub fn search_transcripts(
         };
         let hit = if path.extension().and_then(|ext| ext.to_str()) == Some("db") {
             match session.agent {
-                Agent::OpenCode => scan_opencode_db(path, &session.session_id, &needle),
+                Agent::OpenCode => scan_opencode_db(path, &session.session_id, &tokens),
                 Agent::Agy if agy_summaries_db(path) => {
-                    scan_agy_fts(path, &session.session_id, &needle)
+                    scan_agy_fts(path, &session.session_id, &tokens)
                 }
-                Agent::Agy => scan_agy_db(path, &needle),
-                _ => scan_file(path, &needle),
+                Agent::Agy => scan_agy_db(path, &tokens),
+                _ => scan_file_tokens(path, &tokens),
             }
         } else if session.agent == Agent::Agy
             && path.extension().and_then(|ext| ext.to_str()) == Some("pb")
@@ -193,10 +203,10 @@ pub fn search_transcripts(
             scan_agy_fts(
                 &agy_summaries_path_for_transcript(path),
                 &session.session_id,
-                &needle,
+                &tokens,
             )
         } else {
-            scan_file(path, &needle)
+            scan_file_tokens(path, &tokens)
         };
         if let Some((matches, snippet)) = hit {
             hits.push(SearchHit {
@@ -531,13 +541,12 @@ fn read_opencode_json_tree(path: &Path, session_id: &str) -> Result<Vec<Turn>> {
     Ok(turns)
 }
 
-fn scan_opencode_db(path: &Path, session_id: &str, needle: &str) -> Option<(usize, String)> {
+fn scan_opencode_db(path: &Path, session_id: &str, tokens: &[&str]) -> Option<(usize, String)> {
     let connection =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .ok()?;
     let tables = opencode_tables(&connection).ok()?;
-    let mut matches = 0usize;
-    let mut snippet = None;
+    let mut rows = Vec::new();
     for source in [OPENCODE_MESSAGES, OPENCODE_LEGACY_PARTS] {
         if !tables.iter().any(|table| table == source) {
             continue;
@@ -545,21 +554,14 @@ fn scan_opencode_db(path: &Path, session_id: &str, needle: &str) -> Option<(usiz
         let mut statement = connection
             .prepare(&format!("SELECT data FROM {source} WHERE session_id = ?1"))
             .ok()?;
-        let rows = statement
-            .query_map([session_id], |row| row.get::<_, String>(0))
-            .ok()?;
-        for row in rows.flatten() {
-            let lowered = row.to_ascii_lowercase();
-            if !lowered.contains(needle) {
-                continue;
-            }
-            matches += 1;
-            if snippet.is_none() {
-                snippet = Some(extract_snippet(&row, needle));
-            }
-        }
+        rows.extend(
+            statement
+                .query_map([session_id], |row| row.get::<_, String>(0))
+                .ok()?
+                .flatten(),
+        );
     }
-    snippet.map(|snippet| (matches, snippet))
+    scan_texts_tokens(rows.iter().map(String::as_str), tokens)
 }
 
 fn unwrap_cursor_user(text: &str) -> String {
@@ -743,28 +745,16 @@ fn read_agy_fts(path: &Path, session_id: &str) -> Vec<Turn> {
     turns
 }
 
-fn scan_agy_db(path: &Path, needle: &str) -> Option<(usize, String)> {
-    scan_agy_turns(read_agy_sqlite(path).ok()?, needle)
+fn scan_agy_db(path: &Path, tokens: &[&str]) -> Option<(usize, String)> {
+    scan_agy_turns(read_agy_sqlite(path).ok()?, tokens)
 }
 
-fn scan_agy_fts(path: &Path, session_id: &str, needle: &str) -> Option<(usize, String)> {
-    scan_agy_turns(read_agy_fts(path, session_id), needle)
+fn scan_agy_fts(path: &Path, session_id: &str, tokens: &[&str]) -> Option<(usize, String)> {
+    scan_agy_turns(read_agy_fts(path, session_id), tokens)
 }
 
-fn scan_agy_turns(turns: Vec<Turn>, needle: &str) -> Option<(usize, String)> {
-    let mut matches = 0usize;
-    let mut snippet = None;
-    for turn in turns {
-        let lowered = turn.text.to_ascii_lowercase();
-        if !lowered.contains(needle) {
-            continue;
-        }
-        matches += 1;
-        if snippet.is_none() {
-            snippet = Some(extract_snippet(&turn.text, needle));
-        }
-    }
-    snippet.map(|snippet| (matches, snippet))
+fn scan_agy_turns(turns: Vec<Turn>, tokens: &[&str]) -> Option<(usize, String)> {
+    scan_texts_tokens(turns.iter().map(|turn| turn.text.as_str()), tokens)
 }
 
 fn agy_role(kind: &str) -> Option<&'static str> {
@@ -1247,23 +1237,57 @@ fn content_parts(content: Option<&Value>) -> (String, Vec<String>) {
 }
 
 pub(crate) fn scan_file(path: &Path, needle: &str) -> Option<(usize, String)> {
+    scan_file_tokens(path, &[needle])
+}
+
+fn scan_file_tokens(path: &Path, tokens: &[&str]) -> Option<(usize, String)> {
     let file = File::open(path).ok()?;
+    scan_texts_tokens(
+        BufReader::new(file)
+            .lines()
+            .map_while(std::result::Result::ok),
+        tokens,
+    )
+}
+
+fn scan_texts_tokens<S: AsRef<str>>(
+    texts: impl IntoIterator<Item = S>,
+    tokens: &[&str],
+) -> Option<(usize, String)> {
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut found = vec![false; tokens.len()];
     let mut matches = 0usize;
     let mut snippet = None;
-    for line in BufReader::new(file)
-        .lines()
-        .map_while(std::result::Result::ok)
-    {
-        let lowered = line.to_ascii_lowercase();
-        if !lowered.contains(needle) {
+    for text in texts {
+        let text = text.as_ref();
+        let lowered = text.to_ascii_lowercase();
+        let mut hit = false;
+        for (index, token) in tokens.iter().enumerate() {
+            if lowered.contains(*token) {
+                found[index] = true;
+                hit = true;
+            }
+        }
+        if !hit {
             continue;
         }
         matches += 1;
-        if snippet.is_none() {
-            snippet = Some(extract_snippet(&line, needle));
+        if snippet.is_none()
+            && let Some(token) = tokens
+                .iter()
+                .copied()
+                .find(|token| lowered.contains(*token))
+        {
+            snippet = Some(extract_snippet(text, token));
         }
     }
-    snippet.map(|snippet| (matches, snippet))
+    if found.iter().all(|ok| *ok) {
+        snippet.map(|snippet| (matches, snippet))
+    } else {
+        None
+    }
 }
 
 pub(crate) fn extract_snippet(line: &str, needle: &str) -> String {
@@ -1626,10 +1650,10 @@ mod tests {
         let empty = dir.path().join("empty.db");
         rusqlite::Connection::open(&empty).unwrap();
         assert!(super::read_agy(&empty).unwrap().is_empty());
-        let hit = super::scan_agy_db(&db, "sqlite json").unwrap();
+        let hit = super::scan_agy_db(&db, &["sqlite json"]).unwrap();
         assert!(hit.0 >= 1);
         assert!(hit.1.to_ascii_lowercase().contains("sqlite json"));
-        assert!(super::scan_agy_db(&db, "no-such-agy-phrase").is_none());
+        assert!(super::scan_agy_db(&db, &["no-such-agy-phrase"]).is_none());
 
         let integer = dir.path().join("integer.db");
         let connection = rusqlite::Connection::open(&integer).unwrap();
@@ -1748,9 +1772,9 @@ mod tests {
         assert!(turns[1].text.contains("gradle"));
         let from_db = super::read_agy_with_id(&db, id).unwrap();
         assert_eq!(from_db.len(), 2);
-        let hit = super::scan_agy_fts(&db, id, "gradle").unwrap();
+        let hit = super::scan_agy_fts(&db, id, &["gradle"]).unwrap();
         assert!(hit.0 >= 1);
-        assert!(super::scan_agy_fts(&db, id, "no-such-agy-desktop").is_none());
+        assert!(super::scan_agy_fts(&db, id, &["no-such-agy-desktop"]).is_none());
         assert!(
             super::read_agy(&root.join("conversations/missing.pb"))
                 .unwrap()

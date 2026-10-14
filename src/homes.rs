@@ -321,7 +321,7 @@ fn claude_cli_dirs(homes: &Homes) -> Vec<PathBuf> {
             if name != ".claude" && !name.starts_with(".claude-") {
                 continue;
             }
-            if name == ".claude-" {
+            if name == ".claude-" || name.eq_ignore_ascii_case(".claude-backup") {
                 continue;
             }
             if path_key(&path) == path_key(&homes.claude) || looks_like_claude_home(&path) {
@@ -708,6 +708,8 @@ mod tests {
         fs::create_dir_all(&junk).unwrap();
         fs::create_dir_all(root.join(".claude-")).unwrap();
         fs::write(root.join(".claude-notes"), "skip").unwrap();
+        let backup = root.join(".claude-backup");
+        fs::create_dir_all(backup.join("projects")).unwrap();
         let settings_only = root.join(".claude-settings");
         fs::create_dir_all(&settings_only).unwrap();
         fs::write(settings_only.join("settings.json"), "{}\n").unwrap();
@@ -720,6 +722,7 @@ mod tests {
         assert!(names.contains(&Some("work".into())), "{names:?}");
         assert!(names.contains(&Some("settings".into())), "{names:?}");
         assert!(!names.contains(&Some("junk".into())), "{names:?}");
+        assert!(!names.contains(&Some("backup".into())), "{names:?}");
         assert_eq!(homes.claude_config_dir(Some("WORK")), work);
 
         let home = tempfile::tempdir().unwrap();
