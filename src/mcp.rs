@@ -10,7 +10,7 @@ use crate::spawn;
 use crate::transcript::{files_touched, read_transcript, search_transcripts, session_digest};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, ContentBlock, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+    CallToolResult, ContentBlock, Implementation, ProtocolVersion, ServerCapabilities, ServerConfig,
 };
 use rmcp::{ErrorData as McpError, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::Deserialize;
@@ -670,8 +670,8 @@ impl Magents {
 
 #[tool_handler]
 impl ServerHandler for Magents {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .build(),
