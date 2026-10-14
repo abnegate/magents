@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Commit the baked Cargo.toml / Cargo.lock bump to the default branch when
-# RELEASE_SHA is still that branch's tip.
+# Commit the baked product-version bump to the default branch when RELEASE_SHA
+# is still that branch's tip. Keep this file list in sync with
+# set-release-version.sh and tests/release_version.rs.
 # Usage: commit-release-version.sh
 # Required env: VERSION, DEFAULT_BRANCH, RELEASE_SHA
 set -euo pipefail
@@ -9,8 +10,19 @@ set -euo pipefail
 : "${DEFAULT_BRANCH:?set DEFAULT_BRANCH}"
 : "${RELEASE_SHA:?set RELEASE_SHA}"
 
-if git diff --quiet -- Cargo.toml Cargo.lock; then
-  echo "package.version already ${VERSION}"
+files=(
+  Cargo.toml
+  Cargo.lock
+  gemini-extension.json
+  server.json
+  plugins/claude/.claude-plugin/plugin.json
+  plugins/codex/.codex-plugin/plugin.json
+  plugins/cursor/.cursor-plugin/plugin.json
+  .cursor-plugin/marketplace.json
+)
+
+if git diff --quiet -- "${files[@]}"; then
+  echo "product versions already ${VERSION}"
   exit 0
 fi
 
@@ -24,6 +36,6 @@ fi
 git config user.name "github-actions[bot]"
 git config user.email "github-actions[bot]@users.noreply.github.com"
 git switch -C "${DEFAULT_BRANCH}"
-git add Cargo.toml Cargo.lock
-git commit -m "(chore): set package.version to ${VERSION}"
+git add -- "${files[@]}"
+git commit -m "(chore): set product versions to ${VERSION}"
 git push origin "HEAD:${DEFAULT_BRANCH}"
