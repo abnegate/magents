@@ -2,6 +2,10 @@
   <img src="docs/assets/hero.svg" alt="magents shared session bus across Claude, Codex, Grok, and Cursor" width="100%" />
 </p>
 
+<p align="center">
+  <a href="https://hol.org/registry/plugins/abnegate%2Fmagents"><img alt="HOL Trust" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fhol.org%2Fapi%2Fregistry%2Fbadges%2Fplugin%3Fslug%3Dabnegate%252Fmagents%26metric%3Dtrust%26style%3Dflat"></a>
+</p>
+
 Claude Code, Codex, Copilot, Cursor, Gemini, AGY, Grok, and OpenCode already keep
 transcripts on disk. **magents** is the shared API over those sessions - an MCP
 server plus a small CLI - so one agent can pick up where another left off
@@ -111,7 +115,7 @@ folder under [`plugins/`](plugins/).
 | Codex | [`plugins/codex`](plugins/codex) |
 | Cursor | [`plugins/cursor`](plugins/cursor) |
 | Gemini CLI | repo root ([`gemini-extension.json`](gemini-extension.json)) |
-| AGY CLI / Antigravity | [`plugins/agy`](plugins/agy) and repo root (`plugin.json`, `mcp_config.json`) |
+| AGY CLI / Antigravity | [`plugins/agy`](plugins/agy) |
 
 Gemini CLI installs the extension straight from this repository:
 
@@ -119,10 +123,10 @@ Gemini CLI installs the extension straight from this repository:
 gemini extensions install https://github.com/abnegate/magents
 ```
 
-AGY CLI installs the plugin from this repository:
+AGY CLI installs the plugin from [`plugins/agy`](plugins/agy) (manifest, MCP, and skills):
 
 ```bash
-agy plugin install https://github.com/abnegate/magents
+agy plugin install https://github.com/abnegate/magents/plugins/agy
 ```
 
 Details and marketplace notes: [`plugins/README.md`](plugins/README.md).
@@ -261,7 +265,7 @@ and otherwise starts a supervised headless resume:
 | Codex Desktop / VS Code | Length-prefixed JSON-RPC on `~/.codex/ipc/ipc.sock`, then supervised `codex exec ... resume` |
 | Codex CLI | Supervised `codex exec --json -C <cwd> resume <id> -` |
 | Cursor | Supervised `cursor-agent -p --output-format stream-json --resume <id> --workspace <cwd>` |
-| OpenCode | Supervised `opencode run --format json --dir <cwd> --session <id>` |
+| OpenCode | Supervised `opencode run --format json --session <id>`, started in the session `cwd` (with `PWD` set) |
 | Gemini CLI | Supervised `gemini --resume <id> --output-format stream-json` |
 | AGY CLI / Antigravity | Supervised `agy --input-format stream-json --output-format stream-json --conversation <id>` |
 | GitHub Copilot CLI | Supervised `copilot --resume=<id> --output-format json` |
@@ -272,9 +276,10 @@ bypasses (`--dangerously-skip-permissions`, `--yolo`, `--full-auto`, etc.).
 
 Session discovery sources: Claude `~/.claude` and `~/.claude-*` (plus Desktop
 `Claude` / `Claude-*` session dirs), Grok `~/.grok/active_sessions.json`, Codex
-sqlite + rollout JSONL, Cursor `agent-transcripts`, OpenCode DB, Gemini
-journals, AGY CLI `conversations` / `brain` plus Antigravity desktop
-`conversation_summaries`, Copilot `session-state`.
+sqlite + rollout JSONL, Cursor `agent-transcripts`, OpenCode SQLite
+(`opencode.db` and channel databases, v1 `session` and v2 `session_v2` /
+`session_message` tables), Gemini journals, AGY CLI `conversations` / `brain`
+plus Antigravity desktop `conversation_summaries`, Copilot `session-state`.
 Claude sessions include a `profile` field when they come from a named home
 (`work` for `~/.claude-work`). Resume and live inject use that home's
 `CLAUDE_CONFIG_DIR`.

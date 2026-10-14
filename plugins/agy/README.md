@@ -13,10 +13,10 @@ brew install abnegate/tap/magents
 
 ## Install
 
-From GitHub (uses the repo-root `plugin.json` and `mcp_config.json`):
+From GitHub (this folder: `plugin.json`, `mcp_config.json`, and `skills/`):
 
 ```bash
-agy plugin install https://github.com/abnegate/magents
+agy plugin install https://github.com/abnegate/magents/plugins/agy
 ```
 
 Or load this folder:
