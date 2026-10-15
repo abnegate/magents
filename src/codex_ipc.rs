@@ -61,7 +61,7 @@ pub fn send_user_turn(socket: &Path, conversation_id: &str, message: &str) -> Re
             "turnStart": {
                 "request": {
                     "threadId": conversation_id,
-                    "input": [{ "type": "text", "text": message }],
+                    "input": [{ "type": "text", "text": message, "text_elements": [] }],
                 },
                 "context": { "inheritThreadSettings": true },
             }
@@ -217,6 +217,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
+    use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
@@ -287,7 +288,8 @@ mod tests {
     #[test]
     fn send_user_turn_speaks_initialize_and_start_turn() {
         let (_dir, socket) = temp_socket();
-        serve(socket.clone(), |request| {
+        let (sender, receiver) = mpsc::channel();
+        serve(socket.clone(), move |request| {
             let id = echo_id(request);
             match request["method"].as_str() {
                 Some("initialize") => vec![
@@ -308,15 +310,24 @@ mod tests {
                         "result": { "clientId": "client-99" }
                     }),
                 ],
-                Some("thread-follower-start-turn") => vec![json!({
-                    "type": "response",
-                    "requestId": id,
-                    "result": { "turn": { "status": "in_progress" } }
-                })],
+                Some("thread-follower-start-turn") => {
+                    sender.send(request["params"].clone()).unwrap();
+                    vec![json!({
+                        "type": "response",
+                        "requestId": id,
+                        "result": { "turn": { "status": "in_progress" } }
+                    })]
+                }
                 _ => Vec::new(),
             }
         });
         send_user_turn(&socket, "thread-1", "hello from magents").unwrap();
+        let params = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            params["turnStart"]["request"]["input"],
+            json!([{ "type": "text", "text": "hello from magents", "text_elements": [] }]),
+            "Codex Desktop's renderer requires text_elements on every text input"
+        );
     }
 
     #[test]
