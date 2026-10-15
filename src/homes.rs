@@ -321,7 +321,7 @@ fn claude_cli_dirs(homes: &Homes) -> Vec<PathBuf> {
             if name != ".claude" && !name.starts_with(".claude-") {
                 continue;
             }
-            if name == ".claude-" || name.eq_ignore_ascii_case(".claude-backup") {
+            if name == ".claude-" {
                 continue;
             }
             if path_key(&path) == path_key(&homes.claude) || looks_like_claude_home(&path) {
@@ -722,7 +722,7 @@ mod tests {
         assert!(names.contains(&Some("work".into())), "{names:?}");
         assert!(names.contains(&Some("settings".into())), "{names:?}");
         assert!(!names.contains(&Some("junk".into())), "{names:?}");
-        assert!(!names.contains(&Some("backup".into())), "{names:?}");
+        assert!(names.contains(&Some("backup".into())), "{names:?}");
         assert_eq!(homes.claude_config_dir(Some("WORK")), work);
 
         let home = tempfile::tempdir().unwrap();
@@ -798,6 +798,38 @@ mod tests {
         assert_eq!(
             default_profile.desktop_sessions.as_deref(),
             Some(desktop.as_path())
+        );
+    }
+
+    #[test]
+    fn claude_backup_home_is_an_ordinary_profile() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let default = home.join(".claude");
+        fs::create_dir_all(default.join("sessions")).unwrap();
+        let backup = home.join(".claude-backup");
+        fs::create_dir_all(backup.join("sessions")).unwrap();
+        let app = home.join("Library").join("Application Support");
+        let desktop = app.join("Claude").join("claude-code-sessions");
+        fs::create_dir_all(&desktop).unwrap();
+        let backup_desktop = app.join("Claude-Backup").join("claude-code-sessions");
+        fs::create_dir_all(&backup_desktop).unwrap();
+        let mut homes = Homes::isolated(home);
+        homes.claude = default;
+        homes.claude_desktop = desktop;
+        let profiles = homes.claude_profiles();
+        let profile = profiles
+            .iter()
+            .find(|profile| profile.name.as_deref() == Some("backup"))
+            .unwrap();
+        assert_eq!(
+            profile.config_dir.as_deref(),
+            Some(backup.as_path()),
+            "live Claude-Backup desktop sessions register under ~/.claude-backup/sessions"
+        );
+        assert_eq!(
+            profile.desktop_sessions.as_deref(),
+            Some(backup_desktop.as_path())
         );
     }
 
