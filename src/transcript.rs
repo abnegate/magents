@@ -1293,8 +1293,8 @@ fn scan_texts_tokens<S: AsRef<str>>(
 pub(crate) fn extract_snippet(line: &str, needle: &str) -> String {
     let lowered = line.to_ascii_lowercase();
     let index = lowered.find(needle).unwrap_or(0);
-    let start = index.saturating_sub(160);
-    let end = (index + needle.len() + 160).min(line.len());
+    let start = line.floor_char_boundary(index.saturating_sub(160));
+    let end = line.ceil_char_boundary(index + needle.len() + 160);
     let mut snippet = line[start..end].replace('\n', " ");
     if start > 0 {
         snippet.insert_str(0, "...");
@@ -1379,6 +1379,15 @@ mod tests {
         let snippet = super::extract_snippet(&line, "needle");
         assert!(snippet.starts_with("..."));
         assert!(snippet.ends_with("..."));
+    }
+
+    #[test]
+    fn snippets_cut_on_char_boundaries() {
+        let line = format!("{}跨赴{}", "建".repeat(100), "建".repeat(100));
+        let snippet = super::extract_snippet(&line, "跨赴");
+        assert!(snippet.contains("跨赴"));
+        assert!(snippet.starts_with("...建"));
+        assert!(snippet.ends_with("建..."));
     }
 
     #[test]
